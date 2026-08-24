@@ -19,27 +19,31 @@ final class GlobalHotKey: ObservableObject {
 
     init() {
 #if DEBUG
-        assert(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text == "привет")
-        assert(LayoutCorrectionEngine.correction(for: "руддщ")?.text == "hello")
-        assert(LayoutCorrectionEngine.correction(for: "hello") == nil)
-        assert(LayoutCorrectionEngine.correction(for: "привет") == nil)
-        // Chechen words stay Cyrillic; EN-typed Chechen becomes Cyrillic
-        assert(LayoutCorrectionEngine.correction(for: "хьо") == nil)
-        assert(LayoutCorrectionEngine.correction(for: "къонах") == nil)
-        assert(LayoutCorrectionEngine.correction(for: "[mj")?.text == "хьо")
-        assert(LayoutCorrectionEngine.correction(for: "1алам")?.text == "Ӏалам")
-        // Auto-capitalized first word of a sentence
-        assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
+        // The layout tables come from the system, so these only hold when the
+        // user actually has a Russian keyboard layout installed.
         assert(TextInsertion.matchingCase(of: "Ghbdtn ", applyingTo: "привет ") == "Привет ")
         assert(TextInsertion.matchingCase(of: "ghbdtn ", applyingTo: "привет ") == "привет ")
-        // б and ю live on the , and . keys; Shift gives Х Ъ Ж Э Б Ю
-        assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
-        assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
-        assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
-        // Trailing punctuation is punctuation, not a letter
-        assert(LayoutCorrectionEngine.correction(for: "ghbdtn,")?.text == "привет,")
-        assert(LayoutCorrectionEngine.correction(for: "hello,") == nil)
-        assert(LayoutCorrectionEngine.correction(for: "привет,") == nil)
+        if LayoutCorrectionEngine.isAvailable {
+            assert(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text == "привет")
+            assert(LayoutCorrectionEngine.correction(for: "руддщ")?.text == "hello")
+            assert(LayoutCorrectionEngine.correction(for: "hello") == nil)
+            assert(LayoutCorrectionEngine.correction(for: "привет") == nil)
+            // Chechen words stay Cyrillic; EN-typed Chechen becomes Cyrillic
+            assert(LayoutCorrectionEngine.correction(for: "хьо") == nil)
+            assert(LayoutCorrectionEngine.correction(for: "къонах") == nil)
+            assert(LayoutCorrectionEngine.correction(for: "[mj")?.text == "хьо")
+            assert(LayoutCorrectionEngine.correction(for: "1алам")?.text == "Ӏалам")
+            // Auto-capitalized first word of a sentence
+            assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
+            // б and ю live on the , and . keys; Shift gives Х Ъ Ж Э Б Ю
+            assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
+            assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
+            assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
+            // Trailing punctuation is punctuation, not a letter
+            assert(LayoutCorrectionEngine.correction(for: "ghbdtn,")?.text == "привет,")
+            assert(LayoutCorrectionEngine.correction(for: "hello,") == nil)
+            assert(LayoutCorrectionEngine.correction(for: "привет,") == nil)
+        }
 #endif
         let monitor = WordMonitor { [weak self] word, delimiter in
             self?.finishWord(word, delimiter: delimiter)

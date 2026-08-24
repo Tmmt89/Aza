@@ -59,10 +59,9 @@ final class WordMonitor {
             return
         }
 
-        // ponytail: , . map to б/ю but stay delimiters, and shifted keys ({ } : ")
-        // break the word — words needing those won't correct; revisit in Stage 5.
+        let wordPunctuation = KeyboardLayoutMap.wordPunctuation()
         for character in characters {
-            if character.isLetter || LayoutCorrectionEngine.wordPunctuation.contains(character) {
+            if character.isLetter || wordPunctuation.contains(character) {
                 currentWord.append(character)
             } else {
                 if !currentWord.isEmpty {

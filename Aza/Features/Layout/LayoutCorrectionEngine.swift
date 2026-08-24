@@ -1,45 +1,6 @@
 import AppKit
 
 enum LayoutCorrectionEngine {
-    /// Letter keys: QWERTY → ЙЦУКЕН. Uppercase pairs are derived from these.
-    private static let letterKeys: [Character: Character] = [
-        "q": "й", "w": "ц", "e": "у", "r": "к", "t": "е", "y": "н",
-        "u": "г", "i": "ш", "o": "щ", "p": "з",
-        "a": "ф", "s": "ы", "d": "в", "f": "а", "g": "п", "h": "р",
-        "j": "о", "k": "л", "l": "д",
-        "z": "я", "x": "ч", "c": "с", "v": "м", "b": "и", "n": "т", "m": "ь",
-    ]
-
-    /// Punctuation keys that carry Cyrillic letters — б and ю live on the comma
-    /// and period keys, so those characters are part of a word, not delimiters.
-    private static let punctuationKeys: [Character: Character] = [
-        "[": "х", "]": "ъ", ";": "ж", "'": "э", ",": "б", ".": "ю", "`": "ё",
-    ]
-
-    /// The same keys with Shift held, which is how Х Ъ Ж Э Б Ю Ё are typed.
-    private static let shiftedPunctuationKeys: [Character: Character] = [
-        "{": "Х", "}": "Ъ", ":": "Ж", "\"": "Э", "<": "Б", ">": "Ю", "~": "Ё",
-    ]
-
-    static let qwertyToRussian: [Character: Character] = {
-        var table: [Character: Character] = [:]
-        for (key, value) in letterKeys {
-            table[key] = value
-            table[Character(key.uppercased())] = Character(value.uppercased())
-        }
-        table.merge(punctuationKeys) { current, _ in current }
-        table.merge(shiftedPunctuationKeys) { current, _ in current }
-        return table
-    }()
-
-    static let russianToQwerty: [Character: Character] = {
-        var table: [Character: Character] = [:]
-        for (key, value) in qwertyToRussian {
-            table[value] = key
-        }
-        return table
-    }()
-
     /// Chechen orthography markers: a Cyrillic word containing one of these is
     /// treated as Chechen — never remapped to Latin, and accepted as a valid
     /// correction target even though it fails the Russian spellchecker.
@@ -52,13 +13,9 @@ enum LayoutCorrectionEngine {
     /// letters б/ю, so a word ending in them is retried without them.
     private static let trailingPunctuation: Set<Character> = [",", "."]
 
-    /// Non-letter characters that still belong to a word being typed.
-    static let wordPunctuation: Set<Character> = {
-        var set = Set(punctuationKeys.keys)
-        set.formUnion(shiftedPunctuationKeys.keys)
-        set.insert("1") // palochka look-alike
-        return set
-    }()
+    /// True once the system has the layouts needed to correct anything.
+    @MainActor
+    static var isAvailable: Bool { KeyboardLayoutMap.table(from: "en", to: "ru") != nil }
 
     /// Pure remap between layouts. Returns nil if any character has no mapping.
     static func remapped(_ word: String, table: [Character: Character]) -> String? {
@@ -112,7 +69,8 @@ enum LayoutCorrectionEngine {
             return (normalized, nil)
         }
 
-        if let russian = remapped(word, table: qwertyToRussian) {
+        if let table = KeyboardLayoutMap.table(from: "en", to: "ru"),
+           let russian = remapped(word, table: table) {
             guard word.count >= 3,
                   !isValidWord(word, language: "en"),
                   isValidWord(russian, language: "ru") || looksChechen(russian) else { return nil }
@@ -123,7 +81,8 @@ enum LayoutCorrectionEngine {
         // never be "fixed" into Latin the way Punto-style switchers do.
         guard !looksChechen(word) else { return nil }
 
-        if let latin = remapped(word, table: russianToQwerty) {
+        if let table = KeyboardLayoutMap.table(from: "ru", to: "en"),
+           let latin = remapped(word, table: table) {
             guard word.count >= 3,
                   !isValidWord(word, language: "ru"),
                   isValidWord(latin, language: "en") else { return nil }
