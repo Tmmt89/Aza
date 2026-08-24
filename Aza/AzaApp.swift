@@ -1,17 +1,13 @@
-//
-//  AzaApp.swift
-//  Aza
-//
-//  Created by tmmt on 24.08.2026.
-//
-
 import SwiftUI
 
 @main
 struct AzaApp: App {
+    @StateObject private var hotKey = GlobalHotKey()
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra("Aza", systemImage: "waveform") {
+            ContentView(hotKey: hotKey)
         }
+        .menuBarExtraStyle(.window)
     }
 }
