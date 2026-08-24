@@ -19,10 +19,15 @@ final class GlobalHotKey: ObservableObject {
 
     init() {
 #if DEBUG
-        assert(LayoutCorrectionEngine.remapped("ghbdtn") == "привет")
-        assert(LayoutCorrectionEngine.correction(for: "ghbdtn") == "привет")
+        assert(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text == "привет")
+        assert(LayoutCorrectionEngine.correction(for: "руддщ")?.text == "hello")
         assert(LayoutCorrectionEngine.correction(for: "hello") == nil)
         assert(LayoutCorrectionEngine.correction(for: "привет") == nil)
+        // Chechen words stay Cyrillic; EN-typed Chechen becomes Cyrillic
+        assert(LayoutCorrectionEngine.correction(for: "хьо") == nil)
+        assert(LayoutCorrectionEngine.correction(for: "къонах") == nil)
+        assert(LayoutCorrectionEngine.correction(for: "[mj")?.text == "хьо")
+        assert(LayoutCorrectionEngine.correction(for: "1алам")?.text == "Ӏалам")
 #endif
         let monitor = WordMonitor { [weak self] word, delimiter in
             self?.finishWord(word, delimiter: delimiter)
@@ -83,7 +88,7 @@ final class GlobalHotKey: ObservableObject {
     }
 
     private func finishWord(_ word: String, delimiter: String) {
-        guard let corrected = LayoutCorrectionEngine.correction(for: word) else { return }
+        guard let correction = LayoutCorrectionEngine.correction(for: word) else { return }
 
         guard let element = TextInsertion.focusedElement(),
               SecureFieldDetector.isTextInput(element),
@@ -100,15 +105,19 @@ final class GlobalHotKey: ObservableObject {
             guard TextInsertion.replaceTypedText(
                 in: element,
                 expecting: word + delimiter,
-                with: corrected + delimiter
+                with: correction.text + delimiter
             ) else {
                 self.correctionStatus = "Не удалось заменить слово"
                 return
             }
             self.correctionCount += 1
-            self.correctionStatus = self.selectInputSource(language: "ru")
-                ? "\(word) → \(corrected); раскладка: RU"
-                : "Слово исправлено, русская раскладка не найдена"
+            if let language = correction.inputLanguage {
+                self.correctionStatus = self.selectInputSource(language: language)
+                    ? "\(word) → \(correction.text); раскладка: \(language.uppercased())"
+                    : "\(word) → \(correction.text); раскладка \(language.uppercased()) не найдена"
+            } else {
+                self.correctionStatus = "\(word) → \(correction.text)"
+            }
         }
     }
 
