@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120">
+  <defs>
+    <style>
+      .title{font:700 36px/43px -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;fill:#1D1D1F;letter-spacing:-.7px}
+      .section{font:600 13px/18px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;fill:#636366;letter-spacing:.2px}
+      .label{font:600 10px/13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;fill:#A1A1A6;letter-spacing:.25px}
+      .body{font:600 14px/17px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;fill:#F5F5F7;letter-spacing:-.1px}
+      .small{font:500 10px/13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;fill:#A1A1A6}
+      .time{font:700 38px/42px -apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;fill:#46D77C;letter-spacing:-1px}
+      .mono{font:700 14px/17px ui-monospace,"SF Mono",monospace;fill:#46D77C;letter-spacing:-.3px}
+      .cardTitle{font:600 10px/13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;fill:#0A84FF;letter-spacing:.15px}
+      .cardBody{font:500 13px/17px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;fill:#F5F5F7;letter-spacing:-.1px}
+    </style>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000" flood-opacity=".22"/>
+    </filter>
+    <!-- Lucide icons: 24px outline set, scaled with <use>. -->
+    <symbol id="lucide-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+    </symbol>
+    <symbol id="lucide-map-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 10c0 5-5.5 11-8 12-2.5-1-8-7-8-12a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="3"/>
+    </symbol>
+    <symbol id="lucide-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+    </symbol>
+    <symbol id="lucide-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/>
+    </symbol>
+    <symbol id="lucide-clipboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="14" height="18" x="5" y="4" rx="2"/><path d="M9 4.5A2.5 2.5 0 0 1 11.5 2h1A2.5 2.5 0 0 1 15 4.5V6H9Z"/>
+    </symbol>
+    <symbol id="lucide-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/>
+    </symbol>
+    <symbol id="lucide-audio-lines" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 10v3M6 6v11M10 3v18M14 8v7M18 5v13M22 10v3"/>
+    </symbol>
+    <symbol id="lucide-square" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+    <symbol id="lucide-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="lucide-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+    <symbol id="lucide-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01Z"/></symbol>
+    <symbol id="lucide-align-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 12H3M17 18H3M21 6H3"/></symbol>
+    <symbol id="lucide-external-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+    <symbol id="lucide-files" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3a2 2 0 0 1-2-2V2M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6l5 5v9a2 2 0 0 1-2 2Z"/><path d="M3 7v13a2 2 0 0 0 2 2h10"/></symbol>
+  </defs>
+
+  <rect width="1600" height="1120" fill="#F2F2F7"/>
+  <text x="80" y="64" class="title">Aza — current product states</text>
+  <text x="80" y="92" class="section">APPLE DESIGN PRINCIPLES · NATIVE MACOS · SF PRO + LUCIDE · 8-PT GRID</text>
+
+  <!-- Compact hover state -->
+  <text x="80" y="137" class="section">01 · HOVER — COMPACT PRAYER</text>
+  <rect x="80" y="154" width="1440" height="86" rx="22" fill="#FFFFFF"/>
+  <g transform="translate(590 174)" filter="url(#shadow)">
+    <rect width="420" height="46" rx="23" fill="#000"/>
+    <circle cx="25" cy="23" r="14" fill="#153A26" stroke="#2A6A43"/>
+    <use href="#lucide-sun" x="18" y="16" width="14" height="14" style="color:#72E8A0"/>
+    <text x="48" y="17" class="small">Следующий</text>
+    <text x="48" y="34" class="body">Аср</text>
+    <rect x="306" y="7" width="101" height="32" rx="16" fill="#2C2C2E" stroke="#3A3A3C"/>
+    <text x="392" y="20" class="mono" text-anchor="end">2ч 18м</text>
+    <text x="392" y="34" class="small" text-anchor="end">в 17:35</text>
+  </g>
+  <text x="1040" y="188" class="section">НАВЕДЕНИЕ → ПОКАЗАТЬ</text>
+  <text x="1040" y="211" class="section">КЛИК → РАСКРЫТЬ</text>
+
+  <!-- Expanded home -->
+  <text x="80" y="291" class="section">02 · CLICK — EXPANDED HOME</text>
+  <rect x="80" y="308" width="1440" height="300" rx="22" fill="#E5E5EA"/>
+  <g transform="translate(368 308)" filter="url(#shadow)">
+    <!-- Top edge overhangs the body; side transitions are concave -->
+    <path d="M0 0H864C838 0 822 16 822 42V196C822 215 807 230 788 230H76C57 230 42 215 42 196V42C42 16 26 0 0 0Z" fill="#000"/>
+    <use href="#lucide-sun" x="66" y="14" width="14" height="14" style="color:#72E8A0"/>
+    <text x="87" y="26" class="body" style="fill:#72E8A0">Аср</text>
+    <text x="798" y="26" class="mono" text-anchor="end">02:18:47</text>
+
+    <rect x="60" y="54" width="478" height="156" rx="24" fill="#1C1C1E" stroke="#38383A"/>
+    <text x="78" y="77" class="label">СЛЕДУЮЩИЙ НАМАЗ</text>
+    <text x="78" y="119" class="time">17:35</text>
+    <text x="184" y="118" class="small">Аср</text>
+    <g transform="translate(76 143)">
+      <g opacity=".48"><text x="31" y="14" class="small" text-anchor="middle">Фаджр</text><text x="31" y="32" class="body" text-anchor="middle">05:05</text></g>
+      <g opacity=".48"><text x="101" y="14" class="small" text-anchor="middle">Восход</text><text x="101" y="32" class="body" text-anchor="middle">06:15</text></g>
+      <g opacity=".48"><text x="171" y="14" class="small" text-anchor="middle">Зухр</text><text x="171" y="32" class="body" text-anchor="middle">13:25</text></g>
+      <rect x="207" y="-8" width="66" height="54" rx="12" fill="#153A26" stroke="#2A6A43"/>
+      <text x="240" y="14" class="small" text-anchor="middle" style="fill:#72E8A0">Аср</text><text x="240" y="33" class="body" text-anchor="middle" style="fill:#72E8A0">17:35</text>
+      <text x="310" y="14" class="small" text-anchor="middle">Магриб</text><text x="310" y="32" class="body" text-anchor="middle">20:45</text>
+      <text x="380" y="14" class="small" text-anchor="middle">Иша</text><text x="380" y="32" class="body" text-anchor="middle">22:10</text>
+    </g>
+
+    <rect x="550" y="54" width="254" height="156" rx="24" fill="#1C1C1E" stroke="#38383A"/>
+    <text x="568" y="77" class="label">МЕСТОПОЛОЖЕНИЕ</text>
+    <use href="#lucide-map-pin" x="568" y="88" width="16" height="16" style="color:#F5F5F5"/>
+    <text x="591" y="102" class="body">Казань</text>
+    <rect x="710" y="64" width="76" height="25" rx="13" fill="#2C2C2E" stroke="#3A3A3C"/>
+    <text x="748" y="81" class="small" text-anchor="middle" style="fill:#BF5AF2">ДУМ РТ</text>
+    <rect x="568" y="116" width="218" height="28" rx="14" fill="#0A84FF"/>
+    <use href="#lucide-copy" x="590" y="123" width="12" height="12" style="color:#FFF"/>
+    <text x="686" y="134" class="small" text-anchor="middle" style="fill:#FFF">Скопировать транскрипт</text>
+    <g transform="translate(568 156)">
+      <circle cx="28" cy="18" r="18" fill="#FF453A"/><use href="#lucide-mic" x="20" y="10" width="16" height="16" style="color:#FFF"/>
+      <circle cx="109" cy="18" r="18" fill="#0A84FF"/><use href="#lucide-clipboard" x="101" y="10" width="16" height="16" style="color:#FFF"/>
+      <circle cx="190" cy="18" r="18" fill="#3A3A3C"/><use href="#lucide-sliders" x="182" y="10" width="16" height="16" style="color:#FFF"/>
+      <text x="28" y="47" class="small" text-anchor="middle">Диктовка</text><text x="109" y="47" class="small" text-anchor="middle">Буфер</text><text x="190" y="47" class="small" text-anchor="middle">Настройки</text>
+    </g>
+  </g>
+  <text x="1255" y="345" class="section">ВНЕШНИЙ КЛИК</text>
+  <text x="1255" y="368" class="section">→ СКРЫТЬ ЦЕЛИКОМ</text>
+
+  <!-- Dictation -->
+  <text x="80" y="655" class="section">03 · DICTATION — ACTIVE</text>
+  <rect x="80" y="672" width="1440" height="92" rx="22" fill="#FFFFFF"/>
+  <g transform="translate(560 699)" filter="url(#shadow)">
+    <rect width="480" height="38" rx="19" fill="#000"/>
+    <circle cx="24" cy="19" r="4" fill="#FF453A"/>
+    <use href="#lucide-audio-lines" x="38" y="8" width="22" height="22" style="color:#FF453A"/>
+    <text x="382" y="24" class="small" text-anchor="end">RU</text><text x="430" y="24" class="body" text-anchor="end">00:14</text>
+    <circle cx="457" cy="19" r="14" fill="#FF453A"/><use href="#lucide-square" x="451" y="13" width="12" height="12" style="color:#FFF"/>
+  </g>
+
+  <!-- Clipboard -->
+  <text x="80" y="812" class="section">04 · CLIPBOARD — HISTORY</text>
+  <rect x="80" y="829" width="1440" height="250" rx="22" fill="#E5E5EA"/>
+  <g transform="translate(348 829)" filter="url(#shadow)">
+    <path d="M0 0H904C878 0 862 16 862 42V180C862 199 847 214 828 214H76C57 214 42 199 42 180V42C42 16 26 0 0 0Z" fill="#000"/>
+    <rect x="58" y="8" width="72" height="28" rx="14" fill="#0A84FF"/><text x="94" y="26" class="small" text-anchor="middle" style="fill:#FFF;font-weight:600">История</text>
+    <rect x="138" y="8" width="88" height="28" rx="14" fill="#2C2C2E" stroke="#3A3A3C"/><text x="182" y="26" class="small" text-anchor="middle">Избранное</text>
+    <rect x="644" y="7" width="202" height="30" rx="15" fill="#2C2C2E" stroke="#3A3A3C"/>
+    <use href="#lucide-search" x="657" y="15" width="14" height="14" style="color:#A1A1A6"/><text x="679" y="26" class="small">Поиск…</text>
+    <use href="#lucide-pause" x="819" y="16" width="12" height="12" style="color:#A1A1A6"/>
+    <line x1="42" y1="46" x2="862" y2="46" stroke="#38383A"/>
+
+    <g transform="translate(58 60)">
+      <rect width="174" height="132" rx="20" fill="#1C1C1E" stroke="#0A84FF" stroke-width="2"/>
+      <use href="#lucide-mic" x="13" y="11" width="12" height="12" style="color:#0A84FF"/><text x="31" y="22" class="cardTitle">ТРАНСКРИПТ</text><text x="160" y="22" class="small" text-anchor="end">12с</text>
+      <text x="13" y="52" class="cardBody">Подготовь краткий</text><text x="13" y="71" class="cardBody">итог встречи и</text><text x="13" y="90" class="cardBody">отправь команде.</text><text x="13" y="119" class="small">Aza</text><use href="#lucide-star" x="150" y="108" width="13" height="13" style="color:#A1A1A6"/>
+    </g>
+    <g transform="translate(246 60)">
+      <rect width="174" height="132" rx="20" fill="#1C1C1E" stroke="#38383A"/>
+      <use href="#lucide-align-left" x="13" y="11" width="12" height="12" style="color:#0A84FF"/><text x="31" y="22" class="cardTitle">ТЕКСТ</text><text x="160" y="22" class="small" text-anchor="end">7м</text>
+      <text x="13" y="52" class="cardBody">Универсальный</text><text x="13" y="71" class="cardBody">локальный помощник</text><text x="13" y="119" class="small">Notes</text>
+    </g>
+    <g transform="translate(434 60)">
+      <rect width="174" height="132" rx="20" fill="#1C1C1E" stroke="#38383A"/>
+      <use href="#lucide-external-link" x="13" y="11" width="12" height="12" style="color:#0A84FF"/><text x="31" y="22" class="cardTitle">ССЫЛКА</text><text x="160" y="22" class="small" text-anchor="end">30м</text>
+      <text x="13" y="52" class="cardBody">github.com/aza-app</text><text x="13" y="71" class="cardBody">/aza</text><text x="13" y="119" class="small">Safari</text>
+    </g>
+    <g transform="translate(622 60)">
+      <rect width="174" height="132" rx="20" fill="#1C1C1E" stroke="#38383A"/>
+      <use href="#lucide-files" x="13" y="11" width="12" height="12" style="color:#A1A1A6"/><text x="31" y="22" class="cardTitle" style="fill:#A1A1A6">ФАЙЛЫ</text><text x="160" y="22" class="small" text-anchor="end">1ч</text>
+      <rect x="13" y="38" width="148" height="55" rx="12" fill="#2C2C2E"/><text x="87" y="72" class="body" text-anchor="middle">2 файла</text><text x="13" y="119" class="small">Finder</text>
+    </g>
+  </g>
+  <text x="80" y="1100" class="section">SOURCE OF TRUTH: CURRENT SWIFTUI BUILD · APPLE SEMANTIC DARK · SOFT EMERALD · SF PRO · LUCIDE · 8-PT GRID</text>
+</svg>

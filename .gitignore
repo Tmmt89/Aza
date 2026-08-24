@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.playwright-cli/
+.superdesign/tmp/
+.superdesign/resume.json
+outputs/
+work/
+
+# Local prayer catalog: its source records are not cleared for redistribution.
+Sources/Aza/Resources/prayer-schedules-2026.json
