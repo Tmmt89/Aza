@@ -32,6 +32,14 @@ final class GlobalHotKey: ObservableObject {
         assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
         assert(TextInsertion.matchingCase(of: "Ghbdtn ", applyingTo: "привет ") == "Привет ")
         assert(TextInsertion.matchingCase(of: "ghbdtn ", applyingTo: "привет ") == "привет ")
+        // б and ю live on the , and . keys; Shift gives Х Ъ Ж Э Б Ю
+        assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
+        assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
+        assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
+        // Trailing punctuation is punctuation, not a letter
+        assert(LayoutCorrectionEngine.correction(for: "ghbdtn,")?.text == "привет,")
+        assert(LayoutCorrectionEngine.correction(for: "hello,") == nil)
+        assert(LayoutCorrectionEngine.correction(for: "привет,") == nil)
 #endif
         let monitor = WordMonitor { [weak self] word, delimiter in
             self?.finishWord(word, delimiter: delimiter)
