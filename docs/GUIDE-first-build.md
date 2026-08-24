@@ -45,7 +45,7 @@ cd "/Users/tmmt/Documents/Code projects/Aza/Aza/Tools/BuildChechenLexicon"
 поэтому их надо один раз превратить в обычный текст:
 
 ```bash
-mkdir -p sources && cd sources
+mkdir -p datasets && cd datasets
 
 # скачать parquet-файл (адрес = resolve-URL с закреплённой ревизией)
 curl -L -o chechen-russian.parquet \
@@ -58,7 +58,7 @@ pip3 install pandas pyarrow
 python3 - <<'PY'
 import pandas as pd
 df = pd.read_parquet("chechen-russian.parquet")
-df["che"].to_csv("sources_che.txt", index=False, header=False)
+df["che"].to_csv("corpus_che.txt", index=False, header=False)
 print("строк:", len(df))
 PY
 ```
@@ -72,8 +72,8 @@ PY
 Отложите каждую 50-ю строку в отдельный файл:
 
 ```bash
-awk 'NR % 50 == 0' sources/sources_che.txt > sources/heldout_eval.txt
-awk 'NR % 50 != 0' sources/sources_che.txt > sources/train_main.txt
+awk 'NR % 50 == 0' datasets/corpus_che.txt > datasets/heldout_eval.txt
+awk 'NR % 50 != 0' datasets/corpus_che.txt > datasets/train_main.txt
 ```
 
 - `train_main.txt` пойдёт В словарь;
@@ -98,7 +98,7 @@ cp config.example.json config.json
   "sources": [
     {
       "id": "parallel",
-      "url": "sources/train_main.txt",
+      "url": "datasets/train_main.txt",
       "revision": "local-train-main-v1",
       "columnIndex": null,
       "hasHeader": false,
@@ -135,7 +135,7 @@ head -20 out_lexicon/lexicon.tsv
 ```bash
 swift run BuildChechenLexicon coverage \
   --lexicon out_lexicon/lexicon.tsv \
-  --eval sources/heldout_eval.txt
+  --eval datasets/heldout_eval.txt
 ```
 
 Интерпретация:
@@ -165,7 +165,7 @@ git commit -m "feat: чеченский лексикон — конвейер, �
 ```
 
 Сам `out_lexicon/` коммитим только после шага 8 (лицензии). Каталоги
-`sources/` и `.build/` в git НЕ попадают благодаря .gitignore.
+`datasets/` и `.build/` в git НЕ попадают благодаря .gitignore.
 
 ## Если что-то пошло не так
 

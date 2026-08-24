@@ -14,7 +14,9 @@ Sources/Aza/Resources/prayer-schedules-2026.json
 
 # Датасеты и артефакты конвейера чеченского лексикона (большие файлы,
 # в git не входят; готовый lexicon.tsv коммитится отдельно после проверки лицензий)
-Tools/BuildChechenLexicon/sources/
+# ВНИМАНИЕ: папку датасетов НЕ называть «sources» — на macOS
+# (регистронезависимая ФС) шаблон sources/ зацепит и Sources/ с кодом.
+Tools/BuildChechenLexicon/datasets/
 Tools/BuildChechenLexicon/out_lexicon/
 Tools/BuildChechenLexicon/config.json
 
