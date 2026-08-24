@@ -28,6 +28,10 @@ final class GlobalHotKey: ObservableObject {
         assert(LayoutCorrectionEngine.correction(for: "къонах") == nil)
         assert(LayoutCorrectionEngine.correction(for: "[mj")?.text == "хьо")
         assert(LayoutCorrectionEngine.correction(for: "1алам")?.text == "Ӏалам")
+        // Auto-capitalized first word of a sentence
+        assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
+        assert(TextInsertion.matchingCase(of: "Ghbdtn ", applyingTo: "привет ") == "Привет ")
+        assert(TextInsertion.matchingCase(of: "ghbdtn ", applyingTo: "привет ") == "привет ")
 #endif
         let monitor = WordMonitor { [weak self] word, delimiter in
             self?.finishWord(word, delimiter: delimiter)

@@ -52,9 +52,13 @@ enum TextInsertion {
             element,
             kAXSelectedTextAttribute as CFString,
             &selected
-        ) == .success, selected as? String == expected else {
-            // The text before the caret is not what the user just typed — put the
-            // caret back and do nothing rather than corrupt the field.
+        ) == .success,
+              let actual = selected as? String,
+              // Case-insensitive: apps auto-capitalize the first word of a
+              // sentence between the keystroke and this read. Any other
+              // difference means the text is not what the user typed.
+              actual.lowercased() == expected.lowercased() else {
+            // Put the caret back and do nothing rather than corrupt the field.
             _ = setSelectedRange(CFRange(location: caret, length: 0), in: element)
             return false
         }
@@ -62,8 +66,15 @@ enum TextInsertion {
         return AXUIElementSetAttributeValue(
             element,
             kAXSelectedTextAttribute as CFString,
-            text as CFString
+            matchingCase(of: actual, applyingTo: text) as CFString
         ) == .success
+    }
+
+    /// Carries an auto-capitalized first letter over to the corrected text.
+    static func matchingCase(of actual: String, applyingTo text: String) -> String {
+        guard actual.first?.isUppercase == true,
+              let first = text.first, first.isLowercase else { return text }
+        return first.uppercased() + text.dropFirst()
     }
 
     private static func selectedRange(of element: AXUIElement) -> CFRange? {
