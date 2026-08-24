@@ -10,9 +10,25 @@ enum IslandMode: String, CaseIterable {
 
     var shoulder: CGFloat {
         switch self {
-        case .home, .clipboard: 42
+        case .home: 42
+        case .clipboard: 30
         case .idle: 22
-        case .dictation: 0
+        case .dictation: 20
+        }
+    }
+
+    var bottomRadius: CGFloat {
+        switch self {
+        case .idle, .dictation: 22
+        case .home, .clipboard: 34
+        }
+    }
+
+    var shadow: (opacity: Double, radius: CGFloat, y: CGFloat) {
+        switch self {
+        case .idle: (0.18, 11, 10)
+        case .dictation: (0.16, 10, 10)
+        case .home, .clipboard: (0.18, 14, 14)
         }
     }
 
@@ -21,9 +37,8 @@ enum IslandMode: String, CaseIterable {
         case (.idle, _): NSSize(width: 430, height: 59)
         case (.home, true): NSSize(width: 780, height: 230)
         case (.home, false): NSSize(width: 700, height: 230)
-        case (.dictation, true): NSSize(width: 480, height: 38)
-        case (.dictation, false): NSSize(width: 340, height: 38)
-        case (.clipboard, _): NSSize(width: 820, height: 214)
+        case (.dictation, _): NSSize(width: 484, height: 54)
+        case (.clipboard, _): NSSize(width: 928, height: 228)
         }
         return NSSize(width: base.width + shoulder * 2, height: base.height)
     }
@@ -328,7 +343,7 @@ enum StoreChecks {
         presenceStore.hideCompactIsland(now: Date(timeIntervalSince1970: 0))
         let hiddenAfterHover = !presenceStore.isIslandVisible
         presenceStore.revealCompactIsland()
-        let silhouette = IslandSilhouette(shoulder: 42)
+        let silhouette = IslandSilhouette(shoulder: 42, bottomRadius: 34)
             .path(in: CGRect(x: 0, y: 0, width: 864, height: 230))
 
         return PrayerScheduleChecks.run()
@@ -341,6 +356,8 @@ enum StoreChecks {
             && presenceStore.mode == .idle
             && hiddenAfterHover
             && IslandMode.idle.size(hasNotch: true) == NSSize(width: 474, height: 59)
+            && IslandMode.dictation.size(hasNotch: true) == NSSize(width: 524, height: 54)
+            && IslandMode.clipboard.size(hasNotch: true) == NSSize(width: 988, height: 228)
             && silhouette.contains(CGPoint(x: 432, y: 1))
             && !silhouette.contains(CGPoint(x: 10, y: 10))
             && !silhouette.contains(CGPoint(x: 1, y: 100))

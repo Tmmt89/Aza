@@ -250,7 +250,10 @@ final class IslandPanelController {
             x: screenPoint.x - panel.frame.minX,
             y: panel.frame.maxY - screenPoint.y
         )
-        return IslandSilhouette(shoulder: store.mode.shoulder)
+        return IslandSilhouette(
+            shoulder: store.mode.shoulder,
+            bottomRadius: store.mode.bottomRadius
+        )
             .path(in: CGRect(origin: .zero, size: panel.frame.size))
             .contains(localPoint)
     }

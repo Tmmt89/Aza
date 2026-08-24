@@ -11,6 +11,7 @@ private enum AzaStyle {
     static let line = Color(red: 56 / 255, green: 56 / 255, blue: 58 / 255)
     static let rise = Color(red: 10 / 255, green: 132 / 255, blue: 1)
     static let acid = Color(red: 70 / 255, green: 215 / 255, blue: 124 / 255)
+    static let acidSoft = Color(red: 114 / 255, green: 232 / 255, blue: 160 / 255)
     static let danger = Color(red: 1, green: 69 / 255, blue: 58 / 255)
     static let notchWidth: CGFloat = 160
 }
@@ -52,11 +53,14 @@ struct IslandRootView: View {
             )
         }
         .preferredColorScheme(.dark)
-        .clipShape(IslandSilhouette(shoulder: store.mode.shoulder))
+        .clipShape(IslandSilhouette(
+            shoulder: store.mode.shoulder,
+            bottomRadius: store.mode.bottomRadius
+        ))
         .shadow(
-            color: .black.opacity(store.mode == .idle ? 0.18 : 0.42),
-            radius: store.mode == .idle ? 11 : 28,
-            y: store.mode == .idle ? 10 : 14
+            color: .black.opacity(store.mode.shadow.opacity),
+            radius: store.mode.shadow.radius,
+            y: store.mode.shadow.y
         )
         .animation(
             reduceMotion ? .easeOut(duration: AzaMotion.micro) : AzaMotion.reveal,
@@ -69,6 +73,12 @@ struct IslandRootView: View {
 
 struct IslandSilhouette: Shape {
     let shoulder: CGFloat
+    let bottomRadius: CGFloat
+
+    init(shoulder: CGFloat, bottomRadius: CGFloat = 34) {
+        self.shoulder = shoulder
+        self.bottomRadius = bottomRadius
+    }
 
     func path(in rect: CGRect) -> Path {
         guard shoulder > 0 else {
@@ -77,7 +87,7 @@ struct IslandSilhouette: Shape {
         }
 
         let s = min(shoulder, rect.width / 4, rect.height / 2)
-        let r = min(34, s, (rect.width - s * 2) / 2, rect.height - s)
+        let r = min(bottomRadius, (rect.width - s * 2) / 2, rect.height - s)
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.minY))
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
@@ -112,6 +122,7 @@ struct IslandSilhouette: Shape {
 private struct NotchRow<Left: View, Right: View>: View {
     let reservesNotch: Bool
     var height: CGFloat = 38
+    var horizontalPadding: CGFloat = 16
     @ViewBuilder let left: Left
     @ViewBuilder let right: Right
 
@@ -121,7 +132,7 @@ private struct NotchRow<Left: View, Right: View>: View {
             Color.clear.frame(width: reservesNotch ? AzaStyle.notchWidth : 0)
             right.frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, horizontalPadding)
         .frame(height: height)
     }
 }
@@ -339,25 +350,32 @@ private struct DictationIslandView: View {
     @ObservedObject var store: IslandStore
 
     var body: some View {
-        NotchRow(reservesNotch: store.hasNotch) {
-            HStack(spacing: 10) {
-                Circle().fill(AzaStyle.acid).frame(width: 7, height: 7)
+        NotchRow(reservesNotch: store.hasNotch, height: 54, horizontalPadding: 28) {
+            HStack(spacing: 14) {
+                Circle().fill(AzaStyle.acid).frame(width: 12, height: 12)
                 WaveformView()
             }
         } right: {
-            HStack(spacing: 14) {
-                Text("RU").foregroundStyle(AzaStyle.muted)
+            HStack(spacing: 0) {
+                Text("RU")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(AzaStyle.muted)
+                    .frame(width: 30, alignment: .trailing)
+                Color.clear.frame(width: 4)
                 Text("00:14")
-                    .font(.system(size: 13, design: .rounded).monospacedDigit())
+                    .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
                     .foregroundStyle(AzaStyle.ink)
+                    .frame(width: 52)
+                Color.clear.frame(width: 14)
                 Button { store.mode = .idle } label: {
-                    Image(systemName: "stop.fill")
-                        .frame(width: 28, height: 28)
+                    Image(systemName: "square")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 20, height: 20)
                         .foregroundStyle(AzaStyle.ink)
-                        .background(AzaStyle.rise, in: Circle())
                 }
                 .buttonStyle(.plain)
             }
+            .frame(width: 120)
         }
     }
 }
@@ -366,24 +384,26 @@ private struct WaveformView: View {
     @State private var animates = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private let heights: [CGFloat] = [10, 18, 26, 14, 22, 12, 24]
+
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<7, id: \.self) { index in
+        HStack(spacing: 5) {
+            ForEach(heights.indices, id: \.self) { index in
                 Capsule()
                     .fill(index.isMultiple(of: 2) ? AzaStyle.acid : AzaStyle.rise)
-                    .frame(
-                        width: 2.5,
-                        height: reduceMotion ? 8 : animates ? CGFloat(6 + (index * 5) % 13) : 5
-                    )
+                    .frame(width: 4, height: heights[index])
+                    .scaleEffect(y: reduceMotion || animates ? 1 : 0.45)
                     .animation(
                         reduceMotion
                             ? nil
-                            : .easeInOut(duration: 0.7).repeatForever().delay(Double(index) * 0.07),
+                            : .easeInOut(duration: 0.55 + Double(index) * 0.04)
+                                .repeatForever(autoreverses: true)
+                                .delay(Double(index) * 0.06),
                         value: animates
                     )
             }
         }
-        .frame(height: 20)
+        .frame(width: 58, height: 26)
         .onAppear { animates = !reduceMotion }
         .onChange(of: reduceMotion) { _, value in animates = !value }
     }
@@ -399,35 +419,35 @@ private struct ClipboardIslandView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            NotchRow(reservesNotch: store.hasNotch) {
-                HStack(spacing: 4) {
-                    SectionButton("История", active: !store.showsFavorites) { store.showsFavorites = false }
-                    SectionButton("Избранное", active: store.showsFavorites) { store.showsFavorites = true }
+            NotchRow(reservesNotch: store.hasNotch, height: 60, horizontalPadding: 28) {
+                HStack(spacing: 6) {
+                    SectionButton("История", width: 86, active: !store.showsFavorites) {
+                        store.showsFavorites = false
+                    }
+                    SectionButton("Избранное", width: 98, active: store.showsFavorites) {
+                        store.showsFavorites = true
+                    }
                 }
             } right: {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(AzaStyle.muted)
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(AzaStyle.muted)
+                        .frame(width: 18, height: 18)
                     TextField("Поиск…", text: $query)
                         .textFieldStyle(.plain)
-                        .frame(width: 132)
-                    Button { store.isHistoryPaused.toggle() } label: {
-                        Image(systemName: store.isHistoryPaused ? "play.circle" : "pause.circle")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(AzaStyle.muted)
-                    .help(store.isHistoryPaused ? "Возобновить историю" : "Приостановить историю")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(AzaStyle.ink)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 16)
+                .frame(width: 250, height: 34)
                 .background(AzaStyle.panel, in: Capsule())
                 .overlay(Capsule().stroke(AzaStyle.line))
             }
 
-            Rectangle().fill(AzaStyle.line).frame(height: 1)
-
             ScrollViewReader { proxy in
                 ScrollView(.horizontal) {
-                    LazyHStack(spacing: 12) {
+                    LazyHStack(spacing: 16) {
                         ForEach(visibleEntries) { entry in
                             ClipboardCard(
                                 entry: entry,
@@ -440,8 +460,9 @@ private struct ClipboardIslandView: View {
                             .id(entry.id)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 3)
+                    .padding(.bottom, 23)
                 }
                 .scrollIndicators(.hidden)
                 .onChange(of: store.selectedID) { _, id in
@@ -518,7 +539,7 @@ private struct ClipboardCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
                 Image(systemName: entry.kind.symbol)
                 Text(entry.kind.title).lineLimit(1)
@@ -526,7 +547,7 @@ private struct ClipboardCard: View {
                 Text(ElapsedTime.short(since: entry.createdAt))
                     .monospacedDigit()
             }
-            .font(.system(size: 10.5, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(accent)
 
             if let image = entry.image {
@@ -544,9 +565,9 @@ private struct ClipboardCard: View {
                 .foregroundStyle(AzaStyle.ink)
             } else {
                 Text(entry.text)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(AzaStyle.ink)
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
 
@@ -563,19 +584,19 @@ private struct ClipboardCard: View {
                     .buttonStyle(.plain)
                 }
             }
-            .font(.system(size: 10.5, weight: .medium))
+            .font(.system(size: 11, weight: .medium))
             .foregroundStyle(AzaStyle.muted)
         }
-        .padding(12)
-        .frame(width: 174, height: 132)
-        .background(selected ? AzaStyle.panel : AzaStyle.deep, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(width: 206, height: 142)
+        .background(AzaStyle.panel, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(selected ? AzaStyle.acid : AzaStyle.line, lineWidth: selected ? 2 : 1)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(selected ? AzaStyle.acidSoft : AzaStyle.line, lineWidth: selected ? 2 : 1)
         }
-        .shadow(color: selected ? Color.black.opacity(0.55) : .clear, radius: 12, y: 4)
-        .offset(y: selected ? -2 : 0)
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: selected ? AzaStyle.acid.opacity(0.2) : .clear, radius: 18, y: 6)
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onTapGesture(count: 2, perform: reuse)
         .simultaneousGesture(TapGesture().onEnded(select))
         .onHover { hovering = $0 }
@@ -625,11 +646,13 @@ private struct ActionButton: View {
 
 private struct SectionButton: View {
     let title: String
+    let width: CGFloat
     let active: Bool
     let action: () -> Void
 
-    init(_ title: String, active: Bool, action: @escaping () -> Void) {
+    init(_ title: String, width: CGFloat, active: Bool, action: @escaping () -> Void) {
         self.title = title
+        self.width = width
         self.active = active
         self.action = action
     }
@@ -639,8 +662,7 @@ private struct SectionButton: View {
             .buttonStyle(.plain)
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(active ? Color.black : AzaStyle.muted)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 5)
+            .frame(width: width, height: 32)
             .background(active ? AzaStyle.acid : AzaStyle.panel, in: Capsule())
             .overlay(Capsule().stroke(active ? AzaStyle.acid : AzaStyle.line))
     }
