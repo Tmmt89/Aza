@@ -32,7 +32,7 @@ final class GlobalHotKey: ObservableObject {
             assert(LayoutCorrectionEngine.correction(for: "хьо") == nil)
             assert(LayoutCorrectionEngine.correction(for: "къонах") == nil)
             assert(LayoutCorrectionEngine.correction(for: "[mj")?.text == "хьо")
-            assert(LayoutCorrectionEngine.correction(for: "1алам")?.text == "Ӏалам")
+            assert(LayoutCorrectionEngine.correction(for: "1алам")?.text == "ӏалам")
             // Auto-capitalized first word of a sentence
             assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
             // б and ю live on the , and . keys; Shift gives Х Ъ Ж Э Б Ю
