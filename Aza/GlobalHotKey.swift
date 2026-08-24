@@ -111,20 +111,15 @@ final class GlobalHotKey: ObservableObject {
                 return
             }
             self.correctionCount += 1
-            if let language = correction.inputLanguage {
-                self.correctionStatus = self.selectInputSource(language: language)
-                    ? "\(word) → \(correction.text); раскладка: \(language.uppercased())"
-                    : "\(word) → \(correction.text); раскладка \(language.uppercased()) не найдена"
-            } else {
+            guard let language = correction.inputLanguage else {
                 self.correctionStatus = "\(word) → \(correction.text)"
+                return
+            }
+            if let failure = InputSourceSwitcher.select(language: language) {
+                self.correctionStatus = "\(word) → \(correction.text); \(failure)"
+            } else {
+                self.correctionStatus = "\(word) → \(correction.text); раскладка: \(language.uppercased())"
             }
         }
-    }
-
-    private func selectInputSource(language: String) -> Bool {
-        guard let source = TISCopyInputSourceForLanguage(language as CFString)?.takeRetainedValue() else {
-            return false
-        }
-        return TISSelectInputSource(source) == noErr
     }
 }

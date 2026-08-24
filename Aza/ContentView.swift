@@ -16,10 +16,10 @@ struct ContentView: View {
                     .foregroundStyle(.red)
             } else {
                 Text("Поставьте курсор в текстовое поле и нажмите ⌘⇧A")
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(hotKey.insertionStatus)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Срабатываний: \(hotKey.activationCount)")
                     .foregroundStyle(.secondary)
             }
@@ -27,10 +27,11 @@ struct ContentView: View {
             Divider()
 
             if hotKey.inputMonitoringGranted {
-                Text("В TextEdit: ghbdtn + пробел")
+                Text("В TextEdit: ghbdtn · руддщ · [mj · 1алам + пробел")
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("\(hotKey.correctionStatus) · исправлений: \(hotKey.correctionCount)")
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 Button("Разрешить Input Monitoring") {
                     hotKey.requestInputMonitoring()
@@ -46,7 +47,7 @@ struct ContentView: View {
             }
             Text(pasteboardStatus)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             if !pasteboardTypes.isEmpty {
                 Text(pasteboardTypes)
                     .font(.caption.monospaced())
@@ -63,7 +64,7 @@ struct ContentView: View {
             .keyboardShortcut("q")
         }
         .padding(16)
-        .frame(width: 280)
+        .frame(width: 340)
     }
 
     private func inspectPasteboard() {
