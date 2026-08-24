@@ -6,6 +6,14 @@ enum LayoutCorrectionEngine {
     /// correction target even though it fails the Russian spellchecker.
     private static let chechenMarkers = ["ӏ", "хь", "къ", "кх", "аь", "оь", "уь", "юь", "яь"]
 
+    /// Canonical (lowercase) Chechen palochka, U+04CF.
+    private static let palochka: Character = "\u{04CF}"
+
+    /// IMPORTANT: the palochka has TWO codepoints — uppercase U+04C0 ("Ӏ")
+    /// and lowercase U+04CF ("ӏ"). Keyboards and corpora mix them freely,
+    /// so both must be treated as the same letter everywhere.
+    private static let uppercasePalochka: Character = "\u{04C0}"
+
     /// Characters commonly typed instead of the Chechen palochka Ӏ.
     private static let palochkaLookalikes: Set<Character> = ["1", "I", "l"]
 
@@ -30,14 +38,22 @@ enum LayoutCorrectionEngine {
 
     static func looksChechen(_ word: String) -> Bool {
         let lowered = word.lowercased()
+        // Lowercasing folds U+04C0 into U+04CF, so one check covers both.
+        if lowered.contains(palochka) { return true }
         return chechenMarkers.contains { lowered.contains($0) }
     }
 
-    /// 1/I/l inside a Cyrillic word → Ӏ (Chechen palochka). Nil when not applicable.
+    /// 1/I/l inside a Cyrillic word → canonical palochka. Nil when not applicable.
+    /// A real palochka already present in the word (either codepoint) is left
+    /// untouched — only the lookalike substitutions are replaced.
     static func normalizedPalochka(_ word: String) -> String? {
         guard word.contains(where: isCyrillic),
               word.contains(where: { palochkaLookalikes.contains($0) }) else { return nil }
-        return String(word.map { palochkaLookalikes.contains($0) ? "Ӏ" : $0 })
+        return String(word.map {
+            palochkaLookalikes.contains($0)
+                ? palochka
+                : ($0 == uppercasePalochka ? palochka : $0)
+        })
     }
 
     private nonisolated static func isCyrillic(_ character: Character) -> Bool {
