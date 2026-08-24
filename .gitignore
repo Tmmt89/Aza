@@ -11,3 +11,10 @@ work/
 
 # Local prayer catalog: its source records are not cleared for redistribution.
 Sources/Aza/Resources/prayer-schedules-2026.json
+
+# Датасеты и артефакты конвейера чеченского лексикона (большие файлы,
+# в git не входят; готовый lexicon.tsv коммитится отдельно после проверки лицензий)
+Tools/BuildChechenLexicon/sources/
+Tools/BuildChechenLexicon/out_lexicon/
+Tools/BuildChechenLexicon/config.json
+
