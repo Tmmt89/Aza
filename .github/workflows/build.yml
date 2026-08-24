@@ -1,0 +1,28 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build UI prototype (Swift Package)
+        run: swift build
+
+      - name: Self-check UI prototype
+        run: swift run Aza --self-check
+
+      # Signing is skipped: the Debug config uses a local development
+      # certificate that only exists on the maintainer's machine.
+      - name: Build system prototype (Xcode app)
+        run: |
+          xcodebuild -project Aza.xcodeproj -scheme Aza \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Automatic \
+            CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            build
