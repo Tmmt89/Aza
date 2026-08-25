@@ -3,10 +3,14 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var hotKey: GlobalHotKey
+    @ObservedObject var clipboardStore: ClipboardStore
+    @ObservedObject var pasteboardMonitor: PasteboardMonitor
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
     @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstentionEnabled = true
+    @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @State private var pasteboardStatus = "Типы ещё не проверялись"
     @State private var pasteboardTypes = ""
+    @State private var copyStatus = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -60,6 +64,56 @@ struct ContentView: View {
 
             Divider()
 
+            Toggle("Собирать историю буфера", isOn: $clipboardHistoryEnabled)
+                .toggleStyle(.switch)
+
+            if clipboardHistoryEnabled {
+                if clipboardStore.entries.isEmpty {
+                    Text("История пуста — скопируйте что-нибудь")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(clipboardStore.entries.prefix(8)) { entry in
+                        Button {
+                            copyToPasteboard(entry)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(Self.preview(of: entry.text))
+                                    .lineLimit(1)
+                                Text(Self.metaLine(for: entry))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Копировать в буфер (вставьте через ⌘V)")
+                    }
+
+                    HStack {
+                        Text("Всего: \(clipboardStore.entries.count) · шифрование AES-GCM включено")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Очистить") {
+                            clipboardStore.clearAll()
+                            copyStatus = "История очищена"
+                        }
+                        .font(.caption)
+                    }
+                }
+                if !copyStatus.isEmpty {
+                    Text(copyStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("История на паузе — скопированное не записывается")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
             Button("Прочитать типы буфера") {
                 inspectPasteboard()
             }
@@ -102,6 +156,39 @@ struct ContentView: View {
         }
         .padding(16)
         .frame(width: 340)
+        .onAppear {
+            if clipboardHistoryEnabled {
+                pasteboardMonitor.start()
+            }
+        }
+    }
+
+    /// Копирует запись истории обратно в системный буфер.
+    private func copyToPasteboard(_ entry: ClipEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(entry.text, forType: .string)
+        copyStatus = "Скопировано: \(Self.preview(of: entry.text)) — вставьте ⌘V"
+        clipboardStore.add(
+            text: entry.text,
+            sourceAppBundleID: Bundle.main.bundleIdentifier,
+            sourceAppName: "Aza"
+        )
+    }
+
+    /// Превью для карточки: первая строка, до 48 символов.
+    static func preview(of text: String) -> String {
+        let firstLine = text.split(separator: "\n", maxSplits: 1)[0]
+        return firstLine.count <= 48 ? String(firstLine) : firstLine.prefix(47) + "…"
+    }
+
+    /// Подпись: источник и относительное время.
+    static func metaLine(for entry: ClipEntry) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        let when = formatter.localizedString(for: entry.createdAt, relativeTo: Date())
+        let source = entry.sourceAppName ?? (entry.sourceAppBundleID ?? "неизвестно")
+        return "\(source) · \(when)"
     }
 
     private func inspectPasteboard() {
@@ -140,5 +227,12 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView(hotKey: GlobalHotKey())
+    let store = ClipboardStore()
+    let monitor = PasteboardMonitor(store: store)
+    return ContentView(
+        hotKey: GlobalHotKey(),
+        clipboardStore: store,
+        pasteboardMonitor: monitor
+    )
 }
+

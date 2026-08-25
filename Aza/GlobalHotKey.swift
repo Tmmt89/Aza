@@ -73,6 +73,9 @@ final class GlobalHotKey: ObservableObject {
                 assert(LayoutCorrectionEngine.correction(for: "баркла") == nil)
                 assert(LayoutCorrectionEngine.correction(for: "превет") == nil)
             }
+            // Clipboard pipeline self-test (Debug only): AES-GCM roundtrip,
+            // no plaintext on disk, tampered file ignored.
+            ClipboardStore.runSelfTest(sample: "буфер-самотест-\(UUID().uuidString)")
         }
 #endif
         let monitor = WordMonitor { [weak self] word, delimiter in
