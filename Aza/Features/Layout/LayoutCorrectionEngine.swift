@@ -144,7 +144,7 @@ enum LayoutCorrectionEngine {
     static func typoCorrection(for word: String) -> String? {
         // Пользовательское исключение: слово отменялось через undo.
         guard !UserWordLists.shared.isNeverCorrect(word) else { return nil }
-        guard ChechenAutocorrect.isEnabled,
+        guard ChechenAutocorrect.isTypoCorrectionEnabled,
               ChechenLexicon.shared.isAvailable,
               word.count >= 4,
               !word.isEmpty,
@@ -155,6 +155,32 @@ enum LayoutCorrectionEngine {
         guard let neighbor = ChechenLexicon.shared.oneEditNeighbor(of: word),
               neighbor.first == word.lowercased().first else { return nil }
         return neighbor
+    }
+
+    /// Клавиши латинской раскладки для перебора вариантов в одну правку.
+    private static let latinKeys = Array("abcdefghijklmnopqrstuvwxyz[];',.")
+
+    /// Промах по ПЕРВОЙ клавише при намерении набрать чеченское слово:
+    /// существует ли замена/пропуск первой клавиши, дающая чеченское слово
+    /// из словаря? Если да — ввод неоднозначен (пример: хотели "[fkj" →
+    /// «хало», промахнулись → "vfkj" → «мало»), исправление пропускаем.
+    @MainActor
+    static func firstKeyAlternativeIsChechen(for typed: String,
+                                             table: [Character: Character]) -> Bool {
+        guard typed.count >= 4 else { return false }
+        let base = Array(typed)
+        let tail = base.dropFirst()
+
+        func remapsToFrequentChechen(_ variant: [Character]) -> Bool {
+            guard let mapped = remapped(String(variant), table: table) else { return false }
+            return ChechenLexicon.shared.isFrequent(mapped)
+        }
+
+        for key in latinKeys where key != base[0] {
+            var variant = [key] + tail
+            if remapsToFrequentChechen(variant) { return true }
+        }
+        return remapsToFrequentChechen(Array(tail))
     }
 
     @MainActor
@@ -170,6 +196,15 @@ enum LayoutCorrectionEngine {
             guard word.count >= 3,
                   !isValidWord(word, language: "en"),
                   isValidWord(russian, language: "ru") || looksChechen(russian) else { return nil }
+
+            // Неоднозначность первого символа (PLAN-chechen §3.3): если замена
+            // или пропуск ПЕРВОЙ клавиши даёт чеченское слово из словаря,
+            // пользователь мог хотеть его — не исправляем вовсе. Настройка
+            // включена по умолчанию; отключение возвращает агрессивный режим.
+            // Пример из жизни: "vfkj" → «мало» при намерении "[fkj" → «хало».
+            if ChechenAutocorrect.isAmbiguityAbstentionEnabled,
+               firstKeyAlternativeIsChechen(for: word, table: table) { return nil }
+
             return (russian, "ru")
         }
 
@@ -189,6 +224,13 @@ enum LayoutCorrectionEngine {
             guard word.count >= 3,
                   !isValidWord(word, language: "ru"),
                   isValidWord(latin, language: "en") else { return nil }
+
+            // Симметричный предохранитель: если слово отличается на одну
+            // правку от известного чеченского — вероятно, это его опечатка,
+            // а не английское слово; латинизировать нельзя.
+            if ChechenAutocorrect.isAmbiguityAbstentionEnabled,
+               ChechenLexicon.shared.hasOneEditMatch(of: word) { return nil }
+
             return (latin, "en")
         }
 

@@ -53,7 +53,14 @@ final class GlobalHotKey: ObservableObject {
             // Auto-capitalized first word of a sentence
             assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
             // б and ю live on the , and . keys; Shift gives Х Ъ Ж Э Б Ю
+            // plus the reported incident: typing "vfkj" (slipped first key)
+            // used to produce «мало», although the neighbouring key '[' gives
+            // Chechen «хало» from the lexicon — such input is now abstained.
+            assert(LayoutCorrectionEngine.correction(for: "vfkj") == nil)
+            // Unambiguous Russian words are still corrected.
             assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
+            assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
+            assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
             assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
             assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
             // Trailing punctuation is punctuation, not a letter
@@ -62,7 +69,7 @@ final class GlobalHotKey: ObservableObject {
             assert(LayoutCorrectionEngine.correction(for: "привет,") == nil)
             // Typo stage is OFF by default (PLAN-chechen §3.3): while the
             // setting is untouched, a misspelled word must never be repaired.
-            if !ChechenAutocorrect.isEnabled {
+            if !ChechenAutocorrect.isTypoCorrectionEnabled {
                 assert(LayoutCorrectionEngine.correction(for: "баркла") == nil)
                 assert(LayoutCorrectionEngine.correction(for: "превет") == nil)
             }

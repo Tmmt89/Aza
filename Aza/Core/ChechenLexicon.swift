@@ -13,9 +13,16 @@ final class ChechenLexicon {
 
     /// Все слова в нижнем регистре, каноническая палочка U+04CF.
     private(set) var words: Set<String> = []
+    /// Частоты слов из артефакта конвейера.
+    private(set) var frequencies: [String: Int] = [:]
     /// Слова, встречавшиеся в корпусе ТОЛЬКО с заглавной — вероятные имена
     /// собственные; автокоррекцией не трогаются.
     private(set) var capitalOnlyWords: Set<String> = []
+
+    /// Минимальная частота слова, чтобы оно считалось «серьёзной»
+    /// альтернативой в предохранителях неоднозначности. Редкие записи
+    /// (шум корпуса, OCR) предохранители не триггерят.
+    static let ambiguityMinFrequency = 10
 
     private init() {
         guard let url = Bundle.main.url(forResource: "chechen-lexicon", withExtension: "tsv"),
@@ -27,6 +34,9 @@ final class ChechenLexicon {
             guard let first = fields.first, !first.isEmpty else { continue }
             let word = String(first)
             words.insert(word)
+            if fields.count > 1, let count = Int(fields[1]) {
+                frequencies[word] = count
+            }
             if fields.count > 2, fields[2] == "1" {
                 capitalOnlyWords.insert(word)
             }
@@ -35,6 +45,58 @@ final class ChechenLexicon {
 
     /// Словарь загружен и им можно пользоваться.
     var isAvailable: Bool { !words.isEmpty }
+
+    func frequency(of word: String) -> Int {
+        frequencies[word.lowercased()] ?? 0
+    }
+
+    func isFrequent(_ word: String) -> Bool {
+        frequency(of: word) >= Self.ambiguityMinFrequency
+    }
+
+    /// Есть ли у слова из ЧЕЧЕНСКОГО словаря сосед в одну правку от `word`?
+    /// Используется как признак неоднозначности перед латинизацией.
+    func hasOneEditMatch(of word: String) -> Bool {
+        let lower = word.lowercased()
+        guard lower.count >= 4 else { return false }
+
+        // Для предохранителя неоднозначности важны только частотные слова:
+        // редкие записи словаря (шум Википедии, OCR) не считаются уликой.
+        func significant(_ variant: String) -> Bool {
+            isFrequent(variant) || isFrequent(canonicalTwins(in: variant))
+        }
+        var characters = Array(lower)
+
+        for index in characters.indices {
+            var variant = characters
+            variant.remove(at: index)
+            if significant(String(variant)) { return true }
+            for letter in Self.alphabet where letter != characters[index] {
+                var substitution = characters
+                substitution[index] = letter
+                if significant(String(substitution)) { return true }
+            }
+        }
+        for index in 0...characters.count {
+            for letter in Self.alphabet {
+                var variant = characters
+                variant.insert(letter, at: index)
+                if significant(String(variant)) { return true }
+            }
+        }
+        for index in characters.indices.dropLast() {
+            var variant = characters
+            variant.swapAt(index, index + 1)
+            if significant(String(variant)) { return true }
+        }
+        return false
+    }
+
+    /// Сводит украинские І (U+0456/U+0406) к канонической палочке —
+    /// чтобы проверка значимости не зависела от кодовой точки ввода.
+    func canonicalTwins(in string: String) -> String {
+        Self.replacingUkrainianI(in: string)
+    }
 
     /// Регистронезависимая проверка: вход может содержать любую из двух
     /// кодовых точек палочки — lowercased() сводит U+04C0 к U+04CF.
