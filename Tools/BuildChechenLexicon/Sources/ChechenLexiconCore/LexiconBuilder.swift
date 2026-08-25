@@ -17,16 +17,21 @@ public struct SourceConfig: Codable, Hashable {
     /// Верхняя граница вклада источника в итоговые частоты (0…1).
     /// Защита от перекоса: Писания не должны задавить бытовую лексику.
     public var maxShare: Double
+    /// Множитель частоты для словарных источников: заголовочное слово
+    /// встречается в тексте один раз, но лексически весомее случайного
+    /// вхождения. Увеличивает счётчик каждого слова источника.
+    public var boost: Int?
 
     public init(id: String, url: String, revision: String,
                 columnIndex: Int? = nil, hasHeader: Bool = false,
-                maxShare: Double = 1.0) {
+                maxShare: Double = 1.0, boost: Int? = nil) {
         self.id = id
         self.url = url
         self.revision = revision
         self.columnIndex = columnIndex
         self.hasHeader = hasHeader
         self.maxShare = maxShare
+        self.boost = boost
     }
 }
 
@@ -78,7 +83,7 @@ public final class LexiconBuilder {
         var bucket = perSourceCounts[source.id] ?? [:]
         for token in tokenizer.tokens(in: text) {
             let key = Normalizer.canonical(token).lowercased()
-            bucket[key, default: 0] += 1
+            bucket[key, default: 0] += max(1, source.boost ?? 1)
             if token.first?.isUppercase == true {
                 sawUppercase.insert(key)
             } else {
