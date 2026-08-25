@@ -171,11 +171,19 @@ swift run BuildChechenLexicon coverage --lexicon out_lexicon/lexicon.tsv \
 python3 Tools/palochka_audit.py .
 ```
 
-Смоук-запуск приложения (DEBUG-ассерты выполняются при старте):
+Смоук-запуск приложения (DEBUG-ассерты выполняются при старте).
+ВАЖНО: сначала остановить уже запущенную Aza (второй экземпляр сам выйдет
+из-за single-instance guard, и смоук покажет ложный FAIL), а убивать —
+только pkill по пути бинарника: `kill %1` в неинтерактивной оболочке
+убивает обёртку, а процесс Aza утекает — четыре утёкших экземпляра дали
+баг «привет привет привет привет» (гонка мониторов слов).
 ```bash
+pkill -f "Products/Debug/Aza.app/Contents/MacOS/Aza"; sleep 1
 BIN=$(find ~/Library/Developer/Xcode/DerivedData/Aza-*/Build/Products/Debug \
   -name Aza -type f -perm +111 | head -1)
-"$BIN" & sleep 4; kill %1   # если процесс жив — ассерты прошли
+"$BIN" & sleep 4
+pgrep -qf "Products/Debug/Aza" && echo "SMOKE OK" || echo "SMOKE FAIL"
+pkill -f "Products/Debug/Aza.app/Contents/MacOS/Aza"
 ```
 
 ## 8. Грабли (уже наступали — не повторять)
