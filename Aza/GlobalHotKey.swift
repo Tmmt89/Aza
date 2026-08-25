@@ -57,6 +57,12 @@ final class GlobalHotKey: ObservableObject {
             // used to produce «мало», although the neighbouring key '[' gives
             // Chechen «хало» from the lexicon — such input is now abstained.
             assert(LayoutCorrectionEngine.correction(for: "vfkj") == nil)
+            // Точное чеченское слово побеждает соседей по первой клавише:
+            // «ларам» и «барам» отличаются первой клавишей и раньше взаимно
+            // блокировали друг друга (реальный баг владельца).
+            assert(LayoutCorrectionEngine.correction(for: "kfhfv")?.text == "ларам")
+            assert(LayoutCorrectionEngine.correction(for: ",fhfv")?.text == "барам")
+            assert(LayoutCorrectionEngine.correction(for: "wbuf[m")?.text == "цигахь")
             // Unambiguous Russian words are still corrected.
             assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
             assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
