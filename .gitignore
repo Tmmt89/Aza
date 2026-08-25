@@ -20,3 +20,7 @@ Tools/BuildChechenLexicon/datasets/
 Tools/BuildChechenLexicon/out_lexicon/
 Tools/BuildChechenLexicon/config.json
 
+# Словарь в ресурсах приложения: артефакт корпуса с неподтверждённой
+# лицензией. Без него приложение собирается и работает в fallback-режиме.
+Aza/Resources/chechen-lexicon.tsv
+

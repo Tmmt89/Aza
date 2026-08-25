@@ -40,20 +40,58 @@ enum LayoutCorrectionEngine {
         let lowered = word.lowercased()
         // Lowercasing folds U+04C0 into U+04CF, so one check covers both.
         if lowered.contains(palochka) { return true }
+        // A word present in the Chechen lexicon is Chechen even without
+        // markers (e.g. "дела", "баркалла").
+        if ChechenLexicon.shared.contains(word) { return true }
         return chechenMarkers.contains { lowered.contains($0) }
     }
 
-    /// 1/I/l inside a Cyrillic word → canonical palochka. Nil when not applicable.
-    /// A real palochka already present in the word (either codepoint) is left
-    /// untouched — only the lookalike substitutions are replaced.
+    /// 1/I/l inside a Cyrillic word → canonical palochka.
+    ///
+    /// With a bundled lexicon this is hypothesis checking (PLAN-chechen §3.2):
+    /// every lookalike is either the palochka or stays as typed; the change is
+    /// applied only when EXACTLY ONE variant exists in the lexicon. Zero or
+    /// several matches → the word is left untouched.
+    ///
+    /// Without a lexicon resource the legacy greedy rule applies: all
+    /// lookalikes are replaced (protection still comes from looksChechen).
     static func normalizedPalochka(_ word: String) -> String? {
         guard word.contains(where: isCyrillic),
               word.contains(where: { palochkaLookalikes.contains($0) }) else { return nil }
+
+        if ChechenLexicon.shared.isAvailable {
+            let matches = palochkaHypotheses(for: word)
+                .filter { ChechenLexicon.shared.contains($0) }
+            return matches.count == 1 ? matches[0] : nil
+        }
+
         return String(word.map {
             palochkaLookalikes.contains($0)
                 ? palochka
                 : ($0 == uppercasePalochka ? palochka : $0)
         })
+    }
+
+    /// All subsets of lookalike positions read as palochka, others kept as
+    /// typed ("1алам" → ["1алам", "ӏалам"]). A word rarely has more than 2–4.
+    private static func palochkaHypotheses(for word: String) -> [String] {
+        let positions = Array(word.indices.filter { palochkaLookalikes.contains(word[$0]) })
+        guard !positions.isEmpty, positions.count <= 8 else { return [] }
+
+        var results: [String] = []
+        results.reserveCapacity(1 << positions.count)
+        for mask in 0..<(1 << positions.count) {
+            var line = ""
+            for index in word.indices {
+                if let position = positions.firstIndex(of: index) {
+                    line.append((mask >> position) & 1 == 1 ? palochka : word[index])
+                } else {
+                    line.append(word[index])
+                }
+            }
+            results.append(line)
+        }
+        return results
     }
 
     private nonisolated static func isCyrillic(_ character: Character) -> Bool {

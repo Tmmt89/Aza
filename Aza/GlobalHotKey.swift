@@ -32,7 +32,15 @@ final class GlobalHotKey: ObservableObject {
             assert(LayoutCorrectionEngine.correction(for: "хьо") == nil)
             assert(LayoutCorrectionEngine.correction(for: "къонах") == nil)
             assert(LayoutCorrectionEngine.correction(for: "[mj")?.text == "хьо")
-            assert(LayoutCorrectionEngine.correction(for: "1алам")?.text == "ӏалам")
+            // Palochka normalization is lexicon-gated: applied only when exactly
+            // one hypothesis is a real Chechen word; without a bundled lexicon
+            // it falls back to the greedy rule.
+            let normalized = LayoutCorrectionEngine.normalizedPalochka("1алам")
+            if ChechenLexicon.shared.isAvailable {
+                assert(normalized == nil || ChechenLexicon.shared.contains(normalized!))
+            } else {
+                assert(normalized == "ӏалам")
+            }
             // Auto-capitalized first word of a sentence
             assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
             // б and ю live on the , and . keys; Shift gives Х Ъ Ж Э Б Ю
