@@ -64,7 +64,7 @@ final class ChechenLexicon {
         // их сразу сводим к канону, иначе кандидаты унаследуют близнеца
         // и никогда не совпадут со словарём. Цифра 1 и латинские I/l
         // остаются как есть — это осмысленные варианты набора.
-        let lower = replacingUkrainianI(in: word).lowercased()
+        let lower = Self.replacingUkrainianI(in: word).lowercased()
         guard lower.count >= 4 else { return nil }
 
         var characters = Array(lower)
