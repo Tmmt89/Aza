@@ -29,6 +29,11 @@ struct ConfigFile: Codable {
     /// Файл со списком русских слов (по одному в строке): все совпадения
     /// исключаются из итогового чеченского словаря.
     var russianFilterPath: String?
+    /// Слово из русского фильтра всё же остаётся, если его взвешенная
+    /// частота в чеченском корпусе не ниже порога (спасает ду/ху/со/вай,
+    /// случайно совпавшие со строками русского списка). nil — старое
+    /// безусловное исключение.
+    var russianKeepMinCount: Int?
 }
 
 struct Manifest: Codable {
@@ -121,7 +126,8 @@ case "build":
 
     let (entries, stats) = builder.finalize(
         minCount: config.minCount,
-        excludingRussian: loadRussianFilter(config.russianFilterPath)
+        excludingRussian: loadRussianFilter(config.russianFilterPath),
+        russianKeepMinCount: config.russianKeepMinCount
     )
     try FileManager.default.createDirectory(atPath: outputDir,
                                             withIntermediateDirectories: true)

@@ -1,0 +1,27 @@
+{
+  "builtAtISO8601" : "2026-08-25T20:59:51Z",
+  "datasetRevisions" : {
+    "dosham-classic" : "laamxo-dosham@bb08cf1c-ce-ru-headwords",
+    "parallel" : "lingtrain-chechen-russian@296c9a27-heldout-every50",
+    "wikipedia" : "wikimedia-wikipedia-20231101.ce@b04c8d1c-filtered-cyr-title-12000"
+  },
+  "minCount" : 2,
+  "stats" : {
+    "droppedBelowMinCount" : 56561,
+    "droppedCharset" : 5420,
+    "droppedRussianFilter" : 943,
+    "keptWords" : 31758,
+    "minCount" : 2,
+    "perSourceRawTokens" : {
+      "dosham-classic" : 19965,
+      "parallel" : 651820,
+      "wikipedia" : 1647900
+    },
+    "scalingFactors" : {
+      "dosham-classic" : 1,
+      "parallel" : 1,
+      "wikipedia" : 0.42229837975605317
+    }
+  },
+  "toolVersion" : "1.0"
+}

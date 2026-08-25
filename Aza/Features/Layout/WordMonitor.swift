@@ -9,6 +9,9 @@ final class WordMonitor {
     private var monitor: Any?
     private var currentWord = ""
     private let onWordFinished: (_ word: String, _ delimiter: String) -> Void
+    /// Вызывается при разрыве контекста (переключение приложения):
+    /// владелец сбрасывает состояние фразы.
+    var onContextBreak: (() -> Void)?
 
     init(onWordFinished: @escaping (_ word: String, _ delimiter: String) -> Void) {
         self.onWordFinished = onWordFinished
@@ -41,6 +44,7 @@ final class WordMonitor {
         // ponytail: TextEdit-only proof; widen with the application exclusion policy after the system path is proven.
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.TextEdit" else {
             currentWord = ""
+            onContextBreak?()
             return
         }
 

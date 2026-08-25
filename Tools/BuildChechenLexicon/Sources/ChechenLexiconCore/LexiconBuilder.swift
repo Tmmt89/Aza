@@ -103,7 +103,8 @@ public final class LexiconBuilder {
     }
 
     public func finalize(minCount: Int = 2,
-                         excludingRussian russianWords: Set<String> = []) -> (entries: [LexiconEntry], stats: BuildStats) {
+                         excludingRussian russianWords: Set<String> = [],
+                         russianKeepMinCount: Int? = nil) -> (entries: [LexiconEntry], stats: BuildStats) {
         // 1. Сырые суммы по источникам.
         var rawTotals: [String: Int] = [:]
         var totals: [String: Double] = [:]
@@ -140,7 +141,14 @@ public final class LexiconBuilder {
             guard Self.isValidWord(word) else { bad += 1; continue }
             // Русские заимствования из корпуса (мало/было/…) мешают движку
             // отличать языки — исключаются по внешнему списку-фильтру.
-            if russianWords.contains(word) { russian += 1; continue }
+            // НО: базовые чеченские слова (ду/ху/со/вай) случайно совпадают
+            // со строками из русского списка. Разделение по взвешенной
+            // частоте корпуса чистое (~2 порядка: мало 31 против ду 14997),
+            // поэтому слово с частотой ≥ russianKeepMinCount остаётся.
+            if russianWords.contains(word),
+               russianKeepMinCount.map({ Int(count.rounded()) < $0 }) ?? true {
+                russian += 1; continue
+            }
             guard Int(count.rounded()) >= minCount else { low += 1; continue }
             entries.append(LexiconEntry(
                 word: word,

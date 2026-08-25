@@ -3,6 +3,24 @@ import AppKit
 import Carbon.HIToolbox
 import Combine
 
+/// Отладочный лог в файл (только Debug): stderr при запуске через `open`
+/// теряется, unified log эти строки не отдаёт — файл надёжен. Содержимое
+/// ввода не пишется — только длины и флаги.
+func azaDebugLog(_ message: String) {
+#if DEBUG
+    NSLog("%@", message)
+    let line = "\(Date()) \(message)\n"
+    let url = URL(fileURLWithPath: "/tmp/aza-debug.log")
+    if let handle = try? FileHandle(forWritingTo: url) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        try? handle.close()
+    } else {
+        try? Data(line.utf8).write(to: url)
+    }
+#endif
+}
+
 /// Coordinator: wires the hot key, the word monitor and text insertion together
 /// and exposes status for the menu panel. Lives for the whole app lifetime.
 @MainActor
@@ -18,13 +36,28 @@ final class GlobalHotKey: ObservableObject {
     private var wordMonitor: WordMonitor?
     private var shiftMonitor: Any?
     /// Последнее применённое исправление — для отката двойным правым Shift.
+    /// При фразовой замене original/corrected содержат весь охваченный
+    /// диапазон, originalWords — слова для занесения в исключения.
     private struct LastCorrection {
         let original: String
         let corrected: String
         let delimiter: String
+        let originalWords: [String]
     }
     private var lastCorrection: LastCorrection?
     private var lastRightShiftPress = Date.distantPast
+
+    /// Контекст фразы: последние завершённые слова как они стоят в тексте.
+    /// chechen — слово чеченское (само или после исправления);
+    /// corrected — замена уже применялась (назад не расширяемся).
+    private struct FinishedWord {
+        let typed: String
+        let delimiter: String
+        let chechen: Bool
+        let corrected: Bool
+    }
+    private var recentWords: [FinishedWord] = []
+    private static let contextWindow = 4
 
     init() {
 #if DEBUG
@@ -63,6 +96,18 @@ final class GlobalHotKey: ObservableObject {
             assert(LayoutCorrectionEngine.correction(for: "kfhfv")?.text == "ларам")
             assert(LayoutCorrectionEngine.correction(for: ",fhfv")?.text == "барам")
             assert(LayoutCorrectionEngine.correction(for: "wbuf[m")?.text == "цигахь")
+            // Контекст фразы: короткие слова в чеченском окружении.
+            // «ду»/«со» спасены из русского фильтра порогом частоты корпуса;
+            // «ху» в литературном корпусе отсутствует (разговорная форма) —
+            // появится с разговорным источником, хардкодить нельзя.
+            if ChechenLexicon.shared.isAvailable {
+                assert(LayoutCorrectionEngine.chechenContextRemap(for: "le") == "ду")
+                assert(LayoutCorrectionEngine.chechenContextRemap(for: "cj") == "со")
+                assert(LayoutCorrectionEngine.chechenContextRemap(for: "in") == nil,
+                       "валидное английское слово не трогаем")
+                assert(LayoutCorrectionEngine.chechenContextRemap(for: "BMW") == nil,
+                       "ВЕРХНИЙ регистр внутри — бренд, не трогаем")
+            }
             // Unambiguous Russian words are still corrected.
             assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
             assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
@@ -87,16 +132,15 @@ final class GlobalHotKey: ObservableObject {
         let monitor = WordMonitor { [weak self] word, delimiter in
             self?.finishWord(word, delimiter: delimiter)
         }
+        monitor.onContextBreak = { [weak self] in
+            self?.recentWords.removeAll()
+        }
         wordMonitor = monitor
 
         inputMonitoringGranted = CGPreflightListenEventAccess()
         // Диагностика цепочки коррекции в unified log (без содержимого ввода):
         // log stream --predicate 'process == "Aza"'
-        NSLog("Aza: start inputMonitoring=%d axTrusted=%d lexicon=%d layoutTable=%d",
-              inputMonitoringGranted ? 1 : 0,
-              AXIsProcessTrusted() ? 1 : 0,
-              ChechenLexicon.shared.isAvailable ? 1 : 0,
-              LayoutCorrectionEngine.isAvailable ? 1 : 0)
+        azaDebugLog("Aza: start inputMonitoring=\(inputMonitoringGranted ? 1 : 0) axTrusted=\(AXIsProcessTrusted() ? 1 : 0) lexicon=\(ChechenLexicon.shared.isAvailable ? 1 : 0) layoutTable=\(LayoutCorrectionEngine.isAvailable ? 1 : 0)")
         if inputMonitoringGranted {
             monitor.start()
             startUndoMonitor()
@@ -123,6 +167,7 @@ final class GlobalHotKey: ObservableObject {
     func stop() {
         hotKeyController?.stop()
         wordMonitor?.stop()
+        recentWords.removeAll()
         if let shiftMonitor {
             NSEvent.removeMonitor(shiftMonitor)
             self.shiftMonitor = nil
@@ -173,10 +218,16 @@ final class GlobalHotKey: ObservableObject {
             expecting: last.corrected + last.delimiter,
             with: last.original + last.delimiter
         ) {
-            UserWordLists.shared.addNeverCorrect(last.original)
+            // Каждое слово фразы отдельно: исключения работают пословно.
+            for word in last.originalWords {
+                UserWordLists.shared.addNeverCorrect(word)
+            }
+            recentWords.removeAll()
             correctionStatus = "Отменено: \(last.corrected) → \(last.original); в исключениях"
             lastCorrection = nil
         } else {
+            // Текст изменился — контекст фразы больше не соответствует полю.
+            recentWords.removeAll()
             correctionStatus = "Не удалось отменить (текст перед курсором изменился)"
         }
     }
@@ -207,17 +258,59 @@ final class GlobalHotKey: ObservableObject {
             : "Поле не поддерживает прямую вставку (\(insertResult.rawValue))"
     }
 
+    /// Добавляет слово в контекст фразы, ограничивая окно.
+    private func remember(_ entry: FinishedWord) {
+        recentWords.append(entry)
+        if recentWords.count > Self.contextWindow {
+            recentWords.removeFirst()
+        }
+    }
+
     private func finishWord(_ word: String, delimiter: String) {
-        let correction = LayoutCorrectionEngine.correction(for: word)
-        NSLog("Aza: finishWord len=%d correction=%d",
-              word.count, correction == nil ? 0 : 1)
-        guard let correction else { return }
+        var correction = LayoutCorrectionEngine.correction(for: word)
+
+        // Форвард-контекст: после чеченского слова короткое (2 буквы; от
+        // трёх работает обычный путь) слово с частотным чеченским ремапом
+        // тоже исправляется: "wbuf[m le" → «цигахь ду».
+        if correction == nil,
+           word.count == 2,
+           recentWords.last?.chechen == true,
+           let remap = LayoutCorrectionEngine.chechenContextRemap(for: word) {
+            correction = (remap, "ru")
+        }
+
+        azaDebugLog("Aza: finishWord len=\(word.count) correction=\(correction == nil ? 0 : 1)")
+        guard let correction else {
+            remember(FinishedWord(typed: word, delimiter: delimiter,
+                                  chechen: LayoutCorrectionEngine.looksChechen(word),
+                                  corrected: false))
+            return
+        }
+
+        // Бэквард-контекст: исправление оказалось чеченским словом — вся
+        // фраза, скорее всего, чеченская. Непрерывный хвост предыдущих
+        // НЕисправленных слов с частотным чеченским ремапом включается в ту
+        // же атомарную замену: "[e le wbuf[m" → «ху ду цигахь» (пока «ху»
+        // нет в корпусе — «[e ду цигахь»). Слово без такого ремапа (бренд,
+        // английское, русское) обрывает расширение и остаётся как есть.
+        var spanOriginal = "", spanCorrected = ""
+        var spanWords: [String] = []
+        if ChechenLexicon.shared.contains(correction.text) {
+            for previous in recentWords.reversed() {
+                guard !previous.corrected, !previous.chechen,
+                      let remap = LayoutCorrectionEngine.chechenContextRemap(for: previous.typed) else { break }
+                spanOriginal = previous.typed + previous.delimiter + spanOriginal
+                spanCorrected = remap + previous.delimiter + spanCorrected
+                spanWords.insert(previous.typed, at: 0)
+            }
+        }
 
         guard let element = TextInsertion.focusedElement(),
               SecureFieldDetector.isTextInput(element),
               !SecureFieldDetector.isSecure(element) else {
-            NSLog("Aza: focused element missing, non-text or secure")
+            azaDebugLog("Aza: focused element missing, non-text or secure")
             correctionStatus = "Поле нельзя исправлять"
+            recentWords.removeAll()
             return
         }
 
@@ -226,21 +319,40 @@ final class GlobalHotKey: ObservableObject {
         // aborts the replacement instead of corrupting the field.
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
             guard let self else { return }
-            let replaced = TextInsertion.replaceTypedText(
+            var usedSpan = !spanOriginal.isEmpty
+            var replaced = TextInsertion.replaceTypedText(
                 in: element,
-                expecting: word + delimiter,
-                with: correction.text + delimiter
+                expecting: spanOriginal + word + delimiter,
+                with: spanCorrected + correction.text + delimiter
             )
-            NSLog("Aza: replaceTypedText ok=%d", replaced ? 1 : 0)
+            // Буфер знает не все разделители (двойной пробел, пунктуация
+            // между словами) — фраза может не совпасть с текстом. Тогда
+            // исправляем хотя бы текущее слово.
+            if !replaced, usedSpan {
+                usedSpan = false
+                replaced = TextInsertion.replaceTypedText(
+                    in: element,
+                    expecting: word + delimiter,
+                    with: correction.text + delimiter
+                )
+            }
+            azaDebugLog("Aza: replaceTypedText ok=\(replaced ? 1 : 0) span=\(usedSpan ? spanWords.count : 0)")
             guard replaced else {
                 self.correctionStatus = "Не удалось заменить слово"
+                self.remember(FinishedWord(typed: word, delimiter: delimiter,
+                                           chechen: false, corrected: false))
                 return
             }
             self.correctionCount += 1
+            self.recentWords.removeAll()
+            self.remember(FinishedWord(typed: correction.text, delimiter: delimiter,
+                                       chechen: LayoutCorrectionEngine.looksChechen(correction.text),
+                                       corrected: true))
             self.lastCorrection = LastCorrection(
-                original: word,
-                corrected: correction.text,
-                delimiter: delimiter
+                original: usedSpan ? spanOriginal + word : word,
+                corrected: usedSpan ? spanCorrected + correction.text : correction.text,
+                delimiter: delimiter,
+                originalWords: usedSpan ? spanWords + [word] : [word]
             )
             guard let language = correction.inputLanguage else {
                 self.correctionStatus = "\(word) → \(correction.text)"

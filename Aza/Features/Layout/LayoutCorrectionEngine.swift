@@ -185,6 +185,10 @@ enum LayoutCorrectionEngine {
 
     @MainActor
     private static func directCorrection(for word: String) -> (text: String, inputLanguage: String?)? {
+        // Пользователь отменял исправление этого слова — не трогаем ни одной
+        // стадией (раньше проверялось только в палочке и опечатках, и слово
+        // после отмены снова исправлялось ремапом).
+        guard !UserWordLists.shared.isNeverCorrect(word) else { return nil }
         // ponytail: naive spellchecker + marker gate, no confidence scoring;
         // replace with the real RU/EN/Chechen classifier in Stage 5.
         if let normalized = normalizedPalochka(word) {
@@ -194,7 +198,7 @@ enum LayoutCorrectionEngine {
         if let table = KeyboardLayoutMap.table(from: "en", to: "ru"),
            let russian = remapped(word, table: table) {
             guard word.count >= 3,
-                  !isValidWord(word, language: "en"),
+                  !isValidEnglishTyped(word),
                   isValidWord(russian, language: "ru") || looksChechen(russian) else { return nil }
 
             // Неоднозначность первого символа (PLAN-chechen §3.3): если замена
@@ -242,6 +246,31 @@ enum LayoutCorrectionEngine {
         }
 
         return nil
+    }
+
+    /// NSSpellChecker игнорирует не-буквы («[e» для него — валидное «e»),
+    /// поэтому слово с не-буквенными символами валидным английским не бывает.
+    @MainActor
+    private static func isValidEnglishTyped(_ word: String) -> Bool {
+        word.allSatisfy(\.isLetter) && isValidWord(word, language: "en")
+    }
+
+    /// Контекстный ремап для правил фразы (спец-случай коротких слов):
+    /// в окружении чеченских слов короткое слово тоже считаем чеченским,
+    /// если его ремап — частотное слово словаря. Строже обычного пути:
+    /// частотный порог зависит от длины, слова с ВЕРХНИМ регистром внутри
+    /// (бренды: BMW, iOS) и валидные английские не трогаются.
+    @MainActor
+    static func chechenContextRemap(for word: String) -> String? {
+        let bar = word.count <= 2 ? 20 : 10
+        guard word.count >= 2,
+              !UserWordLists.shared.isNeverCorrect(word),
+              word.dropFirst().allSatisfy({ !$0.isUppercase }),
+              !isValidEnglishTyped(word),
+              let table = KeyboardLayoutMap.table(from: "en", to: "ru"),
+              let mapped = remapped(word, table: table),
+              ChechenLexicon.shared.frequency(of: mapped) >= bar else { return nil }
+        return mapped
     }
 
     @MainActor

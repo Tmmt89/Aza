@@ -183,9 +183,20 @@ final class ClipboardStore: ObservableObject {
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
         ]
+        var readQuery = query
+        readQuery[kSecReturnAttributes as String] = true
         var item: CFTypeRef?
-        let readStatus = SecItemCopyMatching(query as CFDictionary, &item)
-        if readStatus == errSecSuccess, let data = item as? Data {
+        let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &item)
+        if readStatus == errSecSuccess,
+           let attributes = item as? [String: Any],
+           let data = attributes[kSecValueData as String] as? Data {
+            // Одноразовая миграция: метка отмечает, что элемент уже
+            // пересоздан подписанным приложением.
+            if attributes[kSecAttrLabel as String] as? String != Self.keyOwnershipLabel {
+                guard reassignKeyOwnership(query: query, keyData: data) else {
+                    return (SymmetricKey(data: data), false)
+                }
+            }
             return (SymmetricKey(data: data), true)
         }
         guard readStatus == errSecItemNotFound else {
@@ -194,16 +205,62 @@ final class ClipboardStore: ObservableObject {
         }
 
         let key = SymmetricKey(size: .bits256)
-        var add = query
-        add[kSecReturnData as String] = nil
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
-        let status = SecItemAdd(add as CFDictionary, nil)
+        let status = addKeyItem(query: query, keyData: key.withUnsafeBytes { Data($0) })
         if status != errSecSuccess {
             NSLog("Aza: keychain SecItemAdd failed (%d) — history will not survive relaunch", status)
             return (key, false)
         }
         return (key, true)
+    }
+
+    /// Метка мигрированного элемента: миграция выполняется один раз.
+    private static let keyOwnershipLabel = "Aza clipboard key v2"
+
+    private static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {
+        var add = query
+        add[kSecReturnData as String] = nil
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        add[kSecAttrLabel as String] = keyOwnershipLabel
+        add[kSecValueData as String] = keyData
+        return SecItemAdd(add as CFDictionary, nil)
+    }
+
+    /// Однократная миграция владельца ключа. Элемент, созданный неподписанной
+    /// сборкой, требует подтверждения в диалоге Keychain у КАЖДОГО нового
+    /// бинарника (ACL + partition list привязаны к создателю). Пересоздание
+    /// элемента текущим подписанным приложением привязывает доступ к
+    /// сертификату «Aza Development» — будущие пересборки читают бесшумно.
+    /// Ключ уже в памяти, поэтому текущая сессия работает при любом исходе.
+    /// Возврат false — пересоздание не удалось: вызывающий обязан перевести
+    /// сессию в read-only, чтобы не плодить состояния, которые не переживут
+    /// перезапуск.
+    private static func reassignKeyOwnership(query: [String: Any], keyData: Data) -> Bool {
+        // Проба записи ДО удаления старого элемента: если Keychain не
+        // принимает новые записи, старый ключ остаётся нетронутым.
+        var probeQuery = query
+        probeQuery[kSecAttrAccount as String] = "history-key.migration-probe"
+        var probeDelete = probeQuery
+        probeDelete[kSecReturnData as String] = nil
+        SecItemDelete(probeDelete as CFDictionary)
+        guard addKeyItem(query: probeQuery, keyData: keyData) == errSecSuccess else {
+            NSLog("Aza: migration probe add failed — keeping the original key item")
+            return false
+        }
+        SecItemDelete(probeDelete as CFDictionary)
+
+        var del = query
+        del[kSecReturnData as String] = nil
+        SecItemDelete(del as CFDictionary)
+        let status = addKeyItem(query: query, keyData: keyData)
+        if status != errSecSuccess {
+            // Только что проверенная запись внезапно упала: пытаемся вернуть
+            // исходный элемент, чтобы история пережила перезапуск.
+            let restore = addKeyItem(query: query, keyData: keyData)
+            NSLog("Aza: key migration add failed (%d), restore=%d", status,
+                  restore == errSecSuccess ? 1 : 0)
+            return restore == errSecSuccess
+        }
+        return true
     }
 
     // MARK: Самопроверка (Debug)
