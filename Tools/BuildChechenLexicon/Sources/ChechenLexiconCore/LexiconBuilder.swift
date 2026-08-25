@@ -53,15 +53,18 @@ public struct BuildStats: Codable {
     public var keptWords: Int
     public var droppedBelowMinCount: Int
     public var droppedCharset: Int
+    public var droppedRussianFilter: Int
     public var minCount: Int
 
     init(perSourceRawTokens: [String: Int], scalingFactors: [String: Double],
-         keptWords: Int, droppedBelowMinCount: Int, droppedCharset: Int, minCount: Int) {
+         keptWords: Int, droppedBelowMinCount: Int, droppedCharset: Int,
+         droppedRussianFilter: Int, minCount: Int) {
         self.perSourceRawTokens = perSourceRawTokens
         self.scalingFactors = scalingFactors
         self.keptWords = keptWords
         self.droppedBelowMinCount = droppedBelowMinCount
         self.droppedCharset = droppedCharset
+        self.droppedRussianFilter = droppedRussianFilter
         self.minCount = minCount
     }
 }
@@ -99,7 +102,8 @@ public final class LexiconBuilder {
         !word.isEmpty && word.allSatisfy(Palochka.isCyrillic)
     }
 
-    public func finalize(minCount: Int = 2) -> (entries: [LexiconEntry], stats: BuildStats) {
+    public func finalize(minCount: Int = 2,
+                         excludingRussian russianWords: Set<String> = []) -> (entries: [LexiconEntry], stats: BuildStats) {
         // 1. Сырые суммы по источникам.
         var rawTotals: [String: Int] = [:]
         var totals: [String: Double] = [:]
@@ -131,9 +135,12 @@ public final class LexiconBuilder {
 
         // 4. Отсев мусора и сборка.
         var entries: [LexiconEntry] = []
-        var low = 0, bad = 0
+        var low = 0, bad = 0, russian = 0
         for (word, count) in weighted {
             guard Self.isValidWord(word) else { bad += 1; continue }
+            // Русские заимствования из корпуса (мало/было/…) мешают движку
+            // отличать языки — исключаются по внешнему списку-фильтру.
+            if russianWords.contains(word) { russian += 1; continue }
             guard Int(count.rounded()) >= minCount else { low += 1; continue }
             entries.append(LexiconEntry(
                 word: word,
@@ -151,6 +158,7 @@ public final class LexiconBuilder {
             keptWords: entries.count,
             droppedBelowMinCount: low,
             droppedCharset: bad,
+            droppedRussianFilter: russian,
             minCount: minCount
         )
         return (entries, stats)

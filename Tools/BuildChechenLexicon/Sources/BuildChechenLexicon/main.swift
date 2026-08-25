@@ -26,6 +26,9 @@ let cacheDirectory = FileManager.default.homeDirectoryForCurrentUser
 struct ConfigFile: Codable {
     var minCount: Int
     var sources: [SourceConfig]
+    /// Файл со списком русских слов (по одному в строке): все совпадения
+    /// исключаются из итогового чеченского словаря.
+    var russianFilterPath: String?
 }
 
 struct Manifest: Codable {
@@ -34,6 +37,20 @@ struct Manifest: Codable {
     var minCount: Int
     var datasetRevisions: [String: String]
     var stats: BuildStats
+}
+
+/// Загружает файл фильтра русских слов (по одному слову в строке).
+func loadRussianFilter(_ path: String?) -> Set<String> {
+    guard let path else { return [] }
+    do {
+        let content = try String(contentsOfFile: path, encoding: .utf8)
+        let words = Set(content.split(separator: "\n").map(String.init))
+        print("→ Фильтр русских слов:", words.count, "слов из", path)
+        return words
+    } catch {
+        print("⚠️ Не удалось загрузить фильтр русских слов:", error.localizedDescription)
+        return []
+    }
 }
 
 switch arguments[1] {
@@ -102,7 +119,10 @@ case "build":
         print("   загружено \(text.split(separator: "\n").count) строк(и)")
     }
 
-    let (entries, stats) = builder.finalize(minCount: config.minCount)
+    let (entries, stats) = builder.finalize(
+        minCount: config.minCount,
+        excludingRussian: loadRussianFilter(config.russianFilterPath)
+    )
     try FileManager.default.createDirectory(atPath: outputDir,
                                             withIntermediateDirectories: true)
 
