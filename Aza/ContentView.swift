@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var hotKey: GlobalHotKey
+    @AppStorage(ChechenAutocorrect.storageKey) private var typoCorrectionEnabled = false
     @State private var pasteboardStatus = "Типы ещё не проверялись"
     @State private var pasteboardTypes = ""
 
@@ -39,6 +40,15 @@ struct ContentView: View {
                 Text("Нужно для анализа завершённого слова")
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            Toggle("Исправлять чеченские опечатки", isOn: $typoCorrectionEnabled)
+                .toggleStyle(.switch)
+            Text("Выключено по умолчанию: исправляет слово, только если в словаре ровно один кандидат на расстоянии одной правки")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 

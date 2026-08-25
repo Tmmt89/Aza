@@ -120,6 +120,33 @@ enum LayoutCorrectionEngine {
         return (correction.text + suffix, correction.inputLanguage)
     }
 
+    /// Орфографическая автокоррекция чеченских опечаток (PLAN-chechen §3.3).
+    ///
+    /// Применяется ТОЛЬКО при всех условиях сразу:
+    /// - функция включена пользователем (по умолчанию выключена);
+    /// - слово кириллическое, длина ≥ 4;
+    /// - слова НЕТ в чеченском словаре;
+    /// - оно НЕ является допустимым русским словом (смешанный
+    ///   русско-чеченский текст — норма, русские слова не трогаются);
+    /// - в словаре существует РОВНО ОДИН кандидат на расстоянии одной правки,
+    ///   причём сохраняющий первую букву (дополнительный предохранитель
+    ///   против межъязыковых подмен);
+    /// - кандидат — не имя собственное.
+    @MainActor
+    static func typoCorrection(for word: String) -> String? {
+        guard ChechenAutocorrect.isEnabled,
+              ChechenLexicon.shared.isAvailable,
+              word.count >= 4,
+              !word.isEmpty,
+              word.allSatisfy(isCyrillic),
+              !ChechenLexicon.shared.contains(word),
+              !isValidWord(word, language: "ru") else { return nil }
+
+        guard let neighbor = ChechenLexicon.shared.oneEditNeighbor(of: word),
+              neighbor.first == word.lowercased().first else { return nil }
+        return neighbor
+    }
+
     @MainActor
     private static func directCorrection(for word: String) -> (text: String, inputLanguage: String?)? {
         // ponytail: naive spellchecker + marker gate, no confidence scoring;
@@ -134,6 +161,13 @@ enum LayoutCorrectionEngine {
                   !isValidWord(word, language: "en"),
                   isValidWord(russian, language: "ru") || looksChechen(russian) else { return nil }
             return (russian, "ru")
+        }
+
+        // Chechen typo stage (PLAN-chechen §3.3): user setting, OFF by default.
+        // Runs before the Latinization guard so a marker-less misspelled
+        // Chechen word can still be repaired instead of being Latinized.
+        if let typo = typoCorrection(for: word) {
+            return (typo, nil)
         }
 
         // Chechen Cyrillic words fail the Russian spellchecker — they must

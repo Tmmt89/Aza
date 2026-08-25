@@ -41,4 +41,62 @@ final class ChechenLexicon {
     func contains(_ word: String) -> Bool {
         words.contains(word.lowercased())
     }
+
+    /// Алфавит для генерации кандидатов в одну правку: русские буквы + палочка.
+    private static let alphabet = Array("абвгдеёжзийклмнопрстуфхцчшщъыьэюяӏ")
+
+    /// Единственный сосед слова на расстоянии одной правки (удаление,
+    /// замена, вставка или транспозиция соседних букв) — или nil.
+    ///
+    /// Условия безопасности (PLAN-chechen §3.3):
+    /// - кандидаты ищутся только среди слов словаря;
+    /// - имена собственные (capitalOnly) никогда не предлагаются;
+    /// - если кандидатов 0 или больше одного — возвращается nil.
+    func oneEditNeighbor(of word: String) -> String? {
+        let lower = word.lowercased()
+        guard lower.count >= 4 else { return nil }
+
+        var characters = Array(lower)
+        var candidates = Set<String>()
+
+        func register(_ variant: [Character]) {
+            let candidate = String(variant)
+            if candidate != lower, words.contains(candidate),
+               !capitalOnlyWords.contains(candidate) {
+                candidates.insert(candidate)
+            }
+        }
+
+        // Удаление.
+        for index in characters.indices {
+            var variant = characters
+            variant.remove(at: index)
+            register(variant)
+        }
+        // Замена.
+        for index in characters.indices {
+            for letter in Self.alphabet where letter != characters[index] {
+                var variant = characters
+                variant[index] = letter
+                register(variant)
+            }
+        }
+        // Вставка.
+        for index in 0...characters.count {
+            for letter in Self.alphabet {
+                var variant = characters
+                variant.insert(letter, at: index)
+                register(variant)
+            }
+        }
+        // Транспозиция соседних букв.
+        for index in characters.indices.dropLast()
+        where characters[index] != characters[index + 1] {
+            var variant = characters
+            variant.swapAt(index, index + 1)
+            register(variant)
+        }
+
+        return candidates.count == 1 ? candidates.first : nil
+    }
 }

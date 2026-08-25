@@ -51,6 +51,12 @@ final class GlobalHotKey: ObservableObject {
             assert(LayoutCorrectionEngine.correction(for: "ghbdtn,")?.text == "привет,")
             assert(LayoutCorrectionEngine.correction(for: "hello,") == nil)
             assert(LayoutCorrectionEngine.correction(for: "привет,") == nil)
+            // Typo stage is OFF by default (PLAN-chechen §3.3): while the
+            // setting is untouched, a misspelled word must never be repaired.
+            if !ChechenAutocorrect.isEnabled {
+                assert(LayoutCorrectionEngine.correction(for: "баркла") == nil)
+                assert(LayoutCorrectionEngine.correction(for: "превет") == nil)
+            }
         }
 #endif
         let monitor = WordMonitor { [weak self] word, delimiter in
