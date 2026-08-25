@@ -87,15 +87,14 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// Избранное переживает автоочистку по объёму (спецификация §8.6).
+    /// Записи хранятся новые-сверху, поэтому удаляем с хвоста — самые старые.
     private func pruneExcess() {
-        guard entries.count > instanceLimit else { return }
-        let overflow = entries.count - instanceLimit
-        var removed = 0
-        entries.removeAll { entry in
-            guard removed < overflow else { return false }
-            if entry.isFavorite == true { return false }
-            removed += 1
-            return true
+        var index = entries.count - 1
+        while entries.count > instanceLimit && index >= 0 {
+            if entries[index].isFavorite != true {
+                entries.remove(at: index)
+            }
+            index -= 1
         }
     }
 
@@ -114,8 +113,9 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
+    /// Очищает историю, сохраняя избранное (как обещает кнопка в меню).
     func clearAll() {
-        entries.removeAll()
+        entries.removeAll { $0.isFavorite != true }
         save()
     }
 
@@ -168,7 +168,12 @@ final class ClipboardStore: ObservableObject {
         add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
         SecItemDelete(query as CFDictionary)
         let status = SecItemAdd(add as CFDictionary, nil)
-        assert(status == errSecSuccess, "Keychain: не удалось сохранить ключ (\(status))")
+        if status != errSecSuccess {
+            // Ключ не сохранился: история этой сессии не расшифруется после
+            // перезапуска. Логируем и в Release, а не только ассертим в Debug.
+            NSLog("Aza: Keychain SecItemAdd failed (%d), clipboard history will not survive relaunch", status)
+            assertionFailure("Keychain: не удалось сохранить ключ (\(status))")
+        }
         return key
     }
 
@@ -197,6 +202,10 @@ final class ClipboardStore: ObservableObject {
         assert(store.entries.count == 3)
         assert(store.entries.contains { $0.text == sample && $0.isFavorite == true },
                "избранное удалено автоочисткой")
+        assert(store.entries.first?.text == sample + "в",
+               "автоочистка удалила новейшую запись вместо старейшей")
+        assert(!store.entries.contains { $0.text == sample + "а" },
+               "автоочистка не удалила старейшую запись")
 
         let rawOnDisk = (try? Data(contentsOf: tempURL)) ?? Data()
         assert(!rawOnDisk.isEmpty)
@@ -206,6 +215,10 @@ final class ClipboardStore: ObservableObject {
         assert(reloaded.entries.first { $0.text == sample }?.isFavorite == true,
                "избранное потеряно при перезагрузке")
         assert(reloaded.entries.count == 3)
+
+        reloaded.clearAll()
+        assert(reloaded.entries.map(\.text) == [sample],
+               "clearAll обязан сохранить избранное и удалить остальное")
 
         try? Data([0x00, 0x01, 0x02]).write(to: tempURL)
         assert(ClipboardStore(storageURL: tempURL, maxEntries: 3).entries.isEmpty)
