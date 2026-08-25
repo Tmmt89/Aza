@@ -12,15 +12,11 @@ work/
 # Local prayer catalog: its source records are not cleared for redistribution.
 Sources/Aza/Resources/prayer-schedules-2026.json
 
-# Датасеты и артефакты конвейера чеченского лексикона (большие файлы,
-# в git не входят; готовый lexicon.tsv коммитится отдельно после проверки лицензий)
+# Датасеты и промежуточные файлы конвейера чеченского лексикона
+# (большие файлы, в git не входят)
 # ВНИМАНИЕ: папку датасетов НЕ называть «sources» — на macOS
 # (регистронезависимая ФС) шаблон sources/ зацепит и Sources/ с кодом.
 Tools/BuildChechenLexicon/datasets/
 Tools/BuildChechenLexicon/out_lexicon/
 Tools/BuildChechenLexicon/config.json
-
-# Словарь в ресурсах приложения: артефакт корпуса с неподтверждённой
-# лицензией. Без него приложение собирается и работает в fallback-режиме.
-Aza/Resources/chechen-lexicon.tsv
 

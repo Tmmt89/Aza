@@ -24,13 +24,19 @@ for path in sorted(root.rglob("*")):
         continue
     upper = text.count("\u04c0")
     lower = text.count("\u04cf")
-    if upper or lower:
+    ukrainian_i = text.count("\u0456")
+    if upper or lower or ukrainian_i:
         lines = [
-            f"  строка {i}: U+04C0 x{line.count(chr(0x4c0))}, U+04CF x{line.count(chr(0x4cf))}"
+            f"  строка {i}: U+04C0 x{line.count(chr(0x4c0))}, U+04CF x{line.count(chr(0x4cf))}, U+0456 x{line.count(chr(0x456))}"
             for i, line in enumerate(text.split("\n"), 1)
-            if "\u04c0" in line
+            if "\u04c0" in line or "\u0456" in line
         ]
-        status = "OK" if upper == 0 else "ЕСТЬ ЗАГЛАВНЫЕ"
-        print(f"{path}: U+04CF={lower}, U+04C0={upper} [{status}]")
+        problems = []
+        if upper:
+            problems.append("ЕСТЬ ЗАГЛАВНЫЕ")
+        if ukrainian_i:
+            problems.append("ЕСТЬ УКР-І (подмена палочки!)")
+        status = ", ".join(problems) if problems else "OK"
+        print(f"{path}: U+04CF={lower}, U+04C0={upper}, U+0456={ukrainian_i} [{status}]")
         for line_info in lines[:6]:
             print(line_info)

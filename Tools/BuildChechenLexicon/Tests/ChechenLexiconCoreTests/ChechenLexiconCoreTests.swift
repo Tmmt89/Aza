@@ -117,6 +117,17 @@ final class ChechenLexiconCoreTests: XCTestCase {
         XCTAssertLessThan(stats.scalingFactors["scripture"]!, 1.0)
     }
 
+    func testUkrainianICanonicalizedInBothCases() {
+        // Корпус lingtrain использует заглавную украинскую І (U+0406),
+        // пользователи со украинской раскладкой могут ввести строчную
+        // U+0456 — обе сводятся к канонической палочке U+04CF.
+        let p = String(Palochka.character)
+        XCTAssertEqual(Normalizer.canonical("т\u{0456}е"), "т" + p + "е")
+        XCTAssertEqual(Normalizer.canonical("Т\u{0406}е".lowercased()), "т" + p + "е")
+        XCTAssertTrue(Palochka.isSubstitution("\u{0456}"))
+        XCTAssertTrue(Palochka.isSubstitution("\u{0406}"))
+    }
+
     func testCoverageRecognizesCanonicalForms() throws {
         let p = String(Palochka.character)
         let builder = Self.makeBuilder(Self.dictSource,

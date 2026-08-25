@@ -38,6 +38,19 @@ struct Manifest: Codable {
 
 switch arguments[1] {
 
+case "selftest":
+    // Диагностика расхождений тестов и рантайма: печатает фактическое
+    // содержимое таблицы подмен и результат канонизации в hex-скалярах.
+    let probe = "т\u{0456}е"
+    print("substitutions:", Palochka.substitutions.sorted().map {
+        "U+" + String(String($0.unicodeScalars.first!.value, radix: 16)).uppercased()
+    })
+    print("isSubstitution(U+0456):", Palochka.isSubstitution("\u{0456}"))
+    print("character:", "U+" + String(String(Palochka.character.unicodeScalars.first!.value, radix: 16)).uppercased())
+    let canonized = Normalizer.canonical(probe)
+    print("canonical(т+U+0456+е) скаляры:",
+          canonized.unicodeScalars.map { "U+" + String($0.value, radix: 16).uppercased() })
+
 case "build":
     guard arguments.count >= 6 else { usage() }
     var configPath: String?

@@ -11,7 +11,13 @@ public enum Palochka {
     public static let uppercaseCharacter: Character = "\u{04C0}"
 
     /// Частые подмены палочки при наборе и в старых изданиях.
-    public static let substitutions: Set<Character> = ["1", "I", "l"]
+    /// Известные кодовые точки-близнецы:
+    /// - U+0456 строчная и U+0406 ЗАГЛАВНАЯ украинская І — именно ими
+    ///   корпус lingtrain кодирует палочку (103 928 вхождений!);
+    /// - цифра 1 и латинские I/l — обычный пользовательский набор.
+    public static let substitutions: Set<Character> = [
+        "1", "I", "l", "\u{0456}", "\u{0406}",
+    ]
 
     public static func isSubstitution(_ c: Character) -> Bool {
         substitutions.contains(c)

@@ -15,7 +15,12 @@ enum LayoutCorrectionEngine {
     private static let uppercasePalochka: Character = "\u{04C0}"
 
     /// Characters commonly typed instead of the Chechen palochka Ӏ.
-    private static let palochkaLookalikes: Set<Character> = ["1", "I", "l"]
+    /// Known codepoint twins: digit 1, Latin I/l, Ukrainian lowercase І
+    /// (U+0456) AND Ukrainian uppercase І (U+0406) — the lingtrain corpus
+    /// encodes the palochka with the latter (103,928 occurrences!).
+    private static let palochkaLookalikes: Set<Character> = [
+        "1", "I", "l", "\u{0456}", "\u{0406}",
+    ]
 
     /// Trailing characters that are more likely real punctuation than the
     /// letters б/ю, so a word ending in them is retried without them.
