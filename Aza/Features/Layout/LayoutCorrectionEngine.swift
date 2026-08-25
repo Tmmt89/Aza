@@ -51,6 +51,12 @@ enum LayoutCorrectionEngine {
         return chechenMarkers.contains { lowered.contains($0) }
     }
 
+    /// Каноническая форма слова для пользовательских списков: все подмены
+    /// палочки (включая украинские І) заменяются на U+04CF, регистр нижний.
+    static func canonicalPalochkaForm(of word: String) -> String {
+        String(word.map { palochkaLookalikes.contains($0) ? palochka : $0 }).lowercased()
+    }
+
     /// 1/I/l inside a Cyrillic word → canonical palochka.
     ///
     /// With a bundled lexicon this is hypothesis checking (PLAN-chechen §3.2):
@@ -61,6 +67,8 @@ enum LayoutCorrectionEngine {
     /// Without a lexicon resource the legacy greedy rule applies: all
     /// lookalikes are replaced (protection still comes from looksChechen).
     static func normalizedPalochka(_ word: String) -> String? {
+        // Пользователь отменил исправление этого слова — больше не трогаем.
+        guard !UserWordLists.shared.isNeverCorrect(word) else { return nil }
         guard word.contains(where: isCyrillic),
               word.contains(where: { palochkaLookalikes.contains($0) }) else { return nil }
 
@@ -134,6 +142,8 @@ enum LayoutCorrectionEngine {
     /// - кандидат — не имя собственное.
     @MainActor
     static func typoCorrection(for word: String) -> String? {
+        // Пользовательское исключение: слово отменялось через undo.
+        guard !UserWordLists.shared.isNeverCorrect(word) else { return nil }
         guard ChechenAutocorrect.isEnabled,
               ChechenLexicon.shared.isAvailable,
               word.count >= 4,

@@ -68,6 +68,25 @@ struct ContentView: View {
 
             Divider()
 
+            Text("Двойной правый Shift — отменить последнее исправление (слово попадёт в исключения)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text("Исключений: \(UserWordLists.shared.neverCorrect.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !UserWordLists.shared.neverCorrect.isEmpty {
+                    Button("Очистить") {
+                        UserWordLists.shared.clearNeverCorrect()
+                    }
+                    .font(.caption)
+                }
+            }
+
+            Divider()
+
             Button("Завершить Aza") {
                 NSApp.terminate(nil)
             }

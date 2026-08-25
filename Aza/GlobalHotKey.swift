@@ -16,6 +16,15 @@ final class GlobalHotKey: ObservableObject {
 
     private var hotKeyController: HotKeyController?
     private var wordMonitor: WordMonitor?
+    private var shiftMonitor: Any?
+    /// Последнее применённое исправление — для отката двойным правым Shift.
+    private struct LastCorrection {
+        let original: String
+        let corrected: String
+        let delimiter: String
+    }
+    private var lastCorrection: LastCorrection?
+    private var lastRightShiftPress = Date.distantPast
 
     init() {
 #if DEBUG
@@ -67,6 +76,7 @@ final class GlobalHotKey: ObservableObject {
         inputMonitoringGranted = CGPreflightListenEventAccess()
         if inputMonitoringGranted {
             monitor.start()
+            startUndoMonitor()
         }
 
         let controller = HotKeyController { [weak self] in
@@ -83,12 +93,69 @@ final class GlobalHotKey: ObservableObject {
             : "Включите Aza в Input Monitoring и перезапустите"
         if inputMonitoringGranted {
             wordMonitor?.start()
+            startUndoMonitor()
         }
     }
 
     func stop() {
         hotKeyController?.stop()
         wordMonitor?.stop()
+        if let shiftMonitor {
+            NSEvent.removeMonitor(shiftMonitor)
+            self.shiftMonitor = nil
+        }
+    }
+
+    // MARK: Отмена последнего исправления (двойной правый Shift)
+
+    private func startUndoMonitor() {
+        guard shiftMonitor == nil else { return }
+        shiftMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.handleFlagsChanged(event)
+            }
+        }
+    }
+
+    /// flagsChanged приходит и на нажатие, и на отпускание; нажатием считаем
+    /// момент, когда .shift ещё зажат, а код — именно правого Shift (54).
+    private func handleFlagsChanged(_ event: NSEvent) {
+        guard event.keyCode == UInt16(kVK_RightShift),
+              event.modifierFlags.contains(.shift) else { return }
+
+        let now = Date()
+        defer { lastRightShiftPress = now }
+        guard now.timeIntervalSince(lastRightShiftPress) < 0.7 else { return }
+        lastRightShiftPress = .distantPast
+        undoLastCorrection()
+    }
+
+    /// Возвращает последнее исправление тем же проверенным механизмом замены
+    /// (текст перед кареткой обязан совпасть) и заносит исходное слово в
+    /// исключения — второй раз оно не исправляется.
+    private func undoLastCorrection() {
+        guard let last = lastCorrection else {
+            correctionStatus = "Отменять нечего"
+            return
+        }
+        guard let element = TextInsertion.focusedElement(),
+              SecureFieldDetector.isTextInput(element),
+              !SecureFieldDetector.isSecure(element) else {
+            correctionStatus = "Поле для отмены недоступно"
+            return
+        }
+
+        if TextInsertion.replaceTypedText(
+            in: element,
+            expecting: last.corrected + last.delimiter,
+            with: last.original + last.delimiter
+        ) {
+            UserWordLists.shared.addNeverCorrect(last.original)
+            correctionStatus = "Отменено: \(last.corrected) → \(last.original); в исключениях"
+            lastCorrection = nil
+        } else {
+            correctionStatus = "Не удалось отменить (текст перед курсором изменился)"
+        }
     }
 
     private func handleActivation() {
@@ -141,6 +208,11 @@ final class GlobalHotKey: ObservableObject {
                 return
             }
             self.correctionCount += 1
+            self.lastCorrection = LastCorrection(
+                original: word,
+                corrected: correction.text,
+                delimiter: delimiter
+            )
             guard let language = correction.inputLanguage else {
                 self.correctionStatus = "\(word) → \(correction.text)"
                 return
