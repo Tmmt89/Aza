@@ -11,6 +11,9 @@ struct ClipEntry: Codable, Equatable, Identifiable {
     var sourceAppBundleID: String?
     /// Локализованное имя приложения-источника.
     var sourceAppName: String?
+    /// Избранное: не удаляется автоочисткой по объёму. Опционально,
+    /// чтобы старые зашифрованные хранилища декодировались без миграции.
+    var isFavorite: Bool?
 }
 
 /// Хранилище истории буфера: AES-GCM (CryptoKit) на диске, ключ —
@@ -29,6 +32,7 @@ final class ClipboardStore: ObservableObject {
     @Published private(set) var entries: [ClipEntry] = []
 
     private let storageURL: URL
+    private let instanceLimit: Int
     private let key: SymmetricKey
 
     private struct Payload: Codable {
@@ -38,8 +42,13 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: Инициализация
 
-    init(storageURL: URL? = nil) {
+    /// - Parameters:
+    ///   - storageURL: файл зашифрованного хранилища.
+    ///   - maxEntries: локальный лимит для самопроверок и тестов;
+    ///     в приложении используется статический `maxEntries`.
+    init(storageURL: URL? = nil, maxEntries: Int = ClipboardStore.maxEntries) {
         self.storageURL = storageURL ?? Self.defaultStorageURL()
+        self.instanceLimit = maxEntries
         key = Self.loadOrCreateKey()
         load()
     }
@@ -73,9 +82,26 @@ final class ClipboardStore: ObservableObject {
             id: UUID(), text: trimmed, createdAt: Date(),
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName
         ), at: 0)
-        if entries.count > Self.maxEntries {
-            entries.removeLast(entries.count - Self.maxEntries)
+        pruneExcess()
+        save()
+    }
+
+    /// Избранное переживает автоочистку по объёму (спецификация §8.6).
+    private func pruneExcess() {
+        guard entries.count > instanceLimit else { return }
+        let overflow = entries.count - instanceLimit
+        var removed = 0
+        entries.removeAll { entry in
+            guard removed < overflow else { return false }
+            if entry.isFavorite == true { return false }
+            removed += 1
+            return true
         }
+    }
+
+    func toggleFavorite(id: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[index].isFavorite = !(entries[index].isFavorite == true)
         save()
     }
 
@@ -150,24 +176,38 @@ final class ClipboardStore: ObservableObject {
 
     /// Раундтрип шифрования на временном файле. Проверяет: запись читается
     /// обратно, на диске нет открытого текста, подменённый файл молча
-    /// игнорируется (AES-GCM tag не сойдётся).
+    /// игнорируется, избранное переживает перезагрузку и автоочистку.
     static func runSelfTest(sample: String) {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("aza-clipboard-selftest-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
-        let store = ClipboardStore(storageURL: tempURL)
+        let store = ClipboardStore(storageURL: tempURL, maxEntries: 3)
         store.add(text: sample, sourceAppBundleID: nil, sourceAppName: nil)
         assert(store.entries.first?.text == sample)
+
+        // Избранное: пометка, перезагрузка, защита от автоочистки.
+        store.toggleFavorite(id: store.entries[0].id)
+        assert(store.entries[0].isFavorite == true)
+
+        for suffix in ["а", "б", "в"] {
+            store.add(text: sample + suffix,
+                      sourceAppBundleID: nil, sourceAppName: nil)
+        }
+        assert(store.entries.count == 3)
+        assert(store.entries.contains { $0.text == sample && $0.isFavorite == true },
+               "избранное удалено автоочисткой")
 
         let rawOnDisk = (try? Data(contentsOf: tempURL)) ?? Data()
         assert(!rawOnDisk.isEmpty)
         assert(rawOnDisk.range(of: Data(sample.utf8)) == nil, "plaintext leaked to disk")
 
-        let reloaded = ClipboardStore(storageURL: tempURL)
-        assert(reloaded.entries.first?.text == sample)
+        let reloaded = ClipboardStore(storageURL: tempURL, maxEntries: 3)
+        assert(reloaded.entries.first { $0.text == sample }?.isFavorite == true,
+               "избранное потеряно при перезагрузке")
+        assert(reloaded.entries.count == 3)
 
         try? Data([0x00, 0x01, 0x02]).write(to: tempURL)
-        assert(ClipboardStore(storageURL: tempURL).entries.isEmpty)
+        assert(ClipboardStore(storageURL: tempURL, maxEntries: 3).entries.isEmpty)
     }
 }

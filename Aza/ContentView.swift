@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var pasteboardStatus = "Типы ещё не проверялись"
     @State private var pasteboardTypes = ""
     @State private var copyStatus = ""
+    @State private var searchText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -68,35 +69,74 @@ struct ContentView: View {
                 .toggleStyle(.switch)
 
             if clipboardHistoryEnabled {
-                if clipboardStore.entries.isEmpty {
-                    Text("История пуста — скопируйте что-нибудь")
+                TextField("Поиск по истории", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+
+                let visibleEntries = Self.filtered(
+                    entries: clipboardStore.entries, query: searchText
+                )
+
+                if visibleEntries.isEmpty {
+                    Text(searchText.isEmpty ? "История пуста — скопируйте что-нибудь" : "Ничего не найдено")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(clipboardStore.entries.prefix(8)) { entry in
-                        Button {
-                            copyToPasteboard(entry)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(Self.preview(of: entry.text))
-                                    .lineLimit(1)
-                                Text(Self.metaLine(for: entry))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                    ForEach(visibleEntries.prefix(10)) { entry in
+                        HStack(alignment: .top, spacing: 6) {
+                            Button {
+                                insertIntoActiveApp(entry)
+                            } label: {
+                                Image(systemName: "arrow.down.to.line")
+                                    .font(.caption)
                             }
+                            .buttonStyle(.borderless)
+                            .help("Вставить в активное поле предыдущего приложения")
+
+                            Button {
+                                copyToPasteboard(entry)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(Self.preview(of: entry.text))
+                                        .lineLimit(1)
+                                        .foregroundStyle(.primary)
+                                    Text(Self.metaLine(for: entry))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .help("Клик — копировать в буфер; вставьте ⌘V")
+
+                            Spacer()
+
+                            Button {
+                                clipboardStore.toggleFavorite(id: entry.id)
+                            } label: {
+                                Image(systemName: entry.isFavorite == true
+                                      ? "star.fill" : "star")
+                                    .foregroundStyle(entry.isFavorite == true
+                                                     ? .yellow : .secondary)
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Избранное — не удаляется автоочисткой")
                         }
-                        .buttonStyle(.plain)
-                        .help("Копировать в буфер (вставьте через ⌘V)")
                     }
 
                     HStack {
-                        Text("Всего: \(clipboardStore.entries.count) · шифрование AES-GCM включено")
+                        Text(Self.footerLine(entries: clipboardStore.entries,
+                                             shown: min(visibleEntries.count, 10)))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Spacer()
+                        if !searchText.isEmpty {
+                            Button("Сбросить поиск") { searchText = "" }
+                                .font(.caption)
+                        }
                         Button("Очистить") {
                             clipboardStore.clearAll()
-                            copyStatus = "История очищена"
+                            copyStatus = "История очищена (избранное сохранено)"
                         }
                         .font(.caption)
                     }
@@ -161,6 +201,49 @@ struct ContentView: View {
                 pasteboardMonitor.start()
             }
         }
+    }
+
+    /// Клик по карточке: копия в буфер + попытка вставить прямо в поле
+    /// предыдущего приложения. Панель скрывается, фокус возвращается,
+    /// через 180 мс берём сфокусированный элемент системы и вставляем.
+    private func insertIntoActiveApp(_ entry: ClipEntry) {
+        copyToPasteboard(entry)
+        copyStatus = "Вставляю в активное приложение…"
+        NSApp.hide(nil)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
+            guard let element = TextInsertion.focusedElement(),
+                  SecureFieldDetector.isTextInput(element),
+                  !SecureFieldDetector.isSecure(element) else {
+                copyStatus = "Активное текстовое поле не найдено — текст в буфере (⌘V)"
+                return
+            }
+            let result = TextInsertion.insert(entry.text, into: element)
+            copyStatus = result == .success
+                ? "Вставлено в активное приложение"
+                : "Прямая вставка не поддержана (\(result.rawValue)) — ⌘V"
+        }
+    }
+
+    /// Фильтр поиска + сортировка: избранное сверху, затем по свежести.
+    static func filtered(entries: [ClipEntry], query: String) -> [ClipEntry] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let matched = query.isEmpty
+            ? entries
+            : entries.filter { $0.text.lowercased().contains(query) }
+        return matched.sorted {
+            if ($0.isFavorite == true) != ($1.isFavorite == true) {
+                return $0.isFavorite == true
+            }
+            return $0.createdAt > $1.createdAt
+        }
+    }
+
+    static func footerLine(entries: [ClipEntry], shown: Int) -> String {
+        let favorites = entries.filter { $0.isFavorite == true }.count
+        return "Всего \(entries.count), показано \(shown)" +
+            (favorites > 0 ? " · в избранном \(favorites)" : "") +
+            " · шифрование AES-GCM"
     }
 
     /// Копирует запись истории обратно в системный буфер.
