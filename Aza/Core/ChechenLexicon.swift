@@ -45,6 +45,13 @@ final class ChechenLexicon {
     /// Алфавит для генерации кандидатов в одну правку: русские буквы + палочка.
     private static let alphabet = Array("абвгдеёжзийклмнопрстуфхцчшщъыьэюяӏ")
 
+    private static let ukrainianITwins: Set<Character> = ["\u{0456}", "\u{0406}"]
+    private static let canonicalPalochka: Character = "\u{04CF}"
+
+    private static func replacingUkrainianI(in string: String) -> String {
+        String(string.map { ukrainianITwins.contains($0) ? canonicalPalochka : $0 })
+    }
+
     /// Единственный сосед слова на расстоянии одной правки (удаление,
     /// замена, вставка или транспозиция соседних букв) — или nil.
     ///
@@ -53,7 +60,11 @@ final class ChechenLexicon {
     /// - имена собственные (capitalOnly) никогда не предлагаются;
     /// - если кандидатов 0 или больше одного — возвращается nil.
     func oneEditNeighbor(of word: String) -> String? {
-        let lower = word.lowercased()
+        // Украинские І (U+0456/U+0406) — не «гипотезы», а грязный ввод:
+        // их сразу сводим к канону, иначе кандидаты унаследуют близнеца
+        // и никогда не совпадут со словарём. Цифра 1 и латинские I/l
+        // остаются как есть — это осмысленные варианты набора.
+        let lower = replacingUkrainianI(in: word).lowercased()
         guard lower.count >= 4 else { return nil }
 
         var characters = Array(lower)
