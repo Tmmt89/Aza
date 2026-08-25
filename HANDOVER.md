@@ -152,10 +152,14 @@ docs/                    # SPEC, планы, исследования, гайд�
 ```bash
 cd "/Users/tmmt/Documents/Code projects/Aza/Aza"
 
-# Xcode-приложение (системный прототип)
+# Xcode-приложение (системный прототип). ВСЕГДА со штатной подписью
+# проекта («Aza Development», self-signed сертификат в связке ключей).
+# НИКОГДА не собирать локально с CODE_SIGNING_ALLOWED=NO: смена подписи
+# сбрасывает TCC (Input Monitoring + Accessibility → «не исправляет»)
+# и блокирует чтение ключа истории из Keychain (диалог на старте;
+# а старый код вообще пересоздавал ключ — потеря истории навсегда).
 xcodebuild -project Aza.xcodeproj -scheme Aza -configuration Debug \
-  -destination 'platform=macOS,arch=arm64' CODE_SIGN_IDENTITY="-" \
-  CODE_SIGNING_ALLOWED=NO build
+  -destination 'platform=macOS,arch=arm64' build
 
 # SPM-прототип острова + self-check
 swift build && swift run Aza --self-check
@@ -179,12 +183,16 @@ python3 Tools/palochka_audit.py .
 баг «привет привет привет привет» (гонка мониторов слов).
 ```bash
 pkill -f "Products/Debug/Aza.app/Contents/MacOS/Aza"; sleep 1
-BIN=$(find ~/Library/Developer/Xcode/DerivedData/Aza-*/Build/Products/Debug \
-  -name Aza -type f -perm +111 | head -1)
-"$BIN" & sleep 4
+APP=$(dirname "$(dirname "$(dirname "$(find \
+  ~/Library/Developer/Xcode/DerivedData/Aza-*/Build/Products/Debug \
+  -name Aza -type f -perm +111 | head -1)")")")
+open --stderr /tmp/aza-smoke.log "$APP"; sleep 5
 pgrep -qf "Products/Debug/Aza" && echo "SMOKE OK" || echo "SMOKE FAIL"
+cat /tmp/aza-smoke.log   # строка «Aza: start …» показывает права и словарь
 pkill -f "Products/Debug/Aza.app/Contents/MacOS/Aza"
 ```
+Запуск только через `open` (не `"$BIN" &`): у прямого запуска TCC-права
+наследуются от терминала и диагностика врёт (см. грабли §8.10).
 
 ## 8. Грабли (уже наступали — не повторять)
 
@@ -202,6 +210,16 @@ pkill -f "Products/Debug/Aza.app/Contents/MacOS/Aza"
 7. `Scene` не имеет `.onAppear` — старт мониторов в init или View.
 8. У палочки 4 кодовых точки (см. §6) — проверять литералы глазами нельзя,
    только аудитом.
+9. **Сборка без подписи ломает TCC и Keychain.** Локальная пересборка с
+   `CODE_SIGNING_ALLOWED=NO` делает бинарник «другим приложением»: слетают
+   Input Monitoring/Accessibility (коррекция молча не работает), а чтение
+   ключа истории вызывает модальный диалог Keychain прямо в `AzaApp.init`
+   (приложение висит без иконки в меню). Собирать только со штатной
+   подпиской «Aza Development»; вариант без подписи — исключительно CI.
+10. **Процессы, запущенные из shell-обёртки Claude, наследуют её TCC.**
+   `nohup "$BIN"` показывает права терминала, не Aza — для честной проверки
+   запускать через `open`, диагностика старта пишется в stderr
+   (`open --stderr файл`).
 
 ## 9. Дорожная карта (приоритизированная)
 
@@ -227,6 +245,10 @@ WhisperKit (SPM) как основной путь; горячая клавиша
 азан со свободной лицензией (искать через Awesome-Muslims).
 
 ### Технический долг (по мере касания)
+- Keychain-доступ синхронно в AzaApp.init: ACL-диалог блокирует старт до
+  ответа пользователя. При стабильной подписи диалог одноразовый, поэтому
+  осознанно отложено; если станет мешать — вынести ClipboardStore в
+  асинхронную инициализацию.
 - тестовая цель для Xcode-приложения (чистые функции движка и лексикона);
 - реактивный счётчик исключений в меню (UserWordLists не Observable);
 - откат N последних слов вместо одного;

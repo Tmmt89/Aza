@@ -84,6 +84,13 @@ final class GlobalHotKey: ObservableObject {
         wordMonitor = monitor
 
         inputMonitoringGranted = CGPreflightListenEventAccess()
+        // Диагностика цепочки коррекции в unified log (без содержимого ввода):
+        // log stream --predicate 'process == "Aza"'
+        NSLog("Aza: start inputMonitoring=%d axTrusted=%d lexicon=%d layoutTable=%d",
+              inputMonitoringGranted ? 1 : 0,
+              AXIsProcessTrusted() ? 1 : 0,
+              ChechenLexicon.shared.isAvailable ? 1 : 0,
+              LayoutCorrectionEngine.isAvailable ? 1 : 0)
         if inputMonitoringGranted {
             monitor.start()
             startUndoMonitor()
@@ -195,11 +202,15 @@ final class GlobalHotKey: ObservableObject {
     }
 
     private func finishWord(_ word: String, delimiter: String) {
-        guard let correction = LayoutCorrectionEngine.correction(for: word) else { return }
+        let correction = LayoutCorrectionEngine.correction(for: word)
+        NSLog("Aza: finishWord len=%d correction=%d",
+              word.count, correction == nil ? 0 : 1)
+        guard let correction else { return }
 
         guard let element = TextInsertion.focusedElement(),
               SecureFieldDetector.isTextInput(element),
               !SecureFieldDetector.isSecure(element) else {
+            NSLog("Aza: focused element missing, non-text or secure")
             correctionStatus = "Поле нельзя исправлять"
             return
         }
@@ -209,11 +220,13 @@ final class GlobalHotKey: ObservableObject {
         // aborts the replacement instead of corrupting the field.
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
             guard let self else { return }
-            guard TextInsertion.replaceTypedText(
+            let replaced = TextInsertion.replaceTypedText(
                 in: element,
                 expecting: word + delimiter,
                 with: correction.text + delimiter
-            ) else {
+            )
+            NSLog("Aza: replaceTypedText ok=%d", replaced ? 1 : 0)
+            guard replaced else {
                 self.correctionStatus = "Не удалось заменить слово"
                 return
             }

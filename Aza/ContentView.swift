@@ -71,6 +71,13 @@ struct ContentView: View {
                 .toggleStyle(.switch)
 
             if clipboardHistoryEnabled {
+                if clipboardStore.isReadOnly {
+                    Label("Нет доступа к ключу истории (Keychain) — изменения не сохранятся до перезапуска",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 TextField("Поиск по истории", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .font(.caption)

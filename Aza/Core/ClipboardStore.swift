@@ -34,6 +34,13 @@ final class ClipboardStore: ObservableObject {
     private let storageURL: URL
     private let instanceLimit: Int
     private let key: SymmetricKey
+    /// false — ключ эфемерный (Keychain недоступен): историю не пишем,
+    /// чтобы не затереть файл, зашифрованный настоящим ключом.
+    private let keyIsPersistent: Bool
+
+    /// Сессия без доступа к настоящему ключу: изменения не переживут
+    /// перезапуск. Показывается в меню.
+    var isReadOnly: Bool { !keyIsPersistent }
 
     private struct Payload: Codable {
         var version = 1
@@ -49,7 +56,7 @@ final class ClipboardStore: ObservableObject {
     init(storageURL: URL? = nil, maxEntries: Int = ClipboardStore.maxEntries) {
         self.storageURL = storageURL ?? Self.defaultStorageURL()
         self.instanceLimit = maxEntries
-        key = Self.loadOrCreateKey()
+        (key, keyIsPersistent) = Self.loadOrCreateKey()
         load()
     }
 
@@ -136,6 +143,7 @@ final class ClipboardStore: ObservableObject {
     // MARK: Шифрование и диск
 
     private func save() {
+        guard keyIsPersistent else { return }
         do {
             let payload = try JSONEncoder().encode(Payload(entries: entries))
             let sealed = try AES.GCM.seal(payload, using: key).combined!
@@ -160,7 +168,13 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: Ключ в Keychain
 
-    private static func loadOrCreateKey() -> SymmetricKey {
+    /// Возвращает (ключ, persistent). Новый ключ создаётся ТОЛЬКО при
+    /// errSecItemNotFound. Любая другая ошибка чтения (отказ в доступе после
+    /// смены подписи бинарника и т.п.) — существующий ключ НЕ трогаем:
+    /// удаление или перезапись делает старую историю нерасшифровываемой
+    /// навсегда. Вместо этого сессия работает с эфемерным ключом, а save()
+    /// отключён, чтобы не затереть файл истории.
+    private static func loadOrCreateKey() -> (SymmetricKey, Bool) {
         let service = "com.tmmt.Aza.clipboard"
         let account = "history-key"
         var query: [String: Any] = [
@@ -170,9 +184,13 @@ final class ClipboardStore: ObservableObject {
             kSecReturnData as String: true,
         ]
         var item: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-           let data = item as? Data {
-            return SymmetricKey(data: data)
+        let readStatus = SecItemCopyMatching(query as CFDictionary, &item)
+        if readStatus == errSecSuccess, let data = item as? Data {
+            return (SymmetricKey(data: data), true)
+        }
+        guard readStatus == errSecItemNotFound else {
+            NSLog("Aza: keychain read failed (%d) — history is read-only this session", readStatus)
+            return (SymmetricKey(size: .bits256), false)
         }
 
         let key = SymmetricKey(size: .bits256)
@@ -180,15 +198,12 @@ final class ClipboardStore: ObservableObject {
         add[kSecReturnData as String] = nil
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
-        SecItemDelete(query as CFDictionary)
         let status = SecItemAdd(add as CFDictionary, nil)
         if status != errSecSuccess {
-            // Ключ не сохранился: история этой сессии не расшифруется после
-            // перезапуска. Логируем и в Release, а не только ассертим в Debug.
-            NSLog("Aza: Keychain SecItemAdd failed (%d), clipboard history will not survive relaunch", status)
-            assertionFailure("Keychain: не удалось сохранить ключ (\(status))")
+            NSLog("Aza: keychain SecItemAdd failed (%d) — history will not survive relaunch", status)
+            return (key, false)
         }
-        return key
+        return (key, true)
     }
 
     // MARK: Самопроверка (Debug)
