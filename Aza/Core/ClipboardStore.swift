@@ -104,12 +104,26 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
-    func entry(id: UUID) -> ClipEntry? {
-        entries.first { $0.id == id }
+    /// Запись, удалённая пользователем, — для «Отменить».
+    struct Deleted {
+        let entry: ClipEntry
     }
 
-    func remove(id: UUID) {
-        entries.removeAll { $0.id == id }
+    /// Удаляет карточку; возвращает данные для отмены (спецификация §8.7).
+    func delete(id: UUID) -> Deleted? {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return nil }
+        let deleted = Deleted(entry: entries.remove(at: index))
+        save()
+        return deleted
+    }
+
+    /// Возвращает удалённую запись на её хронологическое место: индекс по
+    /// createdAt, а не сохранённый, — новые копирования за время «Отменить»
+    /// не смещают точку вставки.
+    func restore(_ deleted: Deleted) {
+        let index = entries.firstIndex { $0.createdAt < deleted.entry.createdAt }
+            ?? entries.count
+        entries.insert(deleted.entry, at: index)
         save()
     }
 
@@ -215,6 +229,16 @@ final class ClipboardStore: ObservableObject {
         assert(reloaded.entries.first { $0.text == sample }?.isFavorite == true,
                "избранное потеряно при перезагрузке")
         assert(reloaded.entries.count == 3)
+
+        // Удаление с отменой: запись возвращается на хронологическое место
+        // даже после нового копирования между delete и restore.
+        let victim = reloaded.entries[1]
+        let deleted = reloaded.delete(id: victim.id)
+        assert(deleted != nil && !reloaded.entries.contains { $0.id == victim.id })
+        reloaded.add(text: sample + "г", sourceAppBundleID: nil, sourceAppName: nil)
+        reloaded.restore(deleted!)
+        assert(reloaded.entries[2].id == victim.id,
+               "отмена удаления не вернула запись на хронологическое место")
 
         reloaded.clearAll()
         assert(reloaded.entries.map(\.text) == [sample],

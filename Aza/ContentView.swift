@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var pasteboardTypes = ""
     @State private var copyStatus = ""
     @State private var searchText = ""
+    @State private var visibleLimit = 10
+    @State private var lastDeleted: ClipboardStore.Deleted?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -82,7 +84,7 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(visibleEntries.prefix(10)) { entry in
+                    ForEach(visibleEntries.prefix(visibleLimit)) { entry in
                         HStack(alignment: .top, spacing: 6) {
                             Button {
                                 insertIntoActiveApp(entry)
@@ -122,11 +124,24 @@ struct ContentView: View {
                             .buttonStyle(.borderless)
                             .help("Избранное — не удаляется автоочисткой")
                         }
+                        .contextMenu {
+                            Button("Удалить", role: .destructive) {
+                                deleteEntry(entry)
+                            }
+                        }
+                    }
+
+                    if visibleEntries.count > visibleLimit {
+                        Button("Показать ещё (\(visibleEntries.count - visibleLimit))") {
+                            visibleLimit += 10
+                        }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
                     }
 
                     HStack {
                         Text(Self.footerLine(entries: clipboardStore.entries,
-                                             shown: min(visibleEntries.count, 10)))
+                                             shown: min(visibleEntries.count, visibleLimit)))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -137,6 +152,21 @@ struct ContentView: View {
                         Button("Очистить") {
                             clipboardStore.clearAll()
                             copyStatus = "История очищена (избранное сохранено)"
+                        }
+                        .font(.caption)
+                    }
+                }
+                // Вне ветки списка: «Отменить» доступна и когда удалили
+                // последнюю видимую карточку (список/поиск пуст).
+                if let deleted = lastDeleted {
+                    HStack(spacing: 6) {
+                        Text("Удалено: \(Self.preview(of: deleted.entry.text))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Button("Отменить") {
+                            clipboardStore.restore(deleted)
+                            lastDeleted = nil
                         }
                         .font(.caption)
                     }
@@ -222,6 +252,17 @@ struct ContentView: View {
             copyStatus = result == .success
                 ? "Вставлено в активное приложение"
                 : "Прямая вставка не поддержана (\(result.rawValue)) — ⌘V"
+        }
+    }
+
+    /// Удаляет карточку и показывает «Отменить» на пять секунд (спец. §8.7).
+    private func deleteEntry(_ entry: ClipEntry) {
+        guard let deleted = clipboardStore.delete(id: entry.id) else { return }
+        lastDeleted = deleted
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            if lastDeleted?.entry.id == deleted.entry.id {
+                lastDeleted = nil
+            }
         }
     }
 
