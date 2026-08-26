@@ -85,6 +85,79 @@ enum TextInsertion {
         ) == .success
     }
 
+    /// Позиция каретки (location схлопнутого выделения); nil — выделение
+    /// не пустое или недоступно.
+    static func caretPosition(of element: AXUIElement) -> Int? {
+        guard let range = selectedRange(of: element), range.length == 0 else { return nil }
+        return range.location
+    }
+
+    /// Текст в диапазоне без изменения выделения (параметризованный AX).
+    private static func string(forRange range: CFRange, in element: AXUIElement) -> String? {
+        var cfRange = range
+        guard let value = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        var result: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXStringForRangeParameterizedAttribute as CFString,
+            value,
+            &result
+        ) == .success else { return nil }
+        return result as? String
+    }
+
+    /// Хвостовой токен строки: непрерывный не-пробельный суффикс.
+    static func trailingToken(of body: String) -> String {
+        String(body.reversed().prefix { !$0.isWhitespace }.reversed())
+    }
+
+    /// Возвращает слово, которое пользователь напечатал, если системная
+    /// автозамена подменила его между нажатием разделителя и этим вызовом
+    /// (macOS не знает чеченского: «лар» → «лор»). Перед кареткой обязан
+    /// стоять разделитель, а подменённый токен — отличаться от typed;
+    /// иначе поле не трогается.
+    static func restoreTypedWord(
+        in element: AXUIElement,
+        typed: String,
+        delimiter: String
+    ) -> Bool {
+        guard let caretRange = selectedRange(of: element), caretRange.length == 0 else { return false }
+        let caret = caretRange.location
+        let lookback = min(caret, typed.count + delimiter.count + 12)
+        guard lookback > delimiter.count,
+              let recent = string(forRange: CFRange(location: caret - lookback,
+                                                    length: lookback), in: element),
+              recent.hasSuffix(delimiter) else { return false }
+
+        let token = trailingToken(of: String(recent.dropLast(delimiter.count)))
+        guard !token.isEmpty,
+              token.lowercased() != typed.lowercased(),
+              abs(token.count - typed.count) <= 3 else { return false }
+
+        let replaceLength = token.count + delimiter.count
+        guard caret >= replaceLength,
+              setSelectedRange(CFRange(location: caret - replaceLength,
+                                       length: replaceLength), in: element) else { return false }
+
+        // Перечитываем выделение: между чтением и выделением поле могло
+        // измениться — тогда откатываем каретку и выходим.
+        var selected: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXSelectedTextAttribute as CFString, &selected
+        ) == .success,
+              let actual = selected as? String,
+              actual == token + delimiter else {
+            _ = setSelectedRange(CFRange(location: caret, length: 0), in: element)
+            return false
+        }
+
+        return AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            (matchingCase(of: actual, applyingTo: typed) + delimiter) as CFString
+        ) == .success
+    }
+
     /// Carries an auto-capitalized first letter over to the corrected text.
     static func matchingCase(of actual: String, applyingTo text: String) -> String {
         guard actual.first?.isUppercase == true,

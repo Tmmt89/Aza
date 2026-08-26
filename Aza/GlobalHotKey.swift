@@ -62,6 +62,11 @@ final class GlobalHotKey: ObservableObject {
     /// рвёт контекст фразы — буфер не должен переезжать между окнами.
     private var lastFocusedWindow: AXUIElement?
 
+    /// Поколение ввода: каждое завершённое слово его увеличивает, отменяя
+    /// отложенные восстановления после системной автозамены — иначе restore
+    /// для «лар» мог бы переписать следующее слово.
+    private var inputGeneration = 0
+
     init() {
 #if DEBUG
         // The layout tables come from the system, so these only hold when the
@@ -77,6 +82,10 @@ final class GlobalHotKey: ObservableObject {
         assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.TextEdit"))
         assert(!ExcludedApps.isCorrectionDenied(bundleID: "ru.keepcoder.Telegram"))
         assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Safari"))
+        // Разбор хвостового токена для защиты от системной автозамены.
+        assert(TextInsertion.trailingToken(of: "дика лор") == "лор")
+        assert(TextInsertion.trailingToken(of: "лор") == "лор")
+        assert(TextInsertion.trailingToken(of: "дика ") == "")
         if LayoutCorrectionEngine.isAvailable {
             assert(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text == "привет")
             assert(LayoutCorrectionEngine.correction(for: "руддщ")?.text == "hello")
@@ -144,6 +153,7 @@ final class GlobalHotKey: ObservableObject {
         }
         monitor.onContextBreak = { [weak self] in
             self?.recentWords.removeAll()
+            self?.inputGeneration &+= 1
         }
         wordMonitor = monitor
 
@@ -268,6 +278,14 @@ final class GlobalHotKey: ObservableObject {
             : "Поле не поддерживает прямую вставку (\(insertResult.rawValue))"
     }
 
+    private static func sameWindow(_ a: AXUIElement?, _ b: AXUIElement?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return CFEqual(x, y)
+        default: return false
+        }
+    }
+
     /// Добавляет слово в контекст фразы, ограничивая окно.
     private func remember(_ entry: FinishedWord) {
         recentWords.append(entry)
@@ -277,6 +295,7 @@ final class GlobalHotKey: ObservableObject {
     }
 
     private func finishWord(_ word: String, delimiter: String) {
+        inputGeneration &+= 1
         // Смена фокусного окна внутри приложения (другой документ, диалог
         // сохранения) — тоже разрыв фразы; смену приложений рвёт WordMonitor.
         let window = TextInsertion.focusedWindow()
@@ -301,9 +320,42 @@ final class GlobalHotKey: ObservableObject {
 
         azaDebugLog("Aza: finishWord len=\(word.count) correction=\(correction == nil ? 0 : 1)")
         guard let correction else {
+            let isChechen = LayoutCorrectionEngine.looksChechen(word)
+            // Защита от системной автозамены macOS: она не знает чеченского
+            // и «чинит» словарные слова в русские соседи («лар» → «лор»).
+            // Через 30 мс сверяем поле с тем, что напечатано, и возвращаем
+            // ввод пользователя. Только для слов из словаря — чужой ввод
+            // и опечатки не трогаем.
+            if ChechenLexicon.shared.contains(word),
+               !UserWordLists.shared.isNeverCorrect(word),
+               let element = TextInsertion.focusedElement(),
+               !SecureFieldDetector.isSecure(element),
+               let caretAtSchedule = TextInsertion.caretPosition(of: element) {
+                let generation = inputGeneration
+                let windowAtSchedule = TextInsertion.focusedWindow()
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
+                    guard let self,
+                          // Новое слово или разрыв контекста отменяет restore;
+                          // элемент и каретка обязаны совпасть с моментом
+                          // планирования — чужой текст не переписывается.
+                          self.inputGeneration == generation,
+                          // Компромисс: автозамена, менявшая длину слова,
+                          // сдвигает каретку — restore тогда пропускается
+                          // (лучше пропуск, чем риск чужого текста).
+                          TextInsertion.caretPosition(of: element) == caretAtSchedule,
+                          // Фокусное окно не сменилось: переключение окна
+                          // без набора текста тоже отменяет restore.
+                          Self.sameWindow(windowAtSchedule, TextInsertion.focusedWindow())
+                    else { return }
+                    if TextInsertion.restoreTypedWord(in: element, typed: word,
+                                                      delimiter: delimiter) {
+                        azaDebugLog("Aza: restored autocorrected word len=\(word.count)")
+                        self.correctionStatus = "Отменена системная автозамена: \(word)"
+                    }
+                }
+            }
             remember(FinishedWord(typed: word, delimiter: delimiter,
-                                  chechen: LayoutCorrectionEngine.looksChechen(word),
-                                  corrected: false))
+                                  chechen: isChechen, corrected: false))
             return
         }
 
