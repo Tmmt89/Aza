@@ -82,6 +82,17 @@ final class GlobalHotKey: ObservableObject {
         assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.TextEdit"))
         assert(!ExcludedApps.isCorrectionDenied(bundleID: "ru.keepcoder.Telegram"))
         assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Safari"))
+        // Пользовательский список исключений действует на политику
+        // (восстанавливаем прежнее значение после проверки).
+        let savedExclusions = UserDefaults.standard
+            .stringArray(forKey: ExcludedApps.userDefaultsKey)
+        UserDefaults.standard.set(["com.example.excluded"],
+                                  forKey: ExcludedApps.userDefaultsKey)
+        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.example.excluded"))
+        assert(PasteboardMonitor.excludedBundleIDs.contains("com.example.excluded"))
+        UserDefaults.standard.set(savedExclusions,
+                                  forKey: ExcludedApps.userDefaultsKey)
+
         // Разбор хвостового токена для защиты от системной автозамены.
         assert(TextInsertion.trailingToken(of: "дика лор") == "лор")
         assert(TextInsertion.trailingToken(of: "лор") == "лор")

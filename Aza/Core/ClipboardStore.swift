@@ -72,6 +72,23 @@ final class ClipboardStore: ObservableObject {
     /// перезапуск. Показывается в меню.
     var isReadOnly: Bool { !keyIsPersistent }
 
+    /// Экран заблокирован (спецификация §8.9): расшифрованная история
+    /// выгружена из памяти, save() не пишет — случайная мутация в этом
+    /// окне не может затереть файл пустым массивом.
+    private(set) var screenLocked = false
+
+    /// Блокировка Mac: выгрузить расшифрованное из памяти, диск не трогать.
+    func wipeInMemory() {
+        screenLocked = true
+        entries = []
+    }
+
+    /// Разблокировка: перечитать историю с диска.
+    func reloadFromDisk() {
+        screenLocked = false
+        load()
+    }
+
     private struct Payload: Codable {
         var version = 1
         var entries: [ClipEntry]
@@ -320,9 +337,11 @@ final class ClipboardStore: ObservableObject {
 
     /// Завершает удаление после истечения окна «Отменить» (или замены его
     /// новым удалением). Если запись успели восстановить — blob остаётся.
-    /// Read-only-сессия blob-ы не трогает (см. commit).
+    /// Read-only-сессия blob-ы не трогает (см. commit). Под блокировкой
+    /// экрана диск не мутируется вовсе (§8.9) — неудалённый blob подберёт
+    /// sweep сирот при следующем запуске.
     func finalizeDelete(_ deleted: Deleted) {
-        guard keyIsPersistent else { return }
+        guard keyIsPersistent, !screenLocked else { return }
         guard !entries.contains(where: { $0.id == deleted.entry.id }) else { return }
         if deleted.entry.resolvedKind == .image {
             try? FileManager.default.removeItem(at: blobURL(for: deleted.entry.id))
@@ -389,7 +408,7 @@ final class ClipboardStore: ObservableObject {
     // MARK: Шифрование и диск
 
     private func save() {
-        guard keyIsPersistent else { return }
+        guard keyIsPersistent, !screenLocked else { return }
         do {
             let payload = try JSONEncoder().encode(Payload(entries: entries))
             let sealed = try AES.GCM.seal(payload, using: key).combined!
@@ -702,6 +721,19 @@ final class ClipboardStore: ObservableObject {
         assert(tight.entries.count == 2, "бюджет байтов не сработал")
         assert(tight.entries.first?.text.hasSuffix("три") == true,
                "бюджет удалил новое вместо старого")
+
+        // Блокировка экрана (§8.9): память чистится, диск нетронут,
+        // мутация в заблокированном окне не переживает разблокировку.
+        let beforeLock = tight.entries.map(\.id)
+        tight.wipeInMemory()
+        assert(tight.entries.isEmpty, "память не выгружена при блокировке")
+        tight.add(text: "мутация-под-блокировкой",
+                  sourceAppBundleID: nil, sourceAppName: nil)
+        tight.reloadFromDisk()
+        assert(tight.entries.map(\.id) == beforeLock,
+               "диск должен пережить блокировку нетронутым")
+        assert(!tight.entries.contains { $0.text == "мутация-под-блокировкой" },
+               "мутация под блокировкой просочилась на диск")
 
         try? Data([0x00, 0x01, 0x02]).write(to: tempURL)
         assert(ClipboardStore(storageURL: tempURL, maxEntries: 3).entries.isEmpty)

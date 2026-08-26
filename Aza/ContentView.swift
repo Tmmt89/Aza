@@ -16,6 +16,9 @@ struct ContentView: View {
     @State private var searchText = ""
     @State private var visibleLimit = 10
     @State private var lastDeleted: ClipboardStore.Deleted?
+    @State private var excludedApps = UserDefaults.standard
+        .stringArray(forKey: ExcludedApps.userDefaultsKey) ?? []
+    @State private var newExcludedApp = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -257,6 +260,42 @@ struct ContentView: View {
 
             Divider()
 
+            // Исключения приложений (спец. §8.9): ни коррекции, ни истории.
+            Text("Приложения-исключения (bundle ID)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(excludedApps, id: \.self) { bundleID in
+                HStack {
+                    Text(bundleID)
+                        .font(.caption.monospaced())
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        excludedApps.removeAll { $0 == bundleID }
+                        saveExcludedApps()
+                    } label: {
+                        Image(systemName: "minus.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            HStack {
+                TextField("com.example.app", text: $newExcludedApp)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption.monospaced())
+                Button("Добавить") {
+                    let trimmed = newExcludedApp.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty, !excludedApps.contains(trimmed) else { return }
+                    excludedApps.append(trimmed)
+                    newExcludedApp = ""
+                    saveExcludedApps()
+                }
+                .font(.caption)
+            }
+
+            Divider()
+
             Button("Завершить Aza") {
                 NSApp.terminate(nil)
             }
@@ -363,6 +402,10 @@ struct ContentView: View {
         }
         copyStatus = "Скопировано: \(Self.preview(of: entry.text)) — вставьте ⌘V"
         store.touch(id: entry.id)
+    }
+
+    private func saveExcludedApps() {
+        UserDefaults.standard.set(excludedApps, forKey: ExcludedApps.userDefaultsKey)
     }
 
     /// Иконка вида записи; текст без иконки — карточек-текстов большинство.

@@ -55,6 +55,13 @@ enum ExcludedApps {
         "com.raycast.macos",
     ]
 
+    /// Приложения, добавленные пользователем (спецификация §8.9): одна
+    /// общая политика — ни коррекции раскладки, ни истории буфера.
+    static let userDefaultsKey = "UserExcludedBundleIDs"
+    static var userExcluded: Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: userDefaultsKey) ?? [])
+    }
+
     /// Запрещена ли автокоррекция раскладки в приложении. Системные
     /// диалоги (сохранение файла и т.п.) отдельно не детектируются:
     /// смена фокусного ОКНА рвёт контекст фразы, а точная сверка текста
@@ -63,6 +70,7 @@ enum ExcludedApps {
         if passwordManagers.contains(bundleID) { return true }
         if terminals.contains(bundleID) { return true }
         if launchers.contains(bundleID) { return true }
+        if userExcluded.contains(bundleID) { return true }
         return codeEditorPrefixes.contains { bundleID.hasPrefix($0) }
     }
 }

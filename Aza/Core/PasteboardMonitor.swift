@@ -22,8 +22,11 @@ final class PasteboardMonitor: ObservableObject {
         (UserDefaults.standard.object(forKey: storageKey) as? Bool) ?? true
     }
 
-    /// История не пишется из менеджеров паролей (общий список политики).
-    static let excludedBundleIDs: Set<String> = ExcludedApps.passwordManagers
+    /// История не пишется из менеджеров паролей и приложений, исключённых
+    /// пользователем (общая политика, спецификация §8.9).
+    static var excludedBundleIDs: Set<String> {
+        ExcludedApps.passwordManagers.union(ExcludedApps.userExcluded)
+    }
 
     private static let excludedTypes: Set<String> = [
         "org.nspasteboard.ConcealedType",

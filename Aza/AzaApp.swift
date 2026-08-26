@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import SwiftUI
 
@@ -12,7 +13,30 @@ final class ClipboardStartup: ObservableObject {
     @Published private(set) var store: ClipboardStore?
     @Published private(set) var monitor: PasteboardMonitor?
 
+    /// Чего хочет пользователь (тумблер) — применяется только когда экран
+    /// не заблокирован; после разблокировки восстанавливается.
+    private var monitoringDesired = PasteboardMonitor.historyEnabledByDefault
+    private var screenLocked = false
+
     init() {
+        // Спецификация §8.9: блокировка Mac закрывает панель и выгружает
+        // расшифрованную историю из памяти. События идемпотентны (система
+        // может прислать дубль), начальное состояние пробуем из CGSession —
+        // приложение могло стартовать уже за экраном блокировки.
+        let center = DistributedNotificationCenter.default()
+        center.addObserver(forName: .init("com.apple.screenIsLocked"),
+                           object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleLock() }
+        }
+        center.addObserver(forName: .init("com.apple.screenIsUnlocked"),
+                           object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleUnlock() }
+        }
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+           session["CGSSessionScreenIsLocked"] as? Bool == true {
+            screenLocked = true
+        }
+
         DispatchQueue.global(qos: .userInitiated).async {
             let prepared = ClipboardStore.obtainKey()
             DispatchQueue.main.async {
@@ -20,9 +44,12 @@ final class ClipboardStartup: ObservableObject {
                 let monitor = PasteboardMonitor(store: store)
                 self.store = store
                 self.monitor = monitor
-                if PasteboardMonitor.historyEnabledByDefault {
+                if self.screenLocked {
+                    store.wipeInMemory()
+                } else if self.monitoringDesired {
                     monitor.start()
                 }
+                azaDebugLog("Aza: clipboard ready locked=\(self.screenLocked ? 1 : 0) monitoring=\(monitor.isRunning ? 1 : 0) entries=\(store.entries.count)")
 #if DEBUG
                 ClipboardStore.runSelfTest(sample: "буфер-самотест-\(UUID().uuidString)")
 #endif
@@ -31,11 +58,29 @@ final class ClipboardStartup: ObservableObject {
     }
 
     func setMonitoring(enabled: Bool) {
-        guard let monitor else { return }
+        monitoringDesired = enabled
+        guard let monitor, !screenLocked else { return }
         if enabled {
             monitor.start()
         } else {
             monitor.stop()
+        }
+    }
+
+    private func handleLock() {
+        guard !screenLocked else { return }
+        screenLocked = true
+        monitor?.stop()
+        store?.wipeInMemory()
+        NSApp.hide(nil)
+    }
+
+    private func handleUnlock() {
+        guard screenLocked else { return }
+        screenLocked = false
+        store?.reloadFromDisk()
+        if monitoringDesired {
+            monitor?.start()
         }
     }
 }
