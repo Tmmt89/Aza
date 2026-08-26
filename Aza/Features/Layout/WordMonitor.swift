@@ -8,6 +8,7 @@ import Carbon.HIToolbox
 final class WordMonitor {
     private var monitor: Any?
     private var currentWord = ""
+    private var lastBundleID: String?
     private let onWordFinished: (_ word: String, _ delimiter: String) -> Void
     /// Вызывается при разрыве контекста (переключение приложения):
     /// владелец сбрасывает состояние фразы.
@@ -41,11 +42,22 @@ final class WordMonitor {
             return
         }
 
-        // ponytail: TextEdit-only proof; widen with the application exclusion policy after the system path is proven.
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.TextEdit" else {
+        // Политика исключений (спецификация §6): терминалы, IDE и менеджеры
+        // паролей не исправляются; остальные приложения — да. Secure-поля
+        // отсекаются на уровне элемента в момент замены.
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        guard let bundleID, !ExcludedApps.isCorrectionDenied(bundleID: bundleID) else {
             currentWord = ""
+            lastBundleID = bundleID
             onContextBreak?()
             return
+        }
+        // Смена приложения — разрыв слова и контекста фразы: буфер не должен
+        // переезжать между окнами.
+        if bundleID != lastBundleID {
+            lastBundleID = bundleID
+            currentWord = ""
+            onContextBreak?()
         }
 
         // ponytail: ⌘V, text selection and IME are not tracked — known prototype limitation.

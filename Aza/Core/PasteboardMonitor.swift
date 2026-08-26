@@ -22,13 +22,8 @@ final class PasteboardMonitor: ObservableObject {
         (UserDefaults.standard.object(forKey: storageKey) as? Bool) ?? true
     }
 
-    static let excludedBundleIDs: Set<String> = [
-        "com.agilebits.onepassword-osx",
-        "com.agilebits.OnePassword7",
-        "com.agilebits.BrowserExtension",
-        "net.antelle.keeweb",
-        "com.lastpass.LastPass",
-    ]
+    /// История не пишется из менеджеров паролей (общий список политики).
+    static let excludedBundleIDs: Set<String> = ExcludedApps.passwordManagers
 
     private static let excludedTypes: Set<String> = [
         "org.nspasteboard.ConcealedType",

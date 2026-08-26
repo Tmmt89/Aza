@@ -36,7 +36,7 @@ struct ContentView: View {
             Divider()
 
             if hotKey.inputMonitoringGranted {
-                Text("В TextEdit: ghbdtn · руддщ · [mj · 1алам + пробел")
+                Text("Везде, кроме терминалов, IDE и менеджеров паролей: ghbdtn · руддщ · [mj · 1алам + пробел")
                     .fixedSize(horizontal: false, vertical: true)
                 Text("\(hotKey.correctionStatus) · исправлений: \(hotKey.correctionCount)")
                     .foregroundStyle(.secondary)

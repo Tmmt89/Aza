@@ -19,6 +19,21 @@ enum TextInsertion {
         return (value as! AXUIElement)
     }
 
+    /// Фокусное окно системы — идентичность для разрыва контекста фразы
+    /// при переключении окон (включая документы одного приложения и диалоги).
+    static func focusedWindow() -> AXUIElement? {
+        guard let element = focusedElement() else { return nil }
+        var window: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXWindowAttribute as CFString,
+            &window
+        ) == .success,
+              let window,
+              CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
+        return (window as! AXUIElement)
+    }
+
     static func insert(_ text: String, into element: AXUIElement) -> AXError {
         let directResult = AXUIElementSetAttributeValue(
             element,

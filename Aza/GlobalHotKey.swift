@@ -58,6 +58,9 @@ final class GlobalHotKey: ObservableObject {
     }
     private var recentWords: [FinishedWord] = []
     private static let contextWindow = 4
+    /// Фокусное окно последнего слова: смена окна (другой документ, диалог)
+    /// рвёт контекст фразы — буфер не должен переезжать между окнами.
+    private var lastFocusedWindow: AXUIElement?
 
     init() {
 #if DEBUG
@@ -65,6 +68,15 @@ final class GlobalHotKey: ObservableObject {
         // user actually has a Russian keyboard layout installed.
         assert(TextInsertion.matchingCase(of: "Ghbdtn ", applyingTo: "привет ") == "Привет ")
         assert(TextInsertion.matchingCase(of: "ghbdtn ", applyingTo: "привет ") == "привет ")
+        // Политика исключений: терминалы/IDE/менеджеры паролей запрещены,
+        // обычные приложения разрешены.
+        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Terminal"))
+        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.jetbrains.intellij"))
+        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.1password.1password"))
+        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Spotlight"))
+        assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.TextEdit"))
+        assert(!ExcludedApps.isCorrectionDenied(bundleID: "ru.keepcoder.Telegram"))
+        assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Safari"))
         if LayoutCorrectionEngine.isAvailable {
             assert(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text == "привет")
             assert(LayoutCorrectionEngine.correction(for: "руддщ")?.text == "hello")
@@ -265,6 +277,16 @@ final class GlobalHotKey: ObservableObject {
     }
 
     private func finishWord(_ word: String, delimiter: String) {
+        // Смена фокусного окна внутри приложения (другой документ, диалог
+        // сохранения) — тоже разрыв фразы; смену приложений рвёт WordMonitor.
+        let window = TextInsertion.focusedWindow()
+        if let last = lastFocusedWindow {
+            if window == nil || !CFEqual(last, window!) {
+                recentWords.removeAll()
+            }
+        }
+        lastFocusedWindow = window
+
         var correction = LayoutCorrectionEngine.correction(for: word)
 
         // Форвард-контекст: после чеченского слова короткое (2 буквы; от
@@ -304,9 +326,13 @@ final class GlobalHotKey: ObservableObject {
         }
 
         guard let element = TextInsertion.focusedElement(),
-              SecureFieldDetector.isTextInput(element),
               !SecureFieldDetector.isSecure(element) else {
-            azaDebugLog("Aza: focused element missing, non-text or secure")
+            // Ролевой фильтр (isTextInput) намеренно не применяется: Notes,
+            // браузеры и Electron отдают роли вне AXTextField/AXTextArea.
+            // «Текстовость» функционально проверяет replaceTypedText: без
+            // читаемого selected range и точного совпадения текста замены
+            // не будет; secure-поля отсечены здесь.
+            azaDebugLog("Aza: focused element missing or secure")
             correctionStatus = "Поле нельзя исправлять"
             recentWords.removeAll()
             return
