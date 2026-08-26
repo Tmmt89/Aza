@@ -19,6 +19,8 @@ struct ContentView: View {
     @State private var excludedApps = UserDefaults.standard
         .stringArray(forKey: ExcludedApps.userDefaultsKey) ?? []
     @State private var newExcludedApp = ""
+    /// Запись, открытая в popover «Показать целиком».
+    @State private var previewEntry: ClipEntry?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -134,7 +136,14 @@ struct ContentView: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 4) {
-                                        if let icon = Self.kindIcon(for: entry) {
+                                        if let thumb = entry.thumbnailData,
+                                           let image = NSImage(data: thumb) {
+                                            Image(nsImage: image)
+                                                .resizable()
+                                                .aspectRatio(contentMode: .fit)
+                                                .frame(maxWidth: 36, maxHeight: 24)
+                                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                        } else if let icon = Self.kindIcon(for: entry) {
                                             Image(systemName: icon)
                                                 .font(.caption2)
                                                 .foregroundStyle(.secondary)
@@ -166,9 +175,18 @@ struct ContentView: View {
                             .help("Избранное — не удаляется автоочисткой")
                         }
                         .contextMenu {
+                            Button("Показать целиком") {
+                                previewEntry = entry
+                            }
                             Button("Удалить", role: .destructive) {
                                 deleteEntry(entry)
                             }
+                        }
+                        .popover(isPresented: Binding(
+                            get: { previewEntry?.id == entry.id },
+                            set: { if !$0 { previewEntry = nil } }
+                        )) {
+                            entryPreview(entry)
                         }
                     }
 
@@ -402,6 +420,33 @@ struct ContentView: View {
         }
         copyStatus = "Скопировано: \(Self.preview(of: entry.text)) — вставьте ⌘V"
         store.touch(id: entry.id)
+    }
+
+    /// Полный просмотр записи. Настоящий Quick Look не используется
+    /// сознательно: QLPreviewPanel требует файл на диске, а расшифрованное
+    /// содержимое не должно попадать на диск открытым текстом.
+    @ViewBuilder
+    private func entryPreview(_ entry: ClipEntry) -> some View {
+        ScrollView {
+            if entry.resolvedKind == .image {
+                if let data = clipboardStore?.imageData(for: entry),
+                   let image = NSImage(data: data) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    Text("Изображение недоступно")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text(entry.text)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 260, maxWidth: 360, minHeight: 80, maxHeight: 420)
     }
 
     private func saveExcludedApps() {

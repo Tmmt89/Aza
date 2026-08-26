@@ -98,17 +98,27 @@ final class PasteboardMonitor: ObservableObject {
 
         if let image = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff),
            image.count <= ClipboardStore.maxObjectBytes {
-            // Нормализация к PNG: один формат в blob-ах и при вставке.
-            guard let rep = NSBitmapImageRep(data: image),
-                  let png = rep.representation(using: .png, properties: [:]) else {
-                azaDebugLog("Aza: clip image decode failed bytes=\(image.count)")
-                return
+            // Декодирование, нормализация к PNG и миниатюра — в фоне:
+            // на таймере главного потока большое изображение подвешивало
+            // бы UI и сам опрос. В main возвращаемся только для записи.
+            let store = self.store
+            Self.imageDecodeQueue.async {
+                guard let rep = NSBitmapImageRep(data: image),
+                      let png = rep.representation(using: .png, properties: [:]) else {
+                    azaDebugLog("Aza: clip image decode failed bytes=\(image.count)")
+                    return
+                }
+                let thumbnail = Self.thumbnailPNG(from: png)
+                let label = "Изображение \(rep.pixelsWide)×\(rep.pixelsHigh)"
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        azaDebugLog("Aza: clip kind=image bytes=\(png.count) thumb=\(thumbnail?.count ?? 0)")
+                        store.addImage(png: png, label: label, thumbnail: thumbnail,
+                                       sourceAppBundleID: sourceAppBundleID,
+                                       sourceAppName: sourceAppName)
+                    }
+                }
             }
-            azaDebugLog("Aza: clip kind=image bytes=\(png.count)")
-            store.addImage(png: png,
-                           label: "Изображение \(rep.pixelsWide)×\(rep.pixelsHigh)",
-                           sourceAppBundleID: sourceAppBundleID,
-                           sourceAppName: sourceAppName)
             return
         }
 
@@ -139,6 +149,34 @@ final class PasteboardMonitor: ObservableObject {
             azaDebugLog("Aza: clip kind=unclassified types=\(pasteboard.types?.count ?? 0)")
             return
         }
+        classifyText(text,
+                     sourceAppBundleID: sourceAppBundleID,
+                     sourceAppName: sourceAppName)
+    }
+
+    /// Последовательная очередь декодирования изображений: сохраняет
+    /// порядок при быстрых подряд копированиях (гонка «старое поверх
+    /// нового» невозможна: main тоже последовательный).
+    private static let imageDecodeQueue = DispatchQueue(label: "com.tmmt.Aza.image-decode")
+
+    /// PNG-миниатюра ≤48px по длинной стороне через ImageIO —
+    /// потокобезопасно без графического контекста AppKit.
+    private nonisolated static func thumbnailPNG(from imageData: Data) -> Data? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 48,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(
+                source, 0, options as CFDictionary) else { return nil }
+        return NSBitmapImageRep(cgImage: cgImage)
+            .representation(using: .png, properties: [:])
+    }
+
+    /// Текстовая ветка вынесена: выше остаётся только маршрутизация типов.
+    private func classifyText(_ text: String,
+                              sourceAppBundleID: String?, sourceAppName: String?) {
         // Скопированный текстом URL — карточка-ссылка: тип public.url
         // кладут только браузеры, а ссылки чаще копируют как текст.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

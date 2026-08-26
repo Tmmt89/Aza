@@ -31,6 +31,9 @@ struct ClipEntry: Codable, Equatable, Identifiable {
     var byteSize: Int?
     /// SHA-256 содержимого — дедупликация изображений и RTF.
     var contentHash: String?
+    /// Маленькое PNG-превью (≤48px, единицы КБ) — инлайн в зашифрованном
+    /// payload, чтобы карточки не расшифровывали blob при каждой отрисовке.
+    var thumbnailData: Data?
 
     var resolvedKind: Kind { kind ?? .text }
 }
@@ -213,7 +216,7 @@ final class ClipboardStore: ObservableObject {
     /// Изображение (нормализованный PNG). Данные — в отдельном
     /// зашифрованном blob-файле; в метаданных только подпись и хеш.
     /// Blob пишется ДО метаданных: неудача записи не создаёт запись.
-    func addImage(png: Data, label: String,
+    func addImage(png: Data, label: String, thumbnail: Data?,
                   sourceAppBundleID: String?, sourceAppName: String?) {
         // Read-only-сессия не пишет blob-ы: эфемерный ключ сделает файл
         // нечитаемым, а до следующего успешного запуска копились бы сироты.
@@ -226,7 +229,8 @@ final class ClipboardStore: ObservableObject {
         insertNew(ClipEntry(
             id: id, text: label, createdAt: Date(),
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
-            kind: .image, byteSize: sealedSize, contentHash: hash
+            kind: .image, byteSize: sealedSize + (thumbnail?.count ?? 0),
+            contentHash: hash, thumbnailData: thumbnail
         ))
     }
 
@@ -663,9 +667,15 @@ final class ClipboardStore: ObservableObject {
         let pngMagic = Data([0x89, 0x50, 0x4E, 0x47])
         let png = pngMagic + Data(repeating: 0xAB, count: 64)
         rich.addImage(png: png, label: "Изображение 2×2",
+                      thumbnail: Data([0x01, 0x02]),
                       sourceAppBundleID: nil, sourceAppName: nil)
         assert(rich.entries.first?.resolvedKind == .image)
+        assert(rich.entries.first?.thumbnailData == Data([0x01, 0x02]),
+               "миниатюра не сохранилась")
         assert(rich.imageData(for: rich.entries[0]) == png, "blob не расшифровался")
+        let richReload = ClipboardStore(storageURL: richURL, maxEntries: 10, retentionDays: 0)
+        assert(richReload.entries.first?.thumbnailData == Data([0x01, 0x02]),
+               "миниатюра не пережила перезагрузку")
         let blobFiles = (try? FileManager.default
             .contentsOfDirectory(atPath: blobsDir.path)) ?? []
         assert(blobFiles.count == 1)
@@ -673,7 +683,7 @@ final class ClipboardStore: ObservableObject {
         assert(rawBlob.range(of: pngMagic) == nil, "PNG-сигнатура в открытом виде на диске")
 
         // Дедуп изображения по хешу.
-        rich.addImage(png: png, label: "Изображение 2×2",
+        rich.addImage(png: png, label: "Изображение 2×2", thumbnail: nil,
                       sourceAppBundleID: nil, sourceAppName: nil)
         assert(rich.entries.filter { $0.resolvedKind == .image }.count == 1)
 
