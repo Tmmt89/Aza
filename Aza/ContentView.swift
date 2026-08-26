@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var hotKey: GlobalHotKey
     @ObservedObject var clipboardStartup: ClipboardStartup
+    @ObservedObject var dictation: DictationController
     /// Хранилище появляется после фонового получения ключа Keychain.
     private var clipboardStore: ClipboardStore? { clipboardStartup.store }
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
@@ -57,6 +58,16 @@ struct ContentView: View {
                 Text("Нужно для анализа завершённого слова")
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            // Диктовка (§5): удержание ⌃⇧D. Модель качается при первом
+            // использовании, поэтому статус живёт отдельной строкой.
+            Label(dictation.status, systemImage: dictation.state == .recording
+                  ? "mic.fill" : "mic")
+                .font(.caption)
+                .foregroundStyle(dictation.state == .recording ? .red : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
@@ -552,6 +563,7 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView(hotKey: GlobalHotKey(), clipboardStartup: ClipboardStartup())
+    ContentView(hotKey: GlobalHotKey(), clipboardStartup: ClipboardStartup(),
+                dictation: DictationController(clipboardStore: { nil }))
 }
 

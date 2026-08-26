@@ -90,6 +90,7 @@ struct AzaApp: App {
     @StateObject private var hotKey = GlobalHotKey()
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @StateObject private var clipboardStartup: ClipboardStartup
+    @StateObject private var dictation: DictationController
 
     init() {
         // Второй экземпляр смертельно опасен: у каждого свой монитор слов,
@@ -106,12 +107,19 @@ struct AzaApp: App {
             exit(0)
         }
         // lockFD намеренно не закрывается — лок держится всю жизнь процесса.
-        _clipboardStartup = StateObject(wrappedValue: ClipboardStartup())
+        let startup = ClipboardStartup()
+        _clipboardStartup = StateObject(wrappedValue: startup)
+        let dictation = DictationController(clipboardStore: { [weak startup] in
+            startup?.store
+        })
+        dictation.start()
+        _dictation = StateObject(wrappedValue: dictation)
     }
 
     var body: some Scene {
         MenuBarExtra("Aza", systemImage: "waveform") {
-            ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup)
+            ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup,
+                        dictation: dictation)
         }
         .menuBarExtraStyle(.window)
         .onChange(of: clipboardHistoryEnabled) { _, isEnabled in
