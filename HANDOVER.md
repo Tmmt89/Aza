@@ -250,6 +250,20 @@ pkill -f "Products/Debug/Aza.app/Contents/MacOS/Aza"
    `nohup "$BIN"` показывает права терминала, не Aza — для честной проверки
    запускать через `open`, диагностика старта пишется в stderr
    (`open --stderr файл`).
+11. **Второй хоткей Carbon молчит, если первый возвращает `noErr`.**
+   `InstallEventHandler` ставит обработчики в ЦЕПОЧКУ: `noErr` означает
+   «событие обработано», и до следующего обработчика оно не доходит.
+   Чужой `EventHotKeyID` обязан получить `eventNotHandledErr` — иначе
+   ⌘⇧A съедает событие ⌃⇧D (диктовка «не работает» при успешной
+   регистрации). Симптом: `register()` вернул nil, а колбэк молчит.
+12. **У agent-приложения (LSUIElement) не всплывает TCC-диалог микрофона.**
+   `AVCaptureDevice.requestAccess` в неактивном процессе не показывает
+   запрос. Лечение: `NSApp.activate(ignoringOtherApps:)` и — надёжнее —
+   реальное обращение к устройству (запуск AVAudioEngine), которое и
+   поднимает системный запрос.
+13. **WhisperKit качает модели в `~/Documents/huggingface`.** Документы
+   пользователя засорять нельзя: передавать `downloadBase` —
+   Application Support/Aza/models.
 
 ## 9. Дорожная карта (приоритизированная)
 

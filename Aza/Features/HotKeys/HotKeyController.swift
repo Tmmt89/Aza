@@ -43,24 +43,28 @@ final class HotKeyController {
         let handlerStatus = InstallEventHandler(
             GetApplicationEventTarget(),
             { _, event, context in
-                guard let context, let event else { return noErr }
+                guard let context, let event else { return OSStatus(eventNotHandledErr) }
                 var pressedID = EventHotKeyID()
                 GetEventParameter(event, EventParamName(kEventParamDirectObject),
                                   EventParamType(typeEventHotKeyID), nil,
                                   MemoryLayout<EventHotKeyID>.size, nil, &pressedID)
                 let kind = GetEventKind(event)
                 let controller = Unmanaged<HotKeyController>.fromOpaque(context).takeUnretainedValue()
-                MainActor.assumeIsolated {
-                    // Обработчик получает события ВСЕХ хоткеев приложения —
-                    // фильтруем по своему id.
-                    guard pressedID.id == controller.hotKeyID.id else { return }
+                // Обработчик получает события ВСЕХ хоткеев приложения.
+                // КРИТИЧНО: чужой хоткей обязан получить eventNotHandledErr —
+                // noErr означает «обработано», и Carbon не передаёт событие
+                // дальше по цепочке, из-за чего второй хоткей (диктовка)
+                // не срабатывал вовсе.
+                let handled = MainActor.assumeIsolated { () -> Bool in
+                    guard pressedID.id == controller.hotKeyID.id else { return false }
                     if kind == UInt32(kEventHotKeyPressed) {
                         controller.onPress()
                     } else if kind == UInt32(kEventHotKeyReleased) {
                         controller.onRelease?()
                     }
+                    return true
                 }
-                return noErr
+                return handled ? noErr : OSStatus(eventNotHandledErr)
             },
             events.count,
             &events,
