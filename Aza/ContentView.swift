@@ -11,6 +11,7 @@ struct ContentView: View {
     @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstentionEnabled = true
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
+    @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
     @State private var pasteboardStatus = "Типы ещё не проверялись"
     @State private var pasteboardTypes = ""
     @State private var copyStatus = ""
@@ -68,6 +69,17 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(dictation.state == .recording ? .red : .secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Язык диктовки", selection: $dictationLanguage) {
+                Text("Авто").tag("auto")
+                Text("Русский").tag("ru")
+                Text("English").tag("en")
+            }
+            .pickerStyle(.segmented)
+            .font(.caption)
+            Text("Авто: при сомнении выбирается русский")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
 
             Divider()
 

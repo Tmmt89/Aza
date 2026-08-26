@@ -15,6 +15,14 @@ import WhisperKit
 @MainActor
 final class DictationController: ObservableObject {
 
+    /// Языки на кириллице: детектор часто путает их с русским, и для
+    /// нашей пары ru/en они однозначно ближе к русскому.
+    private enum Constants {
+        static let cyrillicLanguages: Set<String> = [
+            "ru", "uk", "be", "bg", "sr", "mk", "kk", "ky", "mn", "tg",
+        ]
+    }
+
     enum State: Equatable {
         case idle
         case loadingModel(String)
@@ -28,6 +36,15 @@ final class DictationController: ObservableObject {
     /// Модель MVP: одна, multilingual small — терпимый русский при ~500 МБ.
     /// Выбор из трёх профилей (§5.4) появится вместе с онбордингом.
     static let modelVariant = "openai_whisper-small"
+
+    /// Язык диктовки (§5.2): "auto" — довериться детектору, иначе
+    /// принудительно "ru"/"en". Автоопределение на коротких фразах
+    /// ошибается (русскую речь принимало за английскую и транслитерировало),
+    /// поэтому явный выбор — не роскошь, а рабочий инструмент.
+    static let languageStorageKey = "DictationLanguage"
+    static var preferredLanguage: String {
+        UserDefaults.standard.string(forKey: languageStorageKey) ?? "auto"
+    }
 
     /// Предохранитель §5.1: максимум 30 минут на одну запись.
     private static let maxRecordingSeconds: TimeInterval = 30 * 60
@@ -71,6 +88,13 @@ final class DictationController: ObservableObject {
 
     func start() {
         guard hotKey == nil else { return }
+        // Прогрев: модель поднимается в память ~8 секунд, и без него
+        // ПЕРВОЕ нажатие уходит в ожидание, а пользователь видит «ничего
+        // не происходит». Греем только когда доступ к микрофону уже есть —
+        // иначе первым делом нужен диалог TCC, а не 500 МБ модели.
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+            prepareModel()
+        }
         let controller = HotKeyController(
             keyCode: UInt32(kVK_ANSI_D),
             modifiers: UInt32(controlKey | shiftKey),
@@ -158,9 +182,14 @@ final class DictationController: ObservableObject {
                     azaDebugLog("Aza: dictation mic request granted=\(granted ? 1 : 0)")
                     self.cancelRecording()
                     self.isPermissionProbe = false
-                    self.status = granted
-                        ? "Доступ к микрофону есть — удержите ⌃⇧D и говорите"
-                        : "Доступ к микрофону запрещён — откройте Настройки → Конфиденциальность → Микрофон"
+                    guard granted else {
+                        self.status = "Доступ к микрофону запрещён — откройте Настройки → Конфиденциальность → Микрофон"
+                        return
+                    }
+                    // Греем модель сразу после выдачи доступа: иначе первое
+                    // же «удержите ещё раз» снова утонет в загрузке.
+                    self.status = "Доступ есть, готовлю модель…"
+                    self.prepareModel()
                 }
             }
             beginRecording()
@@ -179,6 +208,65 @@ final class DictationController: ObservableObject {
         beginRecording()
     }
 
+    private static func options(for language: String) -> DecodingOptions {
+        DecodingOptions(task: .transcribe, language: language, usePrefillPrompt: true)
+    }
+
+    /// Средняя уверенность распознавания: по ней сравниваем две гипотезы.
+    private static func confidence(of results: [TranscriptionResult]) -> Float {
+        let segments = results.flatMap(\.segments)
+        guard !segments.isEmpty else { return -.infinity }
+        return segments.map(\.avgLogprob).reduce(0, +) / Float(segments.count)
+    }
+
+    /// Автоопределение с приоритетом русского (§5.2).
+    ///
+    /// Детектор WhisperKit на коротких фразах уверенно ошибается (русскую
+    /// речь принимал за английскую и транслитерировал), а полного
+    /// распределения по языкам он не отдаёт — только вероятность уже
+    /// выбранного токена. Поэтому язык выбираем по РЕЗУЛЬТАТУ: если
+    /// детектор указал не-кириллический язык, распознаём дважды и
+    /// сравниваем уверенность. Русский побеждает при равенстве и в
+    /// пределах форы `russianBias` — это и есть «приоритет русского».
+    private static let russianBias: Float = 0.15
+
+    private static func autoTranscribe(
+        whisper: WhisperKit, samples: [Float]
+    ) async throws -> (String, [TranscriptionResult]) {
+        let detected = try? await whisper.detectLangauge(audioArray: samples)
+        let detectedLanguage = detected?.language ?? "ru"
+        azaDebugLog("Aza: dictation detector=\(detectedLanguage)")
+
+        // Кириллица (uk/be/… — частая путаница на коротких фразах) —
+        // сразу русский, второй прогон не нужен.
+        if Constants.cyrillicLanguages.contains(detectedLanguage) {
+            let results = try await whisper.transcribe(
+                audioArray: samples, decodeOptions: options(for: "ru"))
+            return ("ru", results)
+        }
+
+        // Упавший прогон не должен обнулять удачный: берём то, что есть.
+        let russian = try? await whisper.transcribe(
+            audioArray: samples, decodeOptions: options(for: "ru"))
+        let english = try? await whisper.transcribe(
+            audioArray: samples, decodeOptions: options(for: "en"))
+        switch (russian, english) {
+        case let (russian?, english?):
+            let russianScore = confidence(of: russian)
+            let englishScore = confidence(of: english)
+            azaDebugLog("Aza: dictation scores ru=\(russianScore) en=\(englishScore)")
+            return russianScore + russianBias >= englishScore
+                ? ("ru", russian)
+                : ("en", english)
+        case let (russian?, nil):
+            return ("ru", russian)
+        case let (nil, english?):
+            return ("en", english)
+        case (nil, nil):
+            throw WhisperError.transcriptionFailed("оба прогона распознавания не удались")
+        }
+    }
+
     /// Панель «Микрофон» в системных настройках: единственный путь, когда
     /// доступ уже отклонён — повторный запрос система игнорирует.
     private func openMicrophoneSettings() {
@@ -189,6 +277,9 @@ final class DictationController: ObservableObject {
     }
 
     private func prepareModel() {
+        // Одна загрузка за раз: прогрев при старте и нажатие клавиши
+        // не должны запустить её дважды.
+        guard whisper == nil, state == .idle else { return }
         state = .loadingModel("0%")
         status = "Загрузка модели распознавания…"
         Task { [weak self] in
@@ -246,6 +337,9 @@ final class DictationController: ObservableObject {
         status = isLatched
             ? "Запись зафиксирована — нажмите ⌃⇧D, чтобы остановить"
             : "Запись… отпустите ⌃⇧D, чтобы вставить текст"
+        // Пока острова нет, звук — единственный сигнал «пишу»: панель
+        // меню пользователь в этот момент не открывает.
+        if !isPermissionProbe { NSSound(named: "Tink")?.play() }
         failsafeTimer = Timer.scheduledTimer(withTimeInterval: Self.maxRecordingSeconds,
                                              repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -315,6 +409,7 @@ final class DictationController: ObservableObject {
 
         state = .transcribing
         status = "Распознаю…"
+        NSSound(named: "Pop")?.play()
         let element = targetElement
         targetElement = nil
 
@@ -325,18 +420,20 @@ final class DictationController: ObservableObject {
             }
             azaDebugLog("Aza: dictation transcribe begin")
             do {
-                // §5.2: только ru/en — выбираем явно по вероятностям,
-                // а не общий автодетект по всем языкам Whisper.
-                let detected = try await whisper.detectLangauge(audioArray: samples)
-                let probs = detected.langProbs
-                let language = (probs["ru"] ?? 0) >= (probs["en"] ?? 0) ? "ru" : "en"
-                azaDebugLog("Aza: dictation language=\(language)")
-                let options = DecodingOptions(task: .transcribe,
-                                              language: language,
-                                              usePrefillPrompt: true)
-                let results = try await whisper.transcribe(audioArray: samples,
-                                                           decodeOptions: options)
-                azaDebugLog("Aza: dictation transcribe results=\(results.count)")
+                // §5.2: русский, английский или автоопределение между ними.
+                let language: String
+                var results: [TranscriptionResult]
+
+                if Self.preferredLanguage == "auto" {
+                    (language, results) = try await Self.autoTranscribe(
+                        whisper: whisper, samples: samples)
+                } else {
+                    language = Self.preferredLanguage
+                    results = try await whisper.transcribe(
+                        audioArray: samples,
+                        decodeOptions: Self.options(for: language))
+                }
+                azaDebugLog("Aza: dictation language=\(language) results=\(results.count)")
                 let text = results.map(\.text)
                     .joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
