@@ -2,18 +2,37 @@ import Combine
 import CryptoKit
 import Foundation
 
-/// Одна запись истории буфера обмена.
+/// Одна запись истории буфера обмена. Все новые поля опциональны, чтобы
+/// старые зашифрованные хранилища декодировались без миграции.
 struct ClipEntry: Codable, Equatable, Identifiable {
+    /// Вид записи; nil в хранилище означает обычный текст.
+    enum Kind: String, Codable {
+        case text, rtf, image, files, link
+    }
+
     let id: UUID
+    /// Универсальная строка отображения и поиска: для файлов — имена,
+    /// для изображения — подпись, для ссылки — URL.
     var text: String
     var createdAt: Date
     /// Bundle ID приложения-источника, если удалось определить.
     var sourceAppBundleID: String?
     /// Локализованное имя приложения-источника.
     var sourceAppName: String?
-    /// Избранное: не удаляется автоочисткой по объёму. Опционально,
-    /// чтобы старые зашифрованные хранилища декодировались без миграции.
+    /// Избранное: не удаляется автоочисткой по объёму и сроку.
     var isFavorite: Bool?
+    var kind: Kind?
+    /// RTF хранится инлайн — он мал; изображение живёт в отдельном
+    /// зашифрованном blob-файле по имени id (см. blobURL).
+    var rtfData: Data?
+    /// Пути файлов; содержимое файлов никогда не копируется.
+    var filePaths: [String]?
+    /// Фактические байты на диске (для бюджета 2 ГБ).
+    var byteSize: Int?
+    /// SHA-256 содержимого — дедупликация изображений и RTF.
+    var contentHash: String?
+
+    var resolvedKind: Kind { kind ?? .text }
 }
 
 /// Хранилище истории буфера: AES-GCM (CryptoKit) на диске, ключ —
@@ -28,6 +47,9 @@ final class ClipboardStore: ObservableObject {
 
     static let maxEntries = 200
     static let maxItemCharacters = 100_000
+    /// Спецификация §8.8: максимум на отдельный объект и общий бюджет.
+    static let maxObjectBytes = 100 * 1024 * 1024
+    static let totalByteBudget = 2 * 1024 * 1024 * 1024
 
     /// Срок хранения в днях (спецификация §8.8): 1/7/30/365, 0 — бессрочно.
     static let retentionKey = "ClipboardRetentionDays"
@@ -61,15 +83,43 @@ final class ClipboardStore: ObservableObject {
     ///   - storageURL: файл зашифрованного хранилища.
     ///   - maxEntries: локальный лимит для самопроверок и тестов;
     ///     в приложении используется статический `maxEntries`.
-    init(storageURL: URL? = nil,
+    private let instanceByteBudget: Int
+
+    /// Синхронный init: получает ключ прямо здесь. Keychain-диалог
+    /// заблокирует вызвавший поток — использовать только в self-test.
+    /// Приложение создаёт хранилище через init(preparedKey:) после
+    /// фонового obtainKey().
+    convenience init(storageURL: URL? = nil,
+                     maxEntries: Int = ClipboardStore.maxEntries,
+                     retentionDays: Int? = nil,
+                     byteBudget: Int = ClipboardStore.totalByteBudget) {
+        self.init(preparedKey: Self.obtainKey(),
+                  storageURL: storageURL, maxEntries: maxEntries,
+                  retentionDays: retentionDays, byteBudget: byteBudget)
+    }
+
+    init(preparedKey: (key: SymmetricKey, persistent: Bool),
+         storageURL: URL? = nil,
          maxEntries: Int = ClipboardStore.maxEntries,
-         retentionDays: Int? = nil) {
+         retentionDays: Int? = nil,
+         byteBudget: Int = ClipboardStore.totalByteBudget) {
         self.storageURL = storageURL ?? Self.defaultStorageURL()
         self.instanceLimit = maxEntries
         self.instanceRetentionDays = retentionDays
-        (key, keyIsPersistent) = Self.loadOrCreateKey()
+        self.instanceByteBudget = byteBudget
+        (key, keyIsPersistent) = preparedKey
         load()
-        pruneExpired()
+        commit(removingBlobsOf: pruneExpired())
+    }
+
+    /// Каталог blob-файлов (зашифрованные изображения): сосед файла
+    /// хранилища, чтобы self-test с временным файлом был изолирован.
+    private var blobsDirectory: URL {
+        storageURL.deletingPathExtension().appendingPathExtension("blobs")
+    }
+
+    private func blobURL(for id: UUID) -> URL {
+        blobsDirectory.appendingPathComponent(id.uuidString + ".bin")
     }
 
     static func defaultStorageURL() -> URL {
@@ -82,41 +132,122 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: Публичный API
 
-    /// Добавляет запись: дедупликация (повторное копирование поднимает
-    /// запись наверх с новой датой), обрезка по длине и объёму истории.
+    /// Дедупликация: совпадение по виду и ключу поднимает запись наверх.
+    /// Возврат true — дубликат обработан, добавлять не нужно.
+    private func dedup(where match: (ClipEntry) -> Bool) -> Bool {
+        guard let index = entries.firstIndex(where: match) else { return false }
+        var moved = entries.remove(at: index)
+        moved.createdAt = Date()
+        entries.insert(moved, at: 0)
+        commit(removingBlobsOf: pruneExpired())
+        return true
+    }
+
+    /// Общий финал добавления: вставка сверху, очистки, запись, blob-ы
+    /// удалённых записей стираются ПОСЛЕ сохранения метаданных.
+    private func insertNew(_ entry: ClipEntry) {
+        entries.insert(entry, at: 0)
+        var removed = pruneExpired()
+        removed += pruneExcess()
+        commit(removingBlobsOf: removed)
+    }
+
+    /// Добавляет текстовую запись (повторное копирование поднимает наверх).
     func add(text: String, sourceAppBundleID: String?, sourceAppName: String?) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        guard trimmed.count <= Self.maxItemCharacters else { return }
-
-        if let index = entries.firstIndex(where: { $0.text == trimmed }) {
-            var moved = entries.remove(at: index)
-            moved.createdAt = Date()
-            entries.insert(moved, at: 0)
-            pruneExpired()
-            save()
-            return
-        }
-
-        entries.insert(ClipEntry(
+        guard !trimmed.isEmpty, trimmed.count <= Self.maxItemCharacters else { return }
+        if dedup(where: { $0.resolvedKind == .text && $0.text == trimmed }) { return }
+        insertNew(ClipEntry(
             id: UUID(), text: trimmed, createdAt: Date(),
-            sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName
-        ), at: 0)
-        pruneExpired()
-        pruneExcess()
-        save()
+            sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
+            byteSize: trimmed.utf8.count
+        ))
+    }
+
+    /// Ссылка (не file://): текст = URL, отдельный вид для карточки.
+    func addLink(_ url: URL, sourceAppBundleID: String?, sourceAppName: String?) {
+        let text = url.absoluteString
+        guard !text.isEmpty, text.count <= Self.maxItemCharacters else { return }
+        if dedup(where: { $0.resolvedKind == .link && $0.text == text }) { return }
+        insertNew(ClipEntry(
+            id: UUID(), text: text, createdAt: Date(),
+            sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
+            kind: .link, byteSize: text.utf8.count
+        ))
+    }
+
+    /// RTF: инлайн-данные + плоский текст для показа и поиска.
+    /// Дедупликация по хешу данных — по тексту терялось форматирование.
+    func addRTF(text: String, rtf: Data,
+                sourceAppBundleID: String?, sourceAppName: String?) {
+        guard rtf.count <= Self.maxObjectBytes else { return }
+        let display = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !display.isEmpty, display.count <= Self.maxItemCharacters else { return }
+        let hash = Self.sha256(rtf)
+        if dedup(where: { $0.resolvedKind == .rtf && $0.contentHash == hash }) { return }
+        insertNew(ClipEntry(
+            id: UUID(), text: display, createdAt: Date(),
+            sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
+            kind: .rtf, rtfData: rtf, byteSize: rtf.count + display.utf8.count,
+            contentHash: hash
+        ))
+    }
+
+    /// Изображение (нормализованный PNG). Данные — в отдельном
+    /// зашифрованном blob-файле; в метаданных только подпись и хеш.
+    /// Blob пишется ДО метаданных: неудача записи не создаёт запись.
+    func addImage(png: Data, label: String,
+                  sourceAppBundleID: String?, sourceAppName: String?) {
+        // Read-only-сессия не пишет blob-ы: эфемерный ключ сделает файл
+        // нечитаемым, а до следующего успешного запуска копились бы сироты.
+        guard keyIsPersistent else { return }
+        guard png.count <= Self.maxObjectBytes else { return }
+        let hash = Self.sha256(png)
+        if dedup(where: { $0.resolvedKind == .image && $0.contentHash == hash }) { return }
+        let id = UUID()
+        guard let sealedSize = writeBlob(png, for: id) else { return }
+        insertNew(ClipEntry(
+            id: id, text: label, createdAt: Date(),
+            sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
+            kind: .image, byteSize: sealedSize, contentHash: hash
+        ))
+    }
+
+    /// Файлы: только пути, содержимое не копируется (спецификация).
+    func addFiles(paths: [String], sourceAppBundleID: String?, sourceAppName: String?) {
+        guard !paths.isEmpty else { return }
+        let names = paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        if dedup(where: { $0.resolvedKind == .files && $0.filePaths == paths }) { return }
+        insertNew(ClipEntry(
+            id: UUID(), text: names, createdAt: Date(),
+            sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
+            kind: .files, filePaths: paths,
+            byteSize: paths.reduce(0) { $0 + $1.utf8.count }
+        ))
+    }
+
+    /// Копирование карточки обратно в буфер: поднять наверх без
+    /// переклассификации содержимого.
+    func touch(id: UUID) {
+        _ = dedup(where: { $0.id == id })
+    }
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Хранение по сроку (спецификация §8.8): старше срока — удаляется,
-    /// избранное — никогда. Вызывается при старте и каждом добавлении;
-    /// смена настройки применяется при следующем копировании/запуске.
-    private func pruneExpired() {
+    /// избранное — никогда. Возвращает удалённые записи (их blob-ы
+    /// стирает commit после сохранения метаданных).
+    @discardableResult
+    private func pruneExpired() -> [ClipEntry] {
         let days = instanceRetentionDays ?? Self.retentionDays
-        guard days > 0 else { return }
+        guard days > 0 else { return [] }
         let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
-        let before = entries.count
+        let removed = entries.filter { $0.isFavorite != true && $0.createdAt < cutoff }
+        guard !removed.isEmpty else { return [] }
         entries.removeAll { $0.isFavorite != true && $0.createdAt < cutoff }
-        if entries.count != before { save() }
+        return removed
     }
 
     /// Только для self-test: сдвигает дату записи в прошлое.
@@ -127,14 +258,42 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// Избранное переживает автоочистку по объёму (спецификация §8.6).
-    /// Записи хранятся новые-сверху, поэтому удаляем с хвоста — самые старые.
-    private func pruneExcess() {
+    /// Записи хранятся новые-сверху, поэтому удаляем с хвоста — самые
+    /// старые. Два лимита: число записей и общий бюджет байтов (§8.8);
+    /// избранное делает бюджет мягким потолком — спецификация освобождает
+    /// его от очистки.
+    @discardableResult
+    private func pruneExcess() -> [ClipEntry] {
+        var removed: [ClipEntry] = []
         var index = entries.count - 1
         while entries.count > instanceLimit && index >= 0 {
             if entries[index].isFavorite != true {
-                entries.remove(at: index)
+                removed.append(entries.remove(at: index))
             }
             index -= 1
+        }
+        var total = entries.reduce(0) { $0 + ($1.byteSize ?? $1.text.utf8.count) }
+        index = entries.count - 1
+        while total > instanceByteBudget && index >= 0 {
+            let entry = entries[index]
+            if entry.isFavorite != true {
+                total -= entry.byteSize ?? entry.text.utf8.count
+                removed.append(entries.remove(at: index))
+            }
+            index -= 1
+        }
+        return removed
+    }
+
+    /// Сохраняет метаданные и лишь затем стирает blob-ы удалённых записей:
+    /// при сбое записи хуже потерять немного места, чем данные.
+    /// В read-only-сессии (эфемерный ключ) blob-ы НЕ трогаем: метаданные
+    /// не сохраняются, и удаление стёрло бы изображения настоящей истории.
+    private func commit(removingBlobsOf removed: [ClipEntry]) {
+        save()
+        guard keyIsPersistent else { return }
+        for entry in removed where entry.resolvedKind == .image {
+            try? FileManager.default.removeItem(at: blobURL(for: entry.id))
         }
     }
 
@@ -150,11 +309,24 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// Удаляет карточку; возвращает данные для отмены (спецификация §8.7).
+    /// Blob изображения НЕ удаляется — он нужен все пять секунд окна
+    /// «Отменить»; окончательно его стирает finalizeDelete.
     func delete(id: UUID) -> Deleted? {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return nil }
         let deleted = Deleted(entry: entries.remove(at: index))
         save()
         return deleted
+    }
+
+    /// Завершает удаление после истечения окна «Отменить» (или замены его
+    /// новым удалением). Если запись успели восстановить — blob остаётся.
+    /// Read-only-сессия blob-ы не трогает (см. commit).
+    func finalizeDelete(_ deleted: Deleted) {
+        guard keyIsPersistent else { return }
+        guard !entries.contains(where: { $0.id == deleted.entry.id }) else { return }
+        if deleted.entry.resolvedKind == .image {
+            try? FileManager.default.removeItem(at: blobURL(for: deleted.entry.id))
+        }
     }
 
     /// Возвращает удалённую запись на её хронологическое место: индекс по
@@ -169,8 +341,49 @@ final class ClipboardStore: ObservableObject {
 
     /// Очищает историю, сохраняя избранное (как обещает кнопка в меню).
     func clearAll() {
+        let removed = entries.filter { $0.isFavorite != true }
         entries.removeAll { $0.isFavorite != true }
-        save()
+        commit(removingBlobsOf: removed)
+    }
+
+    // MARK: Blob-файлы изображений
+
+    /// Пишет зашифрованный blob; возвращает размер на диске или nil.
+    private func writeBlob(_ data: Data, for id: UUID) -> Int? {
+        do {
+            try FileManager.default.createDirectory(at: blobsDirectory,
+                                                    withIntermediateDirectories: true)
+            let sealed = try AES.GCM.seal(data, using: key).combined!
+            try sealed.write(to: blobURL(for: id), options: .atomic)
+            return sealed.count
+        } catch {
+            NSLog("Aza: blob write failed (%@)", error.localizedDescription)
+            return nil
+        }
+    }
+
+    /// Расшифрованное изображение записи (для вставки в буфер).
+    func imageData(for entry: ClipEntry) -> Data? {
+        guard entry.resolvedKind == .image,
+              let sealedData = try? Data(contentsOf: blobURL(for: entry.id)),
+              let box = try? AES.GCM.SealedBox(combined: sealedData),
+              let data = try? AES.GCM.open(box, using: key) else { return nil }
+        return data
+    }
+
+    /// Удаляет blob-ы без записей. Вызывается ТОЛЬКО после успешной
+    /// расшифровки хранилища: при сбое загрузки или недоступном ключе
+    /// blob-ы не трогаем — их записи могут вернуться.
+    private func sweepOrphanBlobs() {
+        guard keyIsPersistent else { return }
+        let valid = Set(entries.filter { $0.resolvedKind == .image }
+            .map { $0.id.uuidString + ".bin" })
+        let files = (try? FileManager.default
+            .contentsOfDirectory(atPath: blobsDirectory.path)) ?? []
+        for file in files where !valid.contains(file) {
+            try? FileManager.default.removeItem(
+                at: blobsDirectory.appendingPathComponent(file))
+        }
     }
 
     // MARK: Шифрование и диск
@@ -197,6 +410,13 @@ final class ClipboardStore: ObservableObject {
             return
         }
         entries = decoded.entries
+        // Записи-изображения без blob-а бесполезны (например, ручное
+        // удаление файлов) — выбрасываем, чтобы не показывать пустышки.
+        entries.removeAll {
+            $0.resolvedKind == .image &&
+            !FileManager.default.fileExists(atPath: blobURL(for: $0.id).path)
+        }
+        sweepOrphanBlobs()
     }
 
     // MARK: Ключ в Keychain
@@ -207,7 +427,15 @@ final class ClipboardStore: ObservableObject {
     /// удаление или перезапись делает старую историю нерасшифровываемой
     /// навсегда. Вместо этого сессия работает с эфемерным ключом, а save()
     /// отключён, чтобы не затереть файл истории.
-    private static func loadOrCreateKey() -> (SymmetricKey, Bool) {
+    /// Вызывается С ФОНОВОГО потока (AzaApp.Startup): SecItemCopyMatching
+    /// может показать модальный диалог Keychain (разблокировка связки,
+    /// подтверждение доступа) — на главном потоке он вешал всё приложение,
+    /// включая коррекцию раскладки.
+    nonisolated static func obtainKey() -> (SymmetricKey, Bool) {
+        loadOrCreateKey()
+    }
+
+    private nonisolated static func loadOrCreateKey() -> (SymmetricKey, Bool) {
         let service = "com.tmmt.Aza.clipboard"
         let account = "history-key"
         var query: [String: Any] = [
@@ -257,7 +485,7 @@ final class ClipboardStore: ObservableObject {
     private static let keyOwnershipLabel = "Aza clipboard key v3"
 #endif
 
-    private static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {
+    private nonisolated static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {
         var add = query
         add[kSecReturnData as String] = nil
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
@@ -281,7 +509,7 @@ final class ClipboardStore: ObservableObject {
 
 #if DEBUG
     /// SecAccess, разрешающий расшифровку любому приложению без диалога.
-    private static func anyApplicationAccess() -> SecAccess? {
+    private nonisolated static func anyApplicationAccess() -> SecAccess? {
         var access: SecAccess?
         guard SecAccessCreate("Aza clipboard key" as CFString, nil, &access) == errSecSuccess,
               let access else { return nil }
@@ -312,7 +540,7 @@ final class ClipboardStore: ObservableObject {
     /// Возврат false — пересоздание не удалось: вызывающий обязан перевести
     /// сессию в read-only, чтобы не плодить состояния, которые не переживут
     /// перезапуск.
-    private static func reassignKeyOwnership(query: [String: Any], keyData: Data) -> Bool {
+    private nonisolated static func reassignKeyOwnership(query: [String: Any], keyData: Data) -> Bool {
         // Проба записи ДО удаления старого элемента: если Keychain не
         // принимает новые записи, старый ключ остаётся нетронутым.
         var probeQuery = query
@@ -403,6 +631,77 @@ final class ClipboardStore: ObservableObject {
                "просроченная запись не удалена")
         assert(agedReload.entries.contains { $0.text == sample && $0.isFavorite == true },
                "избранное не должно устаревать")
+
+        // Виды записей: изображение в зашифрованном blob-е.
+        let richURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aza-clipboard-rich-\(UUID().uuidString)")
+        let blobsDir = richURL.deletingPathExtension().appendingPathExtension("blobs")
+        defer {
+            try? FileManager.default.removeItem(at: richURL)
+            try? FileManager.default.removeItem(at: blobsDir)
+        }
+        let rich = ClipboardStore(storageURL: richURL, maxEntries: 10, retentionDays: 0)
+        let pngMagic = Data([0x89, 0x50, 0x4E, 0x47])
+        let png = pngMagic + Data(repeating: 0xAB, count: 64)
+        rich.addImage(png: png, label: "Изображение 2×2",
+                      sourceAppBundleID: nil, sourceAppName: nil)
+        assert(rich.entries.first?.resolvedKind == .image)
+        assert(rich.imageData(for: rich.entries[0]) == png, "blob не расшифровался")
+        let blobFiles = (try? FileManager.default
+            .contentsOfDirectory(atPath: blobsDir.path)) ?? []
+        assert(blobFiles.count == 1)
+        let rawBlob = (try? Data(contentsOf: blobsDir.appendingPathComponent(blobFiles[0]))) ?? Data()
+        assert(rawBlob.range(of: pngMagic) == nil, "PNG-сигнатура в открытом виде на диске")
+
+        // Дедуп изображения по хешу.
+        rich.addImage(png: png, label: "Изображение 2×2",
+                      sourceAppBundleID: nil, sourceAppName: nil)
+        assert(rich.entries.filter { $0.resolvedKind == .image }.count == 1)
+
+        // Удаление: blob живёт всё окно «Отменить», restore возвращает данные.
+        let deletedImage = rich.delete(id: rich.entries[0].id)!
+        assert(FileManager.default.fileExists(atPath: blobsDir
+            .appendingPathComponent(deletedImage.entry.id.uuidString + ".bin").path),
+               "blob удалён до финализации — restore был бы сломан")
+        rich.restore(deletedImage)
+        assert(rich.imageData(for: deletedImage.entry) == png)
+        let deletedAgain = rich.delete(id: deletedImage.entry.id)!
+        rich.finalizeDelete(deletedAgain)
+        assert(!FileManager.default.fileExists(atPath: blobsDir
+            .appendingPathComponent(deletedAgain.entry.id.uuidString + ".bin").path),
+               "blob не удалён при финализации")
+
+        // Файлы и RTF: классификация, дедуп RTF по хешу данных.
+        rich.addFiles(paths: ["/tmp/a.txt", "/tmp/b.png"],
+                      sourceAppBundleID: nil, sourceAppName: nil)
+        assert(rich.entries.first?.resolvedKind == .files &&
+               rich.entries.first?.text == "a.txt, b.png")
+        let rtfBytes = Data("{\\rtf1 test}".utf8)
+        rich.addRTF(text: "test", rtf: rtfBytes,
+                    sourceAppBundleID: nil, sourceAppName: nil)
+        rich.addRTF(text: "test", rtf: rtfBytes,
+                    sourceAppBundleID: nil, sourceAppName: nil)
+        assert(rich.entries.filter { $0.resolvedKind == .rtf }.count == 1)
+
+        // Sweep сирот: чужой файл в blob-каталоге исчезает после загрузки.
+        let stray = blobsDir.appendingPathComponent("\(UUID().uuidString).bin")
+        try? Data([0x01]).write(to: stray)
+        _ = ClipboardStore(storageURL: richURL, maxEntries: 10, retentionDays: 0)
+        assert(!FileManager.default.fileExists(atPath: stray.path), "сирота не удалён")
+
+        // Бюджет байтов: старые не-избранные вылетают при переполнении.
+        let budgetURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aza-clipboard-budget-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: budgetURL) }
+        let tight = ClipboardStore(storageURL: budgetURL, maxEntries: 10,
+                                   retentionDays: 0, byteBudget: 200)
+        for suffix in ["один", "два", "три"] {
+            tight.add(text: String(repeating: "x", count: 90) + suffix,
+                      sourceAppBundleID: nil, sourceAppName: nil)
+        }
+        assert(tight.entries.count == 2, "бюджет байтов не сработал")
+        assert(tight.entries.first?.text.hasSuffix("три") == true,
+               "бюджет удалил новое вместо старого")
 
         try? Data([0x00, 0x01, 0x02]).write(to: tempURL)
         assert(ClipboardStore(storageURL: tempURL, maxEntries: 3).entries.isEmpty)

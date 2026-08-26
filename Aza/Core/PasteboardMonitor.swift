@@ -72,14 +72,87 @@ final class PasteboardMonitor: ObservableObject {
         if let bundleID = frontmost?.bundleIdentifier,
            Self.excludedBundleIDs.contains(bundleID) { return }
 
+        classify(pasteboard,
+                 sourceAppBundleID: frontmost?.bundleIdentifier,
+                 sourceAppName: frontmost?.localizedName)
+    }
+
+    /// Приоритет классификации (стиль Maccy): файлы → изображение →
+    /// ссылка → RTF → текст. Копия файла-картинки из Finder остаётся
+    /// файловой ссылкой; содержимое файлов не читается.
+    private func classify(_ pasteboard: NSPasteboard,
+                          sourceAppBundleID: String?, sourceAppName: String?) {
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL], !urls.isEmpty {
+            azaDebugLog("Aza: clip kind=files n=\(urls.count)")
+            store.addFiles(paths: urls.map(\.path),
+                           sourceAppBundleID: sourceAppBundleID,
+                           sourceAppName: sourceAppName)
+            return
+        }
+
+        if let image = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff),
+           image.count <= ClipboardStore.maxObjectBytes {
+            // Нормализация к PNG: один формат в blob-ах и при вставке.
+            guard let rep = NSBitmapImageRep(data: image),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                azaDebugLog("Aza: clip image decode failed bytes=\(image.count)")
+                return
+            }
+            azaDebugLog("Aza: clip kind=image bytes=\(png.count)")
+            store.addImage(png: png,
+                           label: "Изображение \(rep.pixelsWide)×\(rep.pixelsHigh)",
+                           sourceAppBundleID: sourceAppBundleID,
+                           sourceAppName: sourceAppName)
+            return
+        }
+
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL],
+           let url = urls.first, !url.isFileURL, url.scheme != nil {
+            azaDebugLog("Aza: clip kind=link")
+            store.addLink(url,
+                          sourceAppBundleID: sourceAppBundleID,
+                          sourceAppName: sourceAppName)
+            return
+        }
+
+        if let rtf = pasteboard.data(forType: .rtf) {
+            // Плоский текст: из pasteboard, иначе из самого RTF.
+            let text = pasteboard.string(forType: .string)
+                ?? NSAttributedString(rtf: rtf, documentAttributes: nil)?.string
+                ?? ""
+            azaDebugLog("Aza: clip kind=rtf bytes=\(rtf.count)")
+            store.addRTF(text: text, rtf: rtf,
+                         sourceAppBundleID: sourceAppBundleID,
+                         sourceAppName: sourceAppName)
+            return
+        }
+
         guard let text = pasteboard.string(forType: .string),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              text.count <= ClipboardStore.maxItemCharacters else { return }
-
+              text.count <= ClipboardStore.maxItemCharacters else {
+            azaDebugLog("Aza: clip kind=unclassified types=\(pasteboard.types?.count ?? 0)")
+            return
+        }
+        // Скопированный текстом URL — карточка-ссылка: тип public.url
+        // кладут только браузеры, а ссылки чаще копируют как текст.
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme, ["http", "https"].contains(scheme),
+           url.host != nil, !trimmed.contains(where: \.isWhitespace) {
+            azaDebugLog("Aza: clip kind=link (text)")
+            store.addLink(url,
+                          sourceAppBundleID: sourceAppBundleID,
+                          sourceAppName: sourceAppName)
+            return
+        }
+        azaDebugLog("Aza: clip kind=text len=\(text.count)")
         store.add(
             text: text,
-            sourceAppBundleID: frontmost?.bundleIdentifier,
-            sourceAppName: frontmost?.localizedName
+            sourceAppBundleID: sourceAppBundleID,
+            sourceAppName: sourceAppName
         )
     }
 }

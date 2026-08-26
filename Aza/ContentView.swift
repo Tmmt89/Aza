@@ -3,8 +3,9 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var hotKey: GlobalHotKey
-    @ObservedObject var clipboardStore: ClipboardStore
-    @ObservedObject var pasteboardMonitor: PasteboardMonitor
+    @ObservedObject var clipboardStartup: ClipboardStartup
+    /// Хранилище появляется после фонового получения ключа Keychain.
+    private var clipboardStore: ClipboardStore? { clipboardStartup.store }
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
     @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstentionEnabled = true
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
@@ -83,7 +84,17 @@ struct ContentView: View {
                 .font(.caption)
             }
 
-            if clipboardHistoryEnabled {
+            if clipboardHistoryEnabled, clipboardStore == nil {
+                // Ключ Keychain добывается на фоне — возможно, ждёт ответа
+                // в диалоге (разблокировка связки). Приложение не блокируется.
+                Label("История загружается… (возможно, Keychain ждёт ответа в диалоге)",
+                      systemImage: "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if clipboardHistoryEnabled, let clipboardStore {
                 if clipboardStore.isReadOnly {
                     Label("Нет доступа к ключу истории (Keychain) — изменения не сохранятся до перезапуска",
                           systemImage: "exclamationmark.triangle")
@@ -119,9 +130,16 @@ struct ContentView: View {
                                 copyToPasteboard(entry)
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(Self.preview(of: entry.text))
-                                        .lineLimit(1)
-                                        .foregroundStyle(.primary)
+                                    HStack(spacing: 4) {
+                                        if let icon = Self.kindIcon(for: entry) {
+                                            Image(systemName: icon)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Text(Self.preview(of: entry.text))
+                                            .lineLimit(1)
+                                            .foregroundStyle(.primary)
+                                    }
                                     Text(Self.metaLine(for: entry))
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
@@ -247,9 +265,7 @@ struct ContentView: View {
         .padding(16)
         .frame(width: 340)
         .onAppear {
-            if clipboardHistoryEnabled {
-                pasteboardMonitor.start()
-            }
+            clipboardStartup.setMonitoring(enabled: clipboardHistoryEnabled)
         }
     }
 
@@ -257,7 +273,14 @@ struct ContentView: View {
     /// предыдущего приложения. Панель скрывается, фокус возвращается,
     /// через 180 мс берём сфокусированный элемент системы и вставляем.
     private func insertIntoActiveApp(_ entry: ClipEntry) {
+        guard clipboardStore != nil else { return }
         copyToPasteboard(entry)
+        // AX-вставка умеет только текст; изображения и файлы уже в буфере.
+        guard entry.resolvedKind == .text || entry.resolvedKind == .link
+                || entry.resolvedKind == .rtf else {
+            copyStatus = "В буфере — вставьте ⌘V в нужном месте"
+            return
+        }
         copyStatus = "Вставляю в активное приложение…"
         NSApp.hide(nil)
 
@@ -276,12 +299,19 @@ struct ContentView: View {
     }
 
     /// Удаляет карточку и показывает «Отменить» на пять секунд (спец. §8.7).
+    /// Blob изображения стирается только при финализации — после истечения
+    /// окна отмены или замены его новым удалением.
     private func deleteEntry(_ entry: ClipEntry) {
-        guard let deleted = clipboardStore.delete(id: entry.id) else { return }
+        guard let store = clipboardStore,
+              let deleted = store.delete(id: entry.id) else { return }
+        if let previous = lastDeleted {
+            store.finalizeDelete(previous)
+        }
         lastDeleted = deleted
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
             if lastDeleted?.entry.id == deleted.entry.id {
                 lastDeleted = nil
+                store.finalizeDelete(deleted)
             }
         }
     }
@@ -307,17 +337,43 @@ struct ContentView: View {
             " · шифрование AES-GCM"
     }
 
-    /// Копирует запись истории обратно в системный буфер.
+    /// Копирует запись истории обратно в системный буфер — по виду записи.
     private func copyToPasteboard(_ entry: ClipEntry) {
+        guard let store = clipboardStore else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(entry.text, forType: .string)
+        switch entry.resolvedKind {
+        case .files:
+            let urls = (entry.filePaths ?? []).map { URL(fileURLWithPath: $0) as NSURL }
+            pasteboard.writeObjects(urls)
+        case .image:
+            if let data = store.imageData(for: entry) {
+                pasteboard.setData(data, forType: .png)
+            } else {
+                copyStatus = "Изображение недоступно (blob не читается)"
+                return
+            }
+        case .rtf:
+            if let rtf = entry.rtfData {
+                pasteboard.setData(rtf, forType: .rtf)
+            }
+            pasteboard.setString(entry.text, forType: .string)
+        case .text, .link:
+            pasteboard.setString(entry.text, forType: .string)
+        }
         copyStatus = "Скопировано: \(Self.preview(of: entry.text)) — вставьте ⌘V"
-        clipboardStore.add(
-            text: entry.text,
-            sourceAppBundleID: Bundle.main.bundleIdentifier,
-            sourceAppName: "Aza"
-        )
+        store.touch(id: entry.id)
+    }
+
+    /// Иконка вида записи; текст без иконки — карточек-текстов большинство.
+    static func kindIcon(for entry: ClipEntry) -> String? {
+        switch entry.resolvedKind {
+        case .text: return nil
+        case .rtf: return "doc.richtext"
+        case .image: return "photo"
+        case .files: return "doc.on.doc"
+        case .link: return "link"
+        }
     }
 
     /// Превью для карточки: первая строка, до 48 символов.
@@ -371,12 +427,6 @@ struct ContentView: View {
 }
 
 #Preview {
-    let store = ClipboardStore()
-    let monitor = PasteboardMonitor(store: store)
-    return ContentView(
-        hotKey: GlobalHotKey(),
-        clipboardStore: store,
-        pasteboardMonitor: monitor
-    )
+    ContentView(hotKey: GlobalHotKey(), clipboardStartup: ClipboardStartup())
 }
 
