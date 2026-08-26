@@ -29,10 +29,18 @@ final class ClipboardStore: ObservableObject {
     static let maxEntries = 200
     static let maxItemCharacters = 100_000
 
+    /// Срок хранения в днях (спецификация §8.8): 1/7/30/365, 0 — бессрочно.
+    static let retentionKey = "ClipboardRetentionDays"
+    static var retentionDays: Int {
+        (UserDefaults.standard.object(forKey: retentionKey) as? Int) ?? 30
+    }
+
     @Published private(set) var entries: [ClipEntry] = []
 
     private let storageURL: URL
     private let instanceLimit: Int
+    /// nil — брать срок из настройки; self-test передаёт свой.
+    private let instanceRetentionDays: Int?
     private let key: SymmetricKey
     /// false — ключ эфемерный (Keychain недоступен): историю не пишем,
     /// чтобы не затереть файл, зашифрованный настоящим ключом.
@@ -53,11 +61,15 @@ final class ClipboardStore: ObservableObject {
     ///   - storageURL: файл зашифрованного хранилища.
     ///   - maxEntries: локальный лимит для самопроверок и тестов;
     ///     в приложении используется статический `maxEntries`.
-    init(storageURL: URL? = nil, maxEntries: Int = ClipboardStore.maxEntries) {
+    init(storageURL: URL? = nil,
+         maxEntries: Int = ClipboardStore.maxEntries,
+         retentionDays: Int? = nil) {
         self.storageURL = storageURL ?? Self.defaultStorageURL()
         self.instanceLimit = maxEntries
+        self.instanceRetentionDays = retentionDays
         (key, keyIsPersistent) = Self.loadOrCreateKey()
         load()
+        pruneExpired()
     }
 
     static func defaultStorageURL() -> URL {
@@ -81,6 +93,7 @@ final class ClipboardStore: ObservableObject {
             var moved = entries.remove(at: index)
             moved.createdAt = Date()
             entries.insert(moved, at: 0)
+            pruneExpired()
             save()
             return
         }
@@ -89,7 +102,27 @@ final class ClipboardStore: ObservableObject {
             id: UUID(), text: trimmed, createdAt: Date(),
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName
         ), at: 0)
+        pruneExpired()
         pruneExcess()
+        save()
+    }
+
+    /// Хранение по сроку (спецификация §8.8): старше срока — удаляется,
+    /// избранное — никогда. Вызывается при старте и каждом добавлении;
+    /// смена настройки применяется при следующем копировании/запуске.
+    private func pruneExpired() {
+        let days = instanceRetentionDays ?? Self.retentionDays
+        guard days > 0 else { return }
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        let before = entries.count
+        entries.removeAll { $0.isFavorite != true && $0.createdAt < cutoff }
+        if entries.count != before { save() }
+    }
+
+    /// Только для self-test: сдвигает дату записи в прошлое.
+    func backdate(id: UUID, to date: Date) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[index].createdAt = date
         save()
     }
 
@@ -360,6 +393,16 @@ final class ClipboardStore: ObservableObject {
         reloaded.clearAll()
         assert(reloaded.entries.map(\.text) == [sample],
                "clearAll обязан сохранить избранное и удалить остальное")
+
+        // Хранение по сроку: просроченное удаляется, избранное — нет.
+        let aged = ClipboardStore(storageURL: tempURL, maxEntries: 3, retentionDays: 7)
+        aged.add(text: sample + "старое", sourceAppBundleID: nil, sourceAppName: nil)
+        aged.backdate(id: aged.entries[0].id, to: Date().addingTimeInterval(-8 * 86_400))
+        let agedReload = ClipboardStore(storageURL: tempURL, maxEntries: 3, retentionDays: 7)
+        assert(!agedReload.entries.contains { $0.text == sample + "старое" },
+               "просроченная запись не удалена")
+        assert(agedReload.entries.contains { $0.text == sample && $0.isFavorite == true },
+               "избранное не должно устаревать")
 
         try? Data([0x00, 0x01, 0x02]).write(to: tempURL)
         assert(ClipboardStore(storageURL: tempURL, maxEntries: 3).entries.isEmpty)

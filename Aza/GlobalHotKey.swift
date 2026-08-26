@@ -86,6 +86,10 @@ final class GlobalHotKey: ObservableObject {
         assert(TextInsertion.trailingToken(of: "дика лор") == "лор")
         assert(TextInsertion.trailingToken(of: "лор") == "лор")
         assert(TextInsertion.trailingToken(of: "дика ") == "")
+        // Ассерты обязаны быть герметичными: пользовательские исключения
+        // (заполненные реальной отменой) не должны влиять на эталонные слова.
+        UserWordLists.shared.suspendedForSelfCheck = true
+        defer { UserWordLists.shared.suspendedForSelfCheck = false }
         if LayoutCorrectionEngine.isAvailable {
             assert(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text == "привет")
             assert(LayoutCorrectionEngine.correction(for: "руддщ")?.text == "hello")
@@ -227,7 +231,7 @@ final class GlobalHotKey: ObservableObject {
             return
         }
         guard let element = TextInsertion.focusedElement(),
-              SecureFieldDetector.isTextInput(element),
+              TextInsertion.isTextLike(element),
               !SecureFieldDetector.isSecure(element) else {
             correctionStatus = "Поле для отмены недоступно"
             return

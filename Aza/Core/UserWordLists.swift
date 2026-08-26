@@ -45,8 +45,13 @@ final class UserWordLists {
         LayoutCorrectionEngine.canonicalPalochkaForm(of: word.lowercased())
     }
 
+    /// Self-check при старте прогоняет движок на эталонных словах; реальные
+    /// пользовательские исключения (например, «[mj» после теста отмены)
+    /// ломали бы ассерты — на время проверки списки отключаются.
+    var suspendedForSelfCheck = false
+
     func isNeverCorrect(_ word: String) -> Bool {
-        neverCorrect.contains(Self.storageForm(word))
+        !suspendedForSelfCheck && neverCorrect.contains(Self.storageForm(word))
     }
 
     func addNeverCorrect(_ word: String) {

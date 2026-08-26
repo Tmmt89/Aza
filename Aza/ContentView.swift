@@ -8,6 +8,7 @@ struct ContentView: View {
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
     @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstentionEnabled = true
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
+    @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
     @State private var pasteboardStatus = "Типы ещё не проверялись"
     @State private var pasteboardTypes = ""
     @State private var copyStatus = ""
@@ -69,6 +70,18 @@ struct ContentView: View {
 
             Toggle("Собирать историю буфера", isOn: $clipboardHistoryEnabled)
                 .toggleStyle(.switch)
+
+            if clipboardHistoryEnabled {
+                Picker("Хранить", selection: $retentionDays) {
+                    Text("День").tag(1)
+                    Text("Неделю").tag(7)
+                    Text("Месяц").tag(30)
+                    Text("Год").tag(365)
+                    Text("Бессрочно").tag(0)
+                }
+                .pickerStyle(.menu)
+                .font(.caption)
+            }
 
             if clipboardHistoryEnabled {
                 if clipboardStore.isReadOnly {
@@ -250,7 +263,7 @@ struct ContentView: View {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
             guard let element = TextInsertion.focusedElement(),
-                  SecureFieldDetector.isTextInput(element),
+                  TextInsertion.isTextLike(element),
                   !SecureFieldDetector.isSecure(element) else {
                 copyStatus = "Активное текстовое поле не найдено — текст в буфере (⌘V)"
                 return

@@ -34,6 +34,14 @@ enum TextInsertion {
         return (window as! AXUIElement)
     }
 
+    /// Элемент ведёт себя как текстовый: у него есть читаемый диапазон
+    /// выделения. Надёжнее ролевого фильтра (Notes/браузеры/Electron отдают
+    /// роли вне AXTextField/AXTextArea), и в отличие от полного снятия
+    /// проверки не даёт печатать синтетикой в кнопки и списки.
+    static func isTextLike(_ element: AXUIElement) -> Bool {
+        selectedRange(of: element) != nil
+    }
+
     static func insert(_ text: String, into element: AXUIElement) -> AXError {
         let directResult = AXUIElementSetAttributeValue(
             element,
@@ -42,7 +50,7 @@ enum TextInsertion {
         )
         guard directResult != .success else { return .success }
 
-        guard SecureFieldDetector.isTextInput(element), postUnicode(text) else { return directResult }
+        guard isTextLike(element), postUnicode(text) else { return directResult }
         return .success
     }
 
