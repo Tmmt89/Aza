@@ -54,17 +54,22 @@ public struct BuildStats: Codable {
     public var droppedBelowMinCount: Int
     public var droppedCharset: Int
     public var droppedRussianFilter: Int
+    /// Слова из русского фильтра, оставленные порогом частоты корпуса —
+    /// аудит-след для будущих замен источников.
+    public var rescuedFromRussianFilter: [String]
     public var minCount: Int
 
     init(perSourceRawTokens: [String: Int], scalingFactors: [String: Double],
          keptWords: Int, droppedBelowMinCount: Int, droppedCharset: Int,
-         droppedRussianFilter: Int, minCount: Int) {
+         droppedRussianFilter: Int, rescuedFromRussianFilter: [String] = [],
+         minCount: Int) {
         self.perSourceRawTokens = perSourceRawTokens
         self.scalingFactors = scalingFactors
         self.keptWords = keptWords
         self.droppedBelowMinCount = droppedBelowMinCount
         self.droppedCharset = droppedCharset
         self.droppedRussianFilter = droppedRussianFilter
+        self.rescuedFromRussianFilter = rescuedFromRussianFilter
         self.minCount = minCount
     }
 }
@@ -137,6 +142,7 @@ public final class LexiconBuilder {
         // 4. Отсев мусора и сборка.
         var entries: [LexiconEntry] = []
         var low = 0, bad = 0, russian = 0
+        var rescued: [String] = []
         for (word, count) in weighted {
             guard Self.isValidWord(word) else { bad += 1; continue }
             // Русские заимствования из корпуса (мало/было/…) мешают движку
@@ -145,9 +151,11 @@ public final class LexiconBuilder {
             // со строками из русского списка. Разделение по взвешенной
             // частоте корпуса чистое (~2 порядка: мало 31 против ду 14997),
             // поэтому слово с частотой ≥ russianKeepMinCount остаётся.
-            if russianWords.contains(word),
-               russianKeepMinCount.map({ Int(count.rounded()) < $0 }) ?? true {
-                russian += 1; continue
+            if russianWords.contains(word) {
+                if russianKeepMinCount.map({ Int(count.rounded()) < $0 }) ?? true {
+                    russian += 1; continue
+                }
+                rescued.append(word)
             }
             guard Int(count.rounded()) >= minCount else { low += 1; continue }
             entries.append(LexiconEntry(
@@ -167,6 +175,7 @@ public final class LexiconBuilder {
             droppedBelowMinCount: low,
             droppedCharset: bad,
             droppedRussianFilter: russian,
+            rescuedFromRussianFilter: rescued.sorted(),
             minCount: minCount
         )
         return (entries, stats)

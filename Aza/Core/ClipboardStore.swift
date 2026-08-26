@@ -213,8 +213,16 @@ final class ClipboardStore: ObservableObject {
         return (key, true)
     }
 
-    /// Метка мигрированного элемента: миграция выполняется один раз.
-    private static let keyOwnershipLabel = "Aza clipboard key v2"
+    /// Метка мигрированного элемента: миграция выполняется один раз НА
+    /// КОНФИГУРАЦИЮ. Метки Debug и Release различаются: иначе Release,
+    /// встретив Debug-элемент (ACL «любое приложение»), пропустил бы
+    /// миграцию и унаследовал слабый ACL. Смена конфигурации мигрирует
+    /// элемент заново в правильную сторону (ключ сохраняется).
+#if DEBUG
+    private static let keyOwnershipLabel = "Aza clipboard key v3 (debug, open ACL)"
+#else
+    private static let keyOwnershipLabel = "Aza clipboard key v3"
+#endif
 
     private static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {
         var add = query
@@ -222,8 +230,45 @@ final class ClipboardStore: ObservableObject {
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         add[kSecAttrLabel as String] = keyOwnershipLabel
         add[kSecValueData as String] = keyData
+#if DEBUG
+        // Dev-сборки переподписываются при каждой пересборке, а self-signed
+        // сертификат не даёт стабильного designated requirement — строгий
+        // ACL вызывает диалог Keychain на КАЖДЫЙ новый бинарник и блокирует
+        // старт в AzaApp.init. Debug-ключ создаётся с ACL «любое
+        // приложение»: шифрование на диске и защита от кражи бэкапа
+        // сохраняются, изоляция от локальных процессов того же пользователя
+        // — нет. Release использует строгий ACL по умолчанию (Developer ID
+        // даёт стабильную подпись, диалог не повторяется).
+        if let access = anyApplicationAccess() {
+            add[kSecAttrAccess as String] = access
+        }
+#endif
         return SecItemAdd(add as CFDictionary, nil)
     }
+
+#if DEBUG
+    /// SecAccess, разрешающий расшифровку любому приложению без диалога.
+    private static func anyApplicationAccess() -> SecAccess? {
+        var access: SecAccess?
+        guard SecAccessCreate("Aza clipboard key" as CFString, nil, &access) == errSecSuccess,
+              let access else { return nil }
+        guard let aclList = SecAccessCopyMatchingACLList(
+            access, kSecACLAuthorizationDecrypt
+        ) as? [SecACL] else { return access }
+        for acl in aclList {
+            var appList: CFArray?
+            var description: CFString?
+            var promptSelector = SecKeychainPromptSelector()
+            guard SecACLCopyContents(acl, &appList, &description, &promptSelector) == errSecSuccess
+            else { continue }
+            // applicationList = nil означает «доверять всем приложениям»;
+            // селектор без флагов отключает запрос пароля.
+            SecACLSetContents(acl, nil, description ?? "Aza" as CFString,
+                              SecKeychainPromptSelector())
+        }
+        return access
+    }
+#endif
 
     /// Однократная миграция владельца ключа. Элемент, созданный неподписанной
     /// сборкой, требует подтверждения в диалоге Keychain у КАЖДОГО нового

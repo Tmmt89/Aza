@@ -1,37 +1,40 @@
 {
   "minCount": 2,
+  "russianFilterPath": "Resources/russian-words.txt",
+  "russianKeepMinCount": 100,
   "sources": [
     {
-      "id": "dictionary",
-      "url": "https://huggingface.co/datasets/REPO_ID/resolve/PINNED_SHA/dictionary.txt",
-      "revision": "PINNED_SHA",
+      "id": "parallel",
+      "url": "datasets/train_main.txt",
+      "revision": "lingtrain-chechen-russian@296c9a27-heldout-every50",
       "columnIndex": null,
       "hasHeader": false,
-      "maxShare": 0.45
+      "maxShare": 0.7
     },
     {
-      "id": "quran-ce",
-      "url": "https://huggingface.co/datasets/REPO_ID/resolve/PINNED_SHA/quran.tsv",
-      "revision": "PINNED_SHA",
-      "columnIndex": 1,
-      "hasHeader": true,
-      "maxShare": 0.15
-    },
-    {
-      "id": "bible-ce",
-      "url": "https://huggingface.co/datasets/REPO_ID/resolve/PINNED_SHA/bible.tsv",
-      "revision": "PINNED_SHA",
-      "columnIndex": 1,
-      "hasHeader": true,
-      "maxShare": 0.12
-    },
-    {
-      "id": "prose-news",
-      "url": "https://huggingface.co/datasets/REPO_ID/resolve/PINNED_SHA/prose.txt",
-      "revision": "PINNED_SHA",
+      "id": "dosham-classic",
+      "url": "datasets/dosham_words.txt",
+      "revision": "laamxo-dosham@bb08cf1c-ce-ru-headwords",
       "columnIndex": null,
       "hasHeader": false,
-      "maxShare": 1.0
+      "maxShare": 0.35,
+      "boost": 3
+    },
+    {
+      "id": "wikipedia",
+      "url": "datasets/wikipedia_corpus.txt",
+      "revision": "wikimedia-wikipedia-20231101.ce@b04c8d1c-filtered-cyr-title-12000",
+      "columnIndex": null,
+      "hasHeader": false,
+      "maxShare": 0.3
+    },
+    {
+      "id": "nmd",
+      "url": "datasets/nmd_corpus.txt",
+      "revision": "NM-development/nmd-ce-ru-171k-v0@aa2910a0-ce-column",
+      "columnIndex": null,
+      "hasHeader": false,
+      "maxShare": 0.2
     }
   ]
 }

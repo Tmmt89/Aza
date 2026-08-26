@@ -112,8 +112,6 @@ final class GlobalHotKey: ObservableObject {
             assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
             assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
             assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
-            assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
-            assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
             // Trailing punctuation is punctuation, not a letter
             assert(LayoutCorrectionEngine.correction(for: "ghbdtn,")?.text == "привет,")
             assert(LayoutCorrectionEngine.correction(for: "hello,") == nil)

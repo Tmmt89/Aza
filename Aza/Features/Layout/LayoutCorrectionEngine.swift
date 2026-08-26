@@ -160,6 +160,14 @@ enum LayoutCorrectionEngine {
     /// Клавиши латинской раскладки для перебора вариантов в одну правку.
     private static let latinKeys = Array("abcdefghijklmnopqrstuvwxyz[];',.")
 
+    /// Порог частоты чеченской альтернативы по первой клавише. При удвоении
+    /// корпуса (nmd, 63k слов) порог 10 дал бы +33 новых воздержания на
+    /// топ-2000 русских слов; порог 50 опускает их НИЖЕ прежнего уровня
+    /// (66 против 79), а защита «vfkj→мало при намерении хало» сохраняется
+    /// с запасом (частота «хало» 103). Отдельно от hasOneEditMatch (там 10):
+    /// та защита страхует от ложной латинизации и ослабляться не должна.
+    private static let firstKeyAlternativeMinFrequency = 50
+
     /// Промах по ПЕРВОЙ клавише при намерении набрать чеченское слово:
     /// существует ли замена/пропуск первой клавиши, дающая чеченское слово
     /// из словаря? Если да — ввод неоднозначен (пример: хотели "[fkj" →
@@ -173,7 +181,7 @@ enum LayoutCorrectionEngine {
 
         func remapsToFrequentChechen(_ variant: [Character]) -> Bool {
             guard let mapped = remapped(String(variant), table: table) else { return false }
-            return ChechenLexicon.shared.isFrequent(mapped)
+            return ChechenLexicon.shared.frequency(of: mapped) >= firstKeyAlternativeMinFrequency
         }
 
         for key in latinKeys where key != base[0] {
@@ -262,7 +270,13 @@ enum LayoutCorrectionEngine {
     /// (бренды: BMW, iOS) и валидные английские не трогаются.
     @MainActor
     static func chechenContextRemap(for word: String) -> String? {
-        let bar = word.count <= 2 ? 20 : 10
+        // Пороги масштабируются с корпусом (сейчас 2,4 млн взвешенных
+        // токенов): 50 отсекает OCR-мусор («нр» 29, «чг» 25), оставляя
+        // настоящие короткие слова (ду 20114, со 7138, ди 334, ах 137);
+        // 20 для 3+ букв сохраняет бейзлайновый охват (331 слово против
+        // 312 до удвоения корпуса). При следующем росте корпуса —
+        // пересчитать тем же анализом (scratchpad/fp_vetting.py).
+        let bar = word.count <= 2 ? 50 : 20
         guard word.count >= 2,
               !UserWordLists.shared.isNeverCorrect(word),
               word.dropFirst().allSatisfy({ !$0.isUppercase }),
