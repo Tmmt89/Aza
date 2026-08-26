@@ -352,6 +352,19 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    /// Массовое удаление найденного (спецификация §8.7): избранное
+    /// пропускается. Возвращает пакет для общей кнопки «Отменить».
+    func deleteBatch(ids: [UUID]) -> [Deleted] {
+        var batch: [Deleted] = []
+        for id in ids {
+            guard let index = entries.firstIndex(where: { $0.id == id }),
+                  entries[index].isFavorite != true else { continue }
+            batch.append(Deleted(entry: entries.remove(at: index)))
+        }
+        if !batch.isEmpty { save() }
+        return batch
+    }
+
     /// Возвращает удалённую запись на её хронологическое место: индекс по
     /// createdAt, а не сохранённый, — новые копирования за время «Отменить»
     /// не смещают точку вставки.
@@ -731,6 +744,19 @@ final class ClipboardStore: ObservableObject {
         assert(tight.entries.count == 2, "бюджет байтов не сработал")
         assert(tight.entries.first?.text.hasSuffix("три") == true,
                "бюджет удалил новое вместо старого")
+
+        // Массовое удаление (§8.7): избранное пропускается, пакетная
+        // отмена возвращает всё на хронологические места.
+        let batchStore = ClipboardStore(storageURL: budgetURL, maxEntries: 10,
+                                        retentionDays: 0)
+        batchStore.toggleFavorite(id: batchStore.entries.last!.id)
+        let batch = batchStore.deleteBatch(ids: batchStore.entries.map(\.id))
+        assert(batchStore.entries.count == 1 &&
+               batchStore.entries[0].isFavorite == true,
+               "массовое удаление обязано пропустить избранное")
+        assert(batch.count == 1, "пакет отмены неверного размера")
+        batch.forEach { batchStore.restore($0) }
+        assert(batchStore.entries.count == 2, "пакетная отмена не вернула записи")
 
         // Блокировка экрана (§8.9): память чистится, диск нетронут,
         // мутация в заблокированном окне не переживает разблокировку.

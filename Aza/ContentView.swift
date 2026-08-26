@@ -15,7 +15,9 @@ struct ContentView: View {
     @State private var copyStatus = ""
     @State private var searchText = ""
     @State private var visibleLimit = 10
-    @State private var lastDeleted: ClipboardStore.Deleted?
+    @State private var lastDeleted: [ClipboardStore.Deleted] = []
+    @State private var undoToken = UUID()
+    @State private var confirmMassDelete = false
     @State private var excludedApps = UserDefaults.standard
         .stringArray(forKey: ExcludedApps.userDefaultsKey) ?? []
     @State private var newExcludedApp = ""
@@ -205,6 +207,22 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         if !searchText.isEmpty {
+                            let deletable = visibleEntries.filter { $0.isFavorite != true }
+                            if !deletable.isEmpty {
+                                if confirmMassDelete {
+                                    Button("Точно удалить \(deletable.count)?", role: .destructive) {
+                                        massDelete(visibleEntries)
+                                    }
+                                    .font(.caption)
+                                    Button("Нет") { confirmMassDelete = false }
+                                        .font(.caption)
+                                } else {
+                                    Button("Удалить найденное (\(deletable.count))") {
+                                        confirmMassDelete = true
+                                    }
+                                    .font(.caption)
+                                }
+                            }
                             Button("Сбросить поиск") { searchText = "" }
                                 .font(.caption)
                         }
@@ -217,15 +235,17 @@ struct ContentView: View {
                 }
                 // Вне ветки списка: «Отменить» доступна и когда удалили
                 // последнюю видимую карточку (список/поиск пуст).
-                if let deleted = lastDeleted {
+                if !lastDeleted.isEmpty {
                     HStack(spacing: 6) {
-                        Text("Удалено: \(Self.preview(of: deleted.entry.text))")
+                        Text(lastDeleted.count == 1
+                             ? "Удалено: \(Self.preview(of: lastDeleted[0].entry.text))"
+                             : "Удалено записей: \(lastDeleted.count)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Button("Отменить") {
-                            clipboardStore.restore(deleted)
-                            lastDeleted = nil
+                            lastDeleted.forEach { clipboardStore.restore($0) }
+                            lastDeleted = []
                         }
                         .font(.caption)
                     }
@@ -324,6 +344,9 @@ struct ContentView: View {
         .onAppear {
             clipboardStartup.setMonitoring(enabled: clipboardHistoryEnabled)
         }
+        .onChange(of: searchText) { _, _ in
+            confirmMassDelete = false
+        }
     }
 
     /// Клик по карточке: копия в буфер + попытка вставить прямо в поле
@@ -356,20 +379,34 @@ struct ContentView: View {
     }
 
     /// Удаляет карточку и показывает «Отменить» на пять секунд (спец. §8.7).
-    /// Blob изображения стирается только при финализации — после истечения
-    /// окна отмены или замены его новым удалением.
     private func deleteEntry(_ entry: ClipEntry) {
         guard let store = clipboardStore,
               let deleted = store.delete(id: entry.id) else { return }
-        if let previous = lastDeleted {
-            store.finalizeDelete(previous)
-        }
-        lastDeleted = deleted
+        performDelete([deleted])
+    }
+
+    /// Массовое удаление видимых результатов поиска (§8.7): избранное
+    /// пропускает само хранилище.
+    private func massDelete(_ visible: [ClipEntry]) {
+        guard let store = clipboardStore else { return }
+        confirmMassDelete = false
+        performDelete(store.deleteBatch(ids: visible.map(\.id)))
+    }
+
+    /// Общий финал удаления: прежний пакет финализируется, новый живёт
+    /// пять секунд с кнопкой «Отменить». Blob изображения стирается только
+    /// при финализации — restore работает всё окно.
+    private func performDelete(_ batch: [ClipboardStore.Deleted]) {
+        guard let store = clipboardStore, !batch.isEmpty else { return }
+        lastDeleted.forEach { store.finalizeDelete($0) }
+        lastDeleted = batch
+        let token = UUID()
+        undoToken = token
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-            if lastDeleted?.entry.id == deleted.entry.id {
-                lastDeleted = nil
-                store.finalizeDelete(deleted)
-            }
+            guard undoToken == token, !lastDeleted.isEmpty else { return }
+            let expired = lastDeleted
+            lastDeleted = []
+            expired.forEach { store.finalizeDelete($0) }
         }
     }
 
