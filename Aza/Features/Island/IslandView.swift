@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 private enum AzaStyle {
@@ -409,6 +410,9 @@ private struct WaveformView: View {
 
 private struct ClipboardIslandView: View {
     @ObservedObject var store: IslandStore
+    /// Множественное выделение для ⌘A: локальное состояние вида.
+    @State private var selectedIDs: Set<ClipEntry.ID> = []
+    @State private var confirmMassDelete = false
     @State private var query = ""
 
     private var visibleEntries: [ClipEntry] {
@@ -450,7 +454,11 @@ private struct ClipboardIslandView: View {
                             ClipboardCard(
                                 entry: entry,
                                 selected: store.selectedID == entry.id,
-                                select: { store.selectedID = entry.id },
+                                select: {
+                                    selectedIDs = []
+                                    confirmMassDelete = false
+                                    store.selectedID = entry.id
+                                },
                                 reuse: { store.reuse(entry.id) },
                                 favorite: { store.toggleFavorite(entry.id) },
                                 delete: { store.delete(entry.id) }
@@ -471,15 +479,36 @@ private struct ClipboardIslandView: View {
         }
         .focusable()
         .onKeyPress { press in
+            // ⌘A + Delete — массовое удаление найденного (спец. §8.7).
+            // Выделение живёт в этом виде: хранилищу знать о нём незачем.
+            if NSApplication.shared.currentEvent?.keyCode == UInt16(kVK_ANSI_A),
+               press.modifiers.contains(.command) {
+                selectedIDs = Set(visibleEntries.map(\.id))
+                confirmMassDelete = false
+                return .handled
+            }
             switch press.key {
             case .leftArrow:
+                selectedIDs = []
+                confirmMassDelete = false
                 store.moveSelection(by: -1, in: visibleEntries)
                 return .handled
             case .rightArrow:
+                selectedIDs = []
+                confirmMassDelete = false
                 store.moveSelection(by: 1, in: visibleEntries)
                 return .handled
             case .delete:
-                if let id = store.selectedID { store.delete(id) }
+                if selectedIDs.isEmpty {
+                    if let id = store.selectedID { store.delete(id) }
+                } else if confirmMassDelete {
+                    // Массовое удаление требует подтверждения (§8.7).
+                    store.commands.deleteAll(visibleEntries.filter { selectedIDs.contains($0.id) })
+                    selectedIDs = []
+                    confirmMassDelete = false
+                } else {
+                    confirmMassDelete = true
+                }
                 return .handled
             case .return:
                 if let id = store.selectedID {
@@ -487,10 +516,49 @@ private struct ClipboardIslandView: View {
                 }
                 return .handled
             case .escape:
-                if query.isEmpty { store.mode = .idle } else { query = "" }
+                // Escape снимает сначала подтверждение, потом выделение,
+                // потом поиск и лишь затем закрывает остров.
+                if confirmMassDelete { confirmMassDelete = false }
+                else if !selectedIDs.isEmpty { selectedIDs = [] }
+                else if !query.isEmpty { query = "" }
+                else { store.mode = .idle }
                 return .handled
             default:
                 return .ignored
+            }
+        }
+        .onChange(of: query) { _, _ in
+            selectedIDs = []
+            confirmMassDelete = false
+        }
+        .onChange(of: store.selectedID) { _, _ in
+            selectedIDs = []
+            confirmMassDelete = false
+        }
+        .onChange(of: visibleEntries.map(\.id)) { _, ids in
+            selectedIDs = []
+            confirmMassDelete = false
+            if let selectedID = store.selectedID, !ids.contains(selectedID) {
+                store.selectedID = nil
+            }
+        }
+        .overlay(alignment: .top) {
+            // Массовое выделение и подтверждение видны пользователю:
+            // молчаливое ожидание второго Delete было бы ловушкой.
+            if !selectedIDs.isEmpty {
+                let deletable = visibleEntries
+                    .filter { selectedIDs.contains($0.id) && !$0.favorite }
+                    .count
+                Text(confirmMassDelete
+                     ? "Удалить \(deletable)? Нажмите Delete ещё раз, Esc — отмена"
+                     : "Выбрано: \(selectedIDs.count) · Delete — удалить, Esc — снять")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(confirmMassDelete ? AzaStyle.danger : AzaStyle.muted)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(AzaStyle.deep, in: Capsule())
+                    .overlay(Capsule().stroke(AzaStyle.line))
+                    .padding(.top, 6)
             }
         }
         .overlay(alignment: .bottom) {

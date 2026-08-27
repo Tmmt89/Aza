@@ -11,12 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build UI prototype (Swift Package)
-        run: swift build
-
-      - name: Self-check UI prototype
-        run: swift run Aza --self-check
-
       - name: Test lexicon pipeline
         run: |
           cd Tools/BuildChechenLexicon
@@ -24,7 +18,9 @@ jobs:
 
       # Signing is skipped: the Debug config uses a local development
       # certificate that only exists on the maintainer's machine.
-      - name: Build system prototype (Xcode app)
+      # NOTE: locally the project MUST be built with its own signing —
+      # ad-hoc signing resets TCC grants and the keychain ACL (§7).
+      - name: Build the app
         run: |
           xcodebuild -project Aza.xcodeproj -scheme Aza \
             -configuration Debug -destination 'platform=macOS,arch=arm64' \

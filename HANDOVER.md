@@ -43,8 +43,6 @@ Aza/                     # Xcode-приложение (системный про
   Resources/
     chechen-lexicon.tsv  # артефакт конвейера (30 845 слов, в git)
     README.md            # происхождение и лицензии источников
-Sources/Aza/             # SPM-прототип UI острова (IslandStore/IslandView,
-                         # PrayerSchedule) + Resources/prayer-schedules
 Tools/                   # офлайн-утилиты (в приложение не входят)
   BuildChechenLexicon/   # SwiftPM: конвейер словаря (build/coverage/selftest)
   import_dosham.py · import_wikipedia.py · export_corpus.py
@@ -52,7 +50,7 @@ Tools/                   # офлайн-утилиты (в приложение 
   palochka_audit.py · palochka_canonicalize.py
   char_inventory.py · cyr_check.py
 docs/                    # SPEC, планы, исследования, гайды, REVIEW-salgiri
-.github/workflows/build.yml  # CI: SPM build+self-check, Xcode build, pipeline tests
+.github/workflows/build.yml  # CI: Xcode build + pipeline tests
 ```
 
 ВАЖНО про Xcode-проект: используется `fileSystemSynchronizedGroups` — все
@@ -60,9 +58,9 @@ docs/                    # SPEC, планы, исследования, гайд�
 Новые .swift подхватываются из папки; не-исходники копируются в бандл как
 ресурсы (так попадает chechen-lexicon.tsv).
 
-## 3. Два прототипа и их статус
+## 3. Приложение и его статус
 
-1. **`Aza/` (Xcode)** — системный прототип, рабочий инструмент:
+**`Aza/` (Xcode)** — рабочее приложение:
    хоткей ⌘⇧A (тестовая вставка), монитор слов, трёхстадийная коррекция
    ru/en/ce с защитой чеченских слов, отмена, исключения, история буфера MVP.
    Коррекция работает ВО ВСЕХ приложениях, кроме deny-list (ExcludedApps:
@@ -72,9 +70,6 @@ docs/                    # SPEC, планы, исследования, гайд�
    «текстовость» функционально гарантирует replaceTypedText. Путь вставки
    из истории буфера пока ролевой фильтр сохраняет — тот же Notes-класс
    приложений может отклонять вставку (техдолг).
-2. **`Sources/Aza/` (SwiftPM)** — прототип UI острова: IslandStore/
-   IslandView, PrayerSchedule, каталог молитвенных времён в Resources.
-   CI собирает его (`swift build`) и гоняет `swift run Aza --self-check`.
 
 ## 4. Чеченский модуль — реализован полностью
 
@@ -190,9 +185,6 @@ cd "/Users/tmmt/Documents/Code projects/Aza/Aza"
 # а старый код вообще пересоздавал ключ — потеря истории навсегда).
 xcodebuild -project Aza.xcodeproj -scheme Aza -configuration Debug \
   -destination 'platform=macOS,arch=arm64' build
-
-# SPM-прототип острова + self-check
-swift build && swift run Aza --self-check
 
 # Конвейер словаря: тесты, сборка, покрытие
 cd Tools/BuildChechenLexicon
@@ -317,4 +309,3 @@ App Store не используется.
 4. GPL/CC BY-NC код не копировать (boring.notch, InputSourcePro, PasteBar).
 5. Новую кодовую точку палочки добавлять сразу в Palochka.substitutions
    И palochkaLookalikes + прогон palochka_audit.py.
-

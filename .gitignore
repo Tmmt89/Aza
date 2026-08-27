@@ -9,9 +9,6 @@ xcuserdata/
 outputs/
 work/
 
-# Local prayer catalog: its source records are not cleared for redistribution.
-Sources/Aza/Resources/prayer-schedules-2026.json
-
 # Датасеты и промежуточные файлы конвейера чеченского лексикона
 # (большие файлы, в git не входят)
 # ВНИМАНИЕ: папку датасетов НЕ называть «sources» — на macOS
@@ -19,4 +16,3 @@ Sources/Aza/Resources/prayer-schedules-2026.json
 Tools/BuildChechenLexicon/datasets/
 Tools/BuildChechenLexicon/out_lexicon/
 Tools/BuildChechenLexicon/config.json
-
