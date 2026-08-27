@@ -154,6 +154,17 @@ final class PrayerStore: ObservableObject {
         }
     }
 
+    /// Перед удалением данных: гасим планировщик, чтобы незавершённая
+    /// пересборка не вернула уведомления после их снятия.
+    func shutdownForCleanup() async {
+        notificationsEnabled = false
+        let running = schedulingTask
+        schedulingTask = nil
+        running?.cancel()
+        await running?.value
+        await notifications.cancelAll()
+    }
+
     /// Снятие уведомлений — через ту же очередь, что и планирование:
     /// иначе выключение обгоняло бы незавершённую пересборку, и та
     /// возвращала бы уведомления обратно.

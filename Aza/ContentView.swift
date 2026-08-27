@@ -31,6 +31,11 @@ struct ContentView: View {
     @State private var newExcludedApp = ""
     /// Запись, открытая в popover «Показать целиком».
     @State private var previewEntry: ClipEntry?
+    @State private var showPrivacy = false
+    @State private var confirmWipe = false
+    @State private var privacyItems: [PrivacyCleanup.Item] = []
+    @State private var cleanupError: String?
+    @State private var inventoryTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -445,6 +450,98 @@ struct ContentView: View {
 
             Divider()
 
+            // Конфиденциальность (§10/§12): что хранится, что уходит
+            // наружу и как всё удалить.
+            DisclosureGroup(isExpanded: $showPrivacy) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(privacyItems) { item in
+                        HStack {
+                            Text(item.title).font(.caption2)
+                            Spacer()
+                            Text(PrivacyCleanup.humanSize(item.bytes))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text(PrivacyCleanup.outboundTraffic)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let error = cleanupError {
+                        Text("Не удалось удалить — \(error)")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Button("Удалить загруженные модели") {
+                        // Сперва выгружаем из памяти: иначе останется
+                        // ссылка на исчезнувшие файлы.
+                        dictation.unloadModel()
+                        cleanupError = PrivacyCleanup.deleteModels()
+                        refreshPrivacyInventory()
+                    }
+                    .font(.caption)
+                    .disabled(dictation.state != .idle)
+
+                    Button("Удалить историю буфера") {
+                        Task {
+                            await island.prayer.shutdownForCleanup()
+                            cleanupError = PrivacyCleanup.deleteClipboardHistory()
+                        }
+                    }
+                    .font(.caption)
+
+                    if confirmWipe {
+                        Text("Удалить историю, модели, слова, импортированные расписания и настройки? Aza закроется.")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button("Да, удалить всё", role: .destructive) {
+                                guard dictation.state == .idle else {
+                                    cleanupError = "диктовка занята — попробуйте снова"
+                                    confirmWipe = false
+                                    return
+                                }
+                                Task {
+                                    // Гасим производителей до удаления:
+                                    // иначе они допишут данные после него.
+                                    dictation.unloadModel()
+                                    await island.prayer.shutdownForCleanup()
+                                    cleanupError = PrivacyCleanup.deleteEverything()
+                                }
+                            }
+                            .font(.caption)
+                            .disabled(dictation.state != .idle)
+                            Button("Отмена") { confirmWipe = false }
+                                .font(.caption)
+                        }
+                    } else {
+                        Button("Удалить все данные Aza") { confirmWipe = true }
+                            .font(.caption)
+                            .disabled(dictation.state != .idle)
+                    }
+                    if dictation.state != .idle {
+                        Text("Удаление доступно, когда диктовка не занята")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 4)
+                .task(id: showPrivacy) {
+                    // Обход папки моделей — вне главного потока и только
+                    // когда раздел открыт.
+                    guard showPrivacy else { return }
+                    refreshPrivacyInventory()
+                }
+            } label: {
+                Text("Конфиденциальность").font(.caption)
+            }
+
+            Divider()
+
             Button("Завершить Aza") {
                 NSApp.terminate(nil)
             }
@@ -498,6 +595,17 @@ struct ContentView: View {
         }
         .padding(12)
         .frame(minWidth: 260, maxWidth: 360, minHeight: 80, maxHeight: 420)
+    }
+
+    /// Пересчёт описи с отменой предыдущего: иначе старый, более долгий
+    /// обход мог бы перезаписать свежий результат после удаления.
+    private func refreshPrivacyInventory() {
+        inventoryTask?.cancel()
+        inventoryTask = Task {
+            let items = await PrivacyCleanup.inventorySnapshot()
+            guard !Task.isCancelled else { return }
+            privacyItems = items
+        }
     }
 
     private func saveExcludedApps() {

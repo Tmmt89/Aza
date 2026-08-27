@@ -125,6 +125,9 @@ final class DictationController: ObservableObject {
     /// Пробная запись ради диалога TCC: результат всегда отбрасывается,
     /// поле для вставки не запоминается (активация окна сместила бы фокус).
     private var isPermissionProbe = false
+    /// После удаления моделей не греем автоматически: иначе удаление
+    /// немедленно обернулось бы новой загрузкой в сотни мегабайт.
+    private var suppressPrewarm = false
     /// Режим фиксации (спецификация §5.1, «двойное нажатие»): запись
     /// продолжается после отпускания клавиши до повторного нажатия.
     private var isLatched = false
@@ -148,6 +151,9 @@ final class DictationController: ObservableObject {
         // витке main loop, иначе сохранённый профиль мог читаться как balanced.
         DispatchQueue.main.async { [weak self] in
             guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+            // Греем ТОЛЬКО уже скачанную модель: иначе удаление моделей
+            // оборачивается новой загрузкой при следующем запуске.
+            guard Self.isModelCached(Self.preferredProfile) else { return }
             self?.prepareModel()
         }
         let controller = HotKeyController(
@@ -188,9 +194,30 @@ final class DictationController: ObservableObject {
         whisper = nil
         loadedProfile = nil
         status = "Профиль изменён — модель загрузится при следующей диктовке"
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+        // Скачанный профиль греем сразу, нескачанный ждёт явной диктовки:
+        // смена профиля не должна сама тянуть полтора гигабайта.
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+           Self.isModelCached(Self.preferredProfile) {
             prepareModel()
         }
+    }
+
+    /// Есть ли модель профиля на диске (в кэше WhisperKit).
+    static func isModelCached(_ profile: Profile) -> Bool {
+        let folder = modelStorageDirectory
+            .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
+            .appendingPathComponent(profile.variant, isDirectory: true)
+        return FileManager.default.fileExists(atPath: folder.path)
+    }
+
+    /// Выгружает модель из памяти: после удаления файлов ссылка на них
+    /// бессмысленна, а автоматический прогрев скачал бы модель заново.
+    func unloadModel() {
+        guard state == .idle else { return }
+        whisper = nil
+        loadedProfile = nil
+        suppressPrewarm = true
+        status = "Модель удалена — загрузится при следующей диктовке"
     }
 
     func stop() {
@@ -282,6 +309,7 @@ final class DictationController: ObservableObject {
         }
 
         guard whisper != nil else {
+            suppressPrewarm = false
             prepareModel()
             return
         }
@@ -361,6 +389,7 @@ final class DictationController: ObservableObject {
         // Одна загрузка за раз: прогрев при старте и нажатие клавиши
         // не должны запустить её дважды.
         guard whisper == nil, state == .idle else { return }
+        guard !suppressPrewarm else { return }
         state = .loadingModel("0%")
         status = "Загрузка модели распознавания…"
         Task { [weak self] in
