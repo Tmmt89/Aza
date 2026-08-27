@@ -18,6 +18,9 @@ struct SetupView: View {
     @AppStorage(ChechenAutocorrect.layoutStorageKey) private var layoutCorrection = true
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrection = false
     @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstention = true
+    @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
+    @State private var dictationHotKey = HotKeyBinding.load(
+        HotKeyBinding.dictationKey, fallback: .dictationDefault)
     /// Характеристики этого Mac — под них подбирается рекомендация.
     private let capabilities = MacCapabilities.current()
 
@@ -33,6 +36,7 @@ struct SetupView: View {
                     VStack(spacing: 12) {
                         permissionsCard
                         dictationCard
+                        hotKeysCard
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     VStack(spacing: 12) {
@@ -118,8 +122,10 @@ struct SetupView: View {
     /// Названия невыданных разрешений — для сводки.
     private var missingPermissions: [String] {
         var result: [String] = []
-        if status(model.notifications) == .missing { result.append("уведомления") }
-        if status(model.microphone) == .missing { result.append("микрофон") }
+        // Незапрошенное разрешение (.unknown) тоже не выдано: иначе
+        // сводка сказала бы «все выданы», спрятав нужную кнопку.
+        if status(model.notifications) != .granted { result.append("уведомления") }
+        if status(model.microphone) != .granted { result.append("микрофон") }
         if !model.axTrusted { result.append("управление компьютером") }
         if !model.inputMonitoring { result.append("мониторинг ввода") }
         return result
@@ -211,13 +217,53 @@ struct SetupView: View {
             case let .failed(message):
                 warn(message)
             default:
-                hint("Расписание ДУМ используется, если вы его добавите; иначе — расчёт.")
+                EmptyView()
+            }
+            if !cityID.isEmpty {
+                divider
+                sourceStatus
             }
         }
     }
 
     /// Модели показываем списком: что доступно, что уже скачано и какая
     /// подходит ЭТОМУ Mac — иначе выбор из трёх слов ничего не объясняет.
+    /// Что за времена показаны: выверенная таблица или наш расчёт.
+    /// Спецификация §4.3 требует называть источник, а не молчать о нём.
+    @ViewBuilder
+    private var sourceStatus: some View {
+        let table = model.prayer.hasVerifiedTable
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: table ? "checkmark.seal.fill" : "function")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(table ? AzaStyle.acid : AzaStyle.muted)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(table
+                     ? "Источник: \(model.prayer.source?.label ?? "расписание")"
+                     : "Готового расписания нет — считаем сами")
+                    .font(AzaStyle.label)
+                    .foregroundStyle(AzaStyle.ink)
+                Text(table
+                     ? "Времена берутся из добавленного расписания."
+                     : "\(model.prayer.source?.label ?? "Расчёт") по координатам города. Если у вас есть выверенное расписание ДУМ, положите его файлом в папку Aza — оно станет приоритетным.")
+                    .font(AzaStyle.caption)
+                    .foregroundStyle(AzaStyle.faint)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !table {
+                    Button("Открыть папку для расписаний") {
+                        try? FileManager.default.createDirectory(
+                            at: PrayerStore.scheduleFolder, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(PrayerStore.scheduleFolder)
+                    }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+                }
+                if let caveat = model.prayer.source?.caveat {
+                    warn(caveat)
+                }
+            }
+        }
+    }
+
     private var dictationCard: some View {
         card("Модель распознавания") {
             ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in
@@ -225,6 +271,24 @@ struct SetupView: View {
                 modelRow(item)
             }
             hint(capabilities.recommendationReason)
+
+            // Загрузка выбранной модели: кнопка и полоса прогресса —
+            // раньше загрузка шла молча при первой диктовке.
+            if let progress = model.dictation.downloadProgress {
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: progress)
+                        .tint(AzaStyle.acid)
+                    Text("Загрузка: \(Int(progress * 100))%")
+                        .font(AzaStyle.caption)
+                        .foregroundStyle(AzaStyle.faint)
+                }
+            } else if let selected = DictationController.Profile(rawValue: profile),
+                      !DictationController.isModelCached(selected) {
+                Button("Скачать модель · \(selected.sizeLabel)") {
+                    model.dictation.downloadSelectedModel()
+                }
+                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+            }
         }
     }
 
@@ -286,34 +350,59 @@ struct SetupView: View {
     /// исправление опечаток, самая рискованная стадия.
     private var correctionCard: some View {
         card("Автозамена") {
-            Toggle("Исправлять раскладку", isOn: $layoutCorrection)
-                .toggleStyle(.switch)
-                .tint(AzaStyle.acid)
+            settingToggle("Раскладка", isOn: $layoutCorrection,
+                          help: "ghbdtn → привет, [mj → хьо, 1алам → ӏалам")
+            if layoutCorrection {
+                settingToggle("Опечатки", isOn: $typoCorrection,
+                              help: "Чеченские слова с опечаткой — только когда в словаре ровно один похожий вариант.")
+                settingToggle("Пропускать спорные", isOn: $ambiguityAbstention,
+                              help: "Если слово читается и как русское, и как чеченское — Aza промолчит.")
+            }
+        }
+    }
+
+    /// Компактная строка настройки: подпись, переключатель, объяснение —
+    /// в подсказке, чтобы не растягивать окно.
+    private func settingToggle(_ title: String, isOn: Binding<Bool>,
+                               help: String) -> some View {
+        Toggle(isOn: isOn) {
+            Text(title)
                 .font(AzaStyle.body)
                 .foregroundStyle(AzaStyle.ink)
-            hint("ghbdtn → привет, [mj → хьо, 1алам → ӏалам")
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .tint(AzaStyle.acid)
+        .help(help)
+    }
 
-            if layoutCorrection {
-                divider
-                Toggle("Исправлять опечатки", isOn: $typoCorrection)
-                    .toggleStyle(.switch)
-                    .tint(AzaStyle.acid)
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                hint("Чеченские слова с опечаткой. Только когда в словаре ровно один похожий вариант.")
-
-                Toggle("Не трогать спорные слова", isOn: $ambiguityAbstention)
-                    .toggleStyle(.switch)
-                    .tint(AzaStyle.acid)
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                hint("Если слово можно прочитать и как русское, и как чеченское — Aza промолчит.")
+    /// Горячие клавиши (§5.1: клавишу выбирает пользователь).
+    private var hotKeysCard: some View {
+        card("Горячие клавиши") {
+            HotKeyRecorder(title: "Диктовка", binding: $dictationHotKey) { binding in
+                binding.save(HotKeyBinding.dictationKey)
+                model.dictation.rebindHotKey()
             }
+            hint("Удерживайте для записи, двойное нажатие фиксирует.")
         }
     }
 
     private var generalCard: some View {
         card("Общее") {
+            HStack {
+                Text("Хранить буфер")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                Spacer(minLength: 8)
+                Picker("", selection: $retentionDays) {
+                    Text("Неделю").tag(7)
+                    Text("Месяц").tag(30)
+                    Text("Полгода").tag(180)
+                }
+                .labelsHidden()
+                .frame(width: 110)
+            }
+            divider
             Toggle("Запускать вместе с macOS", isOn: Binding(
                 get: { model.loginItem == .enabled },
                 set: { model.setLoginItem($0) }

@@ -42,7 +42,13 @@ final class SetupWindowController {
         // Размер окна подгоняется под содержимое: настройки должны
         // помещаться целиком, без прокрутки.
         let content = NSHostingView(rootView: SetupView(model: model))
-        let size = content.fittingSize
+        // Содержимое подгоняем под экран: на маленьком дисплее окно
+        // иначе вылезло бы за границы, а скролла в нём нет.
+        let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.size
+            ?? CGSize(width: 1280, height: 800)
+        let fitting = content.fittingSize
+        let size = CGSize(width: min(fitting.width, visible.width - 40),
+                          height: min(fitting.height, visible.height - 40))
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable],

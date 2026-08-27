@@ -31,9 +31,18 @@ final class DictationController: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
-    @Published private(set) var status = "Диктовка: удерживайте ⌃⇧D"
+    @Published private(set) var status = "Диктовка: удерживайте сочетание"
     /// Начало текущей записи — для таймера в острове.
     @Published private(set) var recordingStartedAt: Date?
+    /// Доля загрузки модели 0…1 — для полосы прогресса в настройках.
+    @Published private(set) var downloadProgress: Double?
+
+    /// Явная загрузка выбранной модели по кнопке (§5.4): пользователь
+    /// видит, что качается и сколько осталось.
+    func downloadSelectedModel() {
+        suppressPrewarm = false
+        prepareModel()
+    }
 
     /// Язык, которым идёт/шла последняя диктовка (для подписи в острове).
     private(set) var activeLanguage = DictationController.preferredLanguage == "auto"
@@ -65,6 +74,15 @@ final class DictationController: ObservableObject {
             case .fast: "Быстрая"
             case .balanced: "Сбалансированная"
             case .accurate: "Точная"
+            }
+        }
+
+        /// Только размер — для кнопки загрузки.
+        var sizeLabel: String {
+            switch self {
+            case .fast: "150 МБ"
+            case .balanced: "500 МБ"
+            case .accurate: "1,5 ГБ"
             }
         }
 
@@ -156,20 +174,23 @@ final class DictationController: ObservableObject {
             guard Self.isModelCached(Self.preferredProfile) else { return }
             self?.prepareModel()
         }
+        let binding = HotKeyBinding.load(HotKeyBinding.dictationKey,
+                                         fallback: .dictationDefault)
         let controller = HotKeyController(
-            keyCode: UInt32(kVK_ANSI_D),
-            modifiers: UInt32(controlKey | shiftKey),
+            keyCode: binding.keyCode,
+            modifiers: binding.modifiers,
             id: 2,
             onPress: { [weak self] in self?.keyDown() },
             onRelease: { [weak self] in self?.keyUp() }
         )
         hotKey = controller
         if let status = controller.register() {
-            self.status = "Горячая клавиша диктовки недоступна (\(status))"
+            self.status = "Сочетание \(binding.display) занято другой программой"
             azaDebugLog("Aza: dictation hotkey registration FAILED status=\(status)")
             hotKey = nil
         } else {
-            azaDebugLog("Aza: dictation hotkey registered (ctrl+shift+D)")
+            self.status = "Диктовка: удерживайте \(binding.display)"
+            azaDebugLog("Aza: dictation hotkey registered \(binding.display)")
         }
     }
 
@@ -226,6 +247,26 @@ final class DictationController: ObservableObject {
         cancelRecording()
     }
 
+    /// Перерегистрация после смены сочетания в настройках.
+    func rebindHotKey() {
+        hotKey?.stop()
+        hotKey = nil
+        let binding = HotKeyBinding.load(HotKeyBinding.dictationKey,
+                                         fallback: .dictationDefault)
+        let controller = HotKeyController(
+            keyCode: binding.keyCode, modifiers: binding.modifiers, id: 2,
+            onPress: { [weak self] in self?.keyDown() },
+            onRelease: { [weak self] in self?.keyUp() }
+        )
+        hotKey = controller
+        if controller.register() != nil {
+            status = "Сочетание \(binding.display) занято другой программой"
+            hotKey = nil
+        } else {
+            status = "Диктовка: удерживайте \(binding.display)"
+        }
+    }
+
     // MARK: Жизненный цикл записи
 
     private func keyDown() {
@@ -259,7 +300,7 @@ final class DictationController: ObservableObject {
             isLatched = true
             azaDebugLog("Aza: dictation latched")
             if state == .recording {
-                status = "Запись зафиксирована — нажмите ⌃⇧D, чтобы остановить"
+                status = "Запись зафиксирована — нажмите сочетание, чтобы остановить"
                 return
             }
             // Запись успела остановиться — начинаем новую, уже фиксированную.
@@ -281,7 +322,7 @@ final class DictationController: ObservableObject {
             // и в любом исходе пользователь удерживает клавишу заново.
             // Модель здесь не трогаем: пробе она не нужна, а параллельные
             // загрузки при повторных нажатиях недопустимы.
-            status = "Разрешите доступ к микрофону и удержите ⌃⇧D ещё раз"
+            status = "Разрешите доступ к микрофону и удержите сочетание ещё раз"
             isPermissionProbe = true
             NSApp.activate(ignoringOtherApps: true)
             AVCaptureDevice.requestAccess(for: .audio) { granted in
@@ -405,6 +446,7 @@ final class DictationController: ObservableObject {
                             // иначе вернули бы idle обратно в loadingModel.
                             guard let self, case .loadingModel = self.state else { return }
                             let percent = Int(progress.fractionCompleted * 100)
+                            self.downloadProgress = progress.fractionCompleted
                             self.state = .loadingModel("\(percent)%")
                             self.status = "Загрузка модели: \(percent)%"
                         }
@@ -420,13 +462,15 @@ final class DictationController: ObservableObject {
                 guard let self else { return }
                 self.whisper = whisper
                 self.loadedProfile = profile
+                self.downloadProgress = nil
                 self.state = .idle
-                self.status = "Модель готова (\(profile.title)) — удерживайте ⌃⇧D"
+                self.status = "Модель готова (\(profile.title))"
                 self.applyPendingProfileChange()
                 azaDebugLog("Aza: dictation model loaded")
             } catch {
                 guard let self else { return }
                 self.state = .idle
+                self.downloadProgress = nil
                 self.status = "Модель не загрузилась: \(error.localizedDescription)"
                 self.applyPendingProfileChange()
                 azaDebugLog("Aza: dictation model load failed")
@@ -450,8 +494,8 @@ final class DictationController: ObservableObject {
         state = .recording
         recordingStartedAt = Date()
         status = isLatched
-            ? "Запись зафиксирована — нажмите ⌃⇧D, чтобы остановить"
-            : "Запись… отпустите ⌃⇧D, чтобы вставить текст"
+            ? "Запись зафиксирована — нажмите сочетание, чтобы остановить"
+            : "Запись… отпустите клавишу, чтобы вставить текст"
         // Пока острова нет, звук — единственный сигнал «пишу»: панель
         // меню пользователь в этот момент не открывает.
         if !isPermissionProbe { NSSound(named: "Tink")?.play() }

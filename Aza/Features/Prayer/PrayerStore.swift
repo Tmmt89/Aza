@@ -22,22 +22,82 @@ final class PrayerStore: ObservableObject {
         }
     }
 
-    /// Города с координатами и часовыми поясами. Координаты — факты,
-    /// их публикация не ограничена; расписания ДУМ сюда не входят.
+    /// Города с координатами и часовыми поясами. Координаты — открытые
+    /// факты, их публикация не ограничена; расписания ДУМ сюда не входят
+    /// (§4.3). Мазхаб: Кавказ — шафиитский, Поволжье, Урал и Сибирь —
+    /// ханафитский, как принято в соответствующих муфтиятах.
     static let cities: [PrayerCity] = [
-        PrayerCity(id: "grozny", name: "Грозный", latitude: 43.3169, longitude: 45.6981,
-                   timeZoneID: "Europe/Moscow", madhab: .shafi, method: .muslimWorldLeague),
-        PrayerCity(id: "moscow", name: "Москва", latitude: 55.7558, longitude: 37.6173,
-                   timeZoneID: "Europe/Moscow", madhab: .hanafi, method: .muslimWorldLeague),
-        PrayerCity(id: "kazan", name: "Казань", latitude: 55.7963, longitude: 49.1088,
-                   timeZoneID: "Europe/Moscow", madhab: .hanafi, method: .muslimWorldLeague),
-        PrayerCity(id: "spb", name: "Санкт-Петербург", latitude: 59.9311, longitude: 30.3609,
-                   timeZoneID: "Europe/Moscow", madhab: .hanafi, method: .muslimWorldLeague),
-        PrayerCity(id: "makhachkala", name: "Махачкала", latitude: 42.9849, longitude: 47.5047,
-                   timeZoneID: "Europe/Moscow", madhab: .shafi, method: .muslimWorldLeague),
-        PrayerCity(id: "ufa", name: "Уфа", latitude: 54.7388, longitude: 55.9721,
-                   timeZoneID: "Asia/Yekaterinburg", madhab: .hanafi, method: .muslimWorldLeague),
+        // Северный Кавказ
+        city("grozny", "Грозный", 43.3169, 45.6981, "Europe/Moscow", .shafi),
+        city("gudermes", "Гудермес", 43.3528, 46.1064, "Europe/Moscow", .shafi),
+        city("urus-martan", "Урус-Мартан", 43.1281, 45.5372, "Europe/Moscow", .shafi),
+        city("shali", "Шали", 43.1481, 45.9022, "Europe/Moscow", .shafi),
+        city("argun", "Аргун", 43.2939, 45.8697, "Europe/Moscow", .shafi),
+        city("makhachkala", "Махачкала", 42.9849, 47.5047, "Europe/Moscow", .shafi),
+        city("derbent", "Дербент", 42.0678, 48.2900, "Europe/Moscow", .shafi),
+        city("khasavyurt", "Хасавюрт", 43.2506, 46.5872, "Europe/Moscow", .shafi),
+        city("kaspiysk", "Каспийск", 42.8897, 47.6406, "Europe/Moscow", .shafi),
+        city("nazran", "Назрань", 43.2256, 44.7642, "Europe/Moscow", .shafi),
+        city("magas", "Магас", 43.1686, 44.8133, "Europe/Moscow", .shafi),
+        city("nalchik", "Нальчик", 43.4981, 43.6189, "Europe/Moscow", .hanafi),
+        city("cherkessk", "Черкесск", 44.2269, 42.0578, "Europe/Moscow", .hanafi),
+        city("vladikavkaz", "Владикавказ", 43.0370, 44.6675, "Europe/Moscow", .hanafi),
+        city("stavropol", "Ставрополь", 45.0428, 41.9734, "Europe/Moscow", .hanafi),
+        city("pyatigorsk", "Пятигорск", 44.0486, 43.0594, "Europe/Moscow", .hanafi),
+        // Поволжье и Урал
+        city("kazan", "Казань", 55.7963, 49.1088, "Europe/Moscow", .hanafi),
+        city("naberezhnye", "Набережные Челны", 55.7436, 52.3958, "Europe/Moscow", .hanafi),
+        city("almetyevsk", "Альметьевск", 54.9014, 52.2972, "Europe/Moscow", .hanafi),
+        city("ufa", "Уфа", 54.7388, 55.9721, "Asia/Yekaterinburg", .hanafi),
+        city("sterlitamak", "Стерлитамак", 53.6300, 55.9508, "Asia/Yekaterinburg", .hanafi),
+        city("orenburg", "Оренбург", 51.7727, 55.0988, "Asia/Yekaterinburg", .hanafi),
+        city("samara", "Самара", 53.1959, 50.1002, "Europe/Samara", .hanafi),
+        city("saratov", "Саратов", 51.5336, 46.0343, "Europe/Saratov", .hanafi),
+        city("astrakhan", "Астрахань", 46.3497, 48.0408, "Europe/Astrakhan", .hanafi),
+        city("volgograd", "Волгоград", 48.7080, 44.5133, "Europe/Volgograd", .hanafi),
+        city("nizhny", "Нижний Новгород", 56.3269, 44.0059, "Europe/Moscow", .hanafi),
+        city("perm", "Пермь", 58.0105, 56.2502, "Asia/Yekaterinburg", .hanafi),
+        city("yekaterinburg", "Екатеринбург", 56.8389, 60.6057, "Asia/Yekaterinburg", .hanafi),
+        city("chelyabinsk", "Челябинск", 55.1644, 61.4368, "Asia/Yekaterinburg", .hanafi),
+        city("tyumen", "Тюмень", 57.1522, 65.5272, "Asia/Yekaterinburg", .hanafi),
+        // Столицы и крупные города
+        city("moscow", "Москва", 55.7558, 37.6173, "Europe/Moscow", .hanafi),
+        city("spb", "Санкт-Петербург", 59.9311, 30.3609, "Europe/Moscow", .hanafi),
+        city("kaliningrad", "Калининград", 54.7104, 20.4522, "Europe/Kaliningrad", .hanafi),
+        city("rostov", "Ростов-на-Дону", 47.2357, 39.7015, "Europe/Moscow", .hanafi),
+        city("krasnodar", "Краснодар", 45.0355, 38.9753, "Europe/Moscow", .hanafi),
+        city("sochi", "Сочи", 43.5855, 39.7231, "Europe/Moscow", .hanafi),
+        city("simferopol", "Симферополь", 44.9521, 34.1024, "Europe/Simferopol", .hanafi),
+        city("novosibirsk", "Новосибирск", 55.0084, 82.9357, "Asia/Novosibirsk", .hanafi),
+        city("omsk", "Омск", 54.9885, 73.3242, "Asia/Omsk", .hanafi),
+        city("krasnoyarsk", "Красноярск", 56.0184, 92.8672, "Asia/Krasnoyarsk", .hanafi),
+        city("irkutsk", "Иркутск", 52.2870, 104.3050, "Asia/Irkutsk", .hanafi),
+        city("vladivostok", "Владивосток", 43.1155, 131.8855, "Asia/Vladivostok", .hanafi),
+        // За пределами России — где чаще всего бывают
+        city("baku", "Баку", 40.4093, 49.8671, "Asia/Baku", .shafi),
+        city("tbilisi", "Тбилиси", 41.7151, 44.8271, "Asia/Tbilisi", .hanafi),
+        city("istanbul", "Стамбул", 41.0082, 28.9784, "Europe/Istanbul", .hanafi),
+        city("dubai", "Дубай", 25.2048, 55.2708, "Asia/Dubai", .shafi),
+        city("mecca", "Мекка", 21.3891, 39.8579, "Asia/Riyadh", .shafi),
+        city("medina", "Медина", 24.5247, 39.5692, "Asia/Riyadh", .shafi),
+        city("cairo", "Каир", 30.0444, 31.2357, "Africa/Cairo", .shafi),
+        city("almaty", "Алматы", 43.2220, 76.8512, "Asia/Almaty", .hanafi),
+        city("tashkent", "Ташкент", 41.2995, 69.2401, "Asia/Tashkent", .hanafi),
+        city("bishkek", "Бишкек", 42.8746, 74.5698, "Asia/Bishkek", .hanafi),
+        city("berlin", "Берлин", 52.5200, 13.4050, "Europe/Berlin", .hanafi),
+        city("london", "Лондон", 51.5074, -0.1278, "Europe/London", .hanafi),
     ]
+    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+    /// Метод расчёта у всех один — Muslim World League: пока авторитетные
+    /// параметры конкретных муфтиятов не подтверждены, честнее назвать
+    /// один общий метод, чем выдавать его за чужой.
+    private static func city(_ id: String, _ name: String,
+                             _ latitude: Double, _ longitude: Double,
+                             _ timeZone: String, _ madhab: Madhab) -> PrayerCity {
+        PrayerCity(id: id, name: name, latitude: latitude, longitude: longitude,
+                   timeZoneID: timeZone, madhab: madhab, method: .muslimWorldLeague)
+    }
 
     /// Уведомления берут времена ОТСЮДА же: иначе они разошлись бы с тем,
     /// что показано на экране, вместе с подписью источника.
@@ -95,6 +155,17 @@ final class PrayerStore: ObservableObject {
     }
 
     var source: PrayerTimesSource? { today?.source }
+
+    /// Есть ли для выбранного города готовая таблица. Пользователь должен
+    /// понимать, что показано: выверенное расписание или наш расчёт.
+    var hasVerifiedTable: Bool { today?.source.isVerifiedTable == true }
+
+    /// Куда класть таблицы, если они появятся.
+    static var scheduleFolder: URL {
+        ClipboardStore.defaultStorageURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("prayer-schedules", isDirectory: true)
+    }
 
     /// Ближайший намаз: ищем в сегодняшнем дне, затем в завтрашнем —
     /// после иши сегодняшний список пуст.

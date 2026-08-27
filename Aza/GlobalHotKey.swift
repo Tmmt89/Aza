@@ -215,6 +215,12 @@ final class GlobalHotKey: ObservableObject {
     }
 
     private func finishWord(_ word: String, delimiter: String) {
+        // Выключенная коррекция не должна ни исправлять, ни копить контекст:
+        // иначе двухбуквенный контекстный ремап всё равно менял бы текст.
+        guard ChechenAutocorrect.isLayoutCorrectionEnabled else {
+            recentWords.removeAll()
+            return
+        }
         inputGeneration &+= 1
         // Смена фокусного окна внутри приложения (другой документ, диалог
         // сохранения) — тоже разрыв фразы; смену приложений рвёт WordMonitor.
