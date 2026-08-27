@@ -90,4 +90,14 @@ final class PrayerTests: XCTestCase {
         XCTAssertNotEqual(PrayerNotifications.identifier(city: grozny, kind: .fajr, date: morning),
                           PrayerNotifications.identifier(city: grozny, kind: .fajr, date: tomorrow))
     }
+
+    /// Все намазы выключены — это осознанный выбор, а не сбой: старые
+    /// запросы обязаны сниматься, иначе выключенные уведомления
+    /// продолжали бы приходить.
+    func testAllPrayersOffIsNotTreatedAsFailure() {
+        let empty = PrayerNotifications.Outcome(scheduled: 0, failed: 0)
+        XCTAssertTrue(empty.isComplete, "пустое расписание без ошибок — не сбой")
+        let broken = PrayerNotifications.Outcome(scheduled: 0, failed: 3)
+        XCTAssertFalse(broken.isComplete, "неудачные постановки обязаны быть видимы")
+    }
 }
