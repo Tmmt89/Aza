@@ -93,6 +93,15 @@ enum TextInsertion {
         ) == .success
     }
 
+    /// Процесс, которому принадлежит элемент. Сравнивать сами элементы
+    /// через CFEqual нельзя: система возвращает НОВУЮ обёртку для того же
+    /// поля, и проверка «то же поле» всегда проваливалась.
+    static func processID(of element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+        return pid
+    }
+
     /// Позиция каретки (location схлопнутого выделения); nil — выделение
     /// не пустое или недоступно.
     static func caretPosition(of element: AXUIElement) -> Int? {

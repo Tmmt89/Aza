@@ -679,15 +679,20 @@ final class DictationController: ObservableObject {
                               sourceAppBundleID: Bundle.main.bundleIdentifier,
                               sourceAppName: "Aza (диктовка)")
 
-        // Поле должно быть тем же и всё ещё сфокусированным: иначе текст
-        // уедет в чужое окно или синтетический ввод напечатает его туда,
-        // куда пользователь переключился за время распознавания.
-        if let element,
-           let current = TextInsertion.focusedElement(),
-           CFEqual(current, element),
-           !SecureFieldDetector.isSecure(element),
-           TextInsertion.isTextLike(element),
-           TextInsertion.insert(text, into: element) == .success {
+        // Вставляем в поле, где курсор СЕЙЧАС, но только если это то же
+        // приложение, что и в момент начала записи: так текст не уедет
+        // туда, куда пользователь переключился за время распознавания.
+        // Сравнивать сами элементы нельзя — система отдаёт новую обёртку
+        // для того же поля, и вставка не срабатывала никогда.
+        let current = TextInsertion.focusedElement()
+        let sameApp = element.flatMap(TextInsertion.processID(of:))
+            == current.flatMap(TextInsertion.processID(of:))
+        azaDebugLog("Aza: dictation insert target=\(element == nil ? 0 : 1) current=\(current == nil ? 0 : 1) sameApp=\(sameApp ? 1 : 0)")
+
+        if let current, sameApp,
+           !SecureFieldDetector.isSecure(current),
+           TextInsertion.isTextLike(current),
+           TextInsertion.insert(text, into: current) == .success {
             status = "Вставлено (\(language)): \(text.prefix(60))"
         } else {
             status = "Текст в буфере (⌘V): \(text.prefix(60))"
