@@ -14,6 +14,12 @@ struct SetupView: View {
     @AppStorage(PrayerStore.cityStorageKey) private var cityID = ""
     @AppStorage(DictationController.profileStorageKey) private var profile = "balanced"
     @StateObject private var locator = CityLocator()
+    @State private var showPermissions = false
+    @AppStorage(ChechenAutocorrect.layoutStorageKey) private var layoutCorrection = true
+    @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrection = false
+    @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstention = true
+    /// Характеристики этого Mac — под них подбирается рекомендация.
+    private let capabilities = MacCapabilities.current()
 
     var body: some View {
         ZStack {
@@ -24,11 +30,14 @@ struct SetupView: View {
             VStack(alignment: .leading, spacing: 12) {
                 header
                 HStack(alignment: .top, spacing: 12) {
-                    permissionsCard
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    VStack(spacing: 12) {
+                        permissionsCard
+                        dictationCard
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     VStack(spacing: 12) {
                         prayerCard
-                        dictationCard
+                        correctionCard
                         generalCard
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -75,10 +84,53 @@ struct SetupView: View {
 
     // MARK: Разрешения — одной группой
 
+    /// Выданные разрешения не занимают экран: пока всё в порядке, это
+    /// одна строка с кнопкой. Невыданные показываются сразу — их видеть
+    /// нужно, иначе функция молча не работает.
     private var permissionsCard: some View {
         card("Разрешения") {
+            let missing = missingPermissions
+            HStack(spacing: 8) {
+                Image(systemName: missing.isEmpty ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(missing.isEmpty ? AzaStyle.acid : AzaStyle.warning)
+                Text(missing.isEmpty
+                     ? "Все выданы"
+                     : "Не выдано: \(missing.joined(separator: ", "))")
+                    .font(AzaStyle.label)
+                    .foregroundStyle(missing.isEmpty ? AzaStyle.ink : AzaStyle.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button(showPermissions ? "Скрыть" : "Показать") {
+                    withAnimation(.easeOut(duration: AzaMotion.micro)) {
+                        showPermissions.toggle()
+                    }
+                }
+                .buttonStyle(AzaCapsuleButtonStyle())
+            }
+            if showPermissions || !missing.isEmpty {
+                divider
+                permissionRows
+            }
+        }
+    }
+
+    /// Названия невыданных разрешений — для сводки.
+    private var missingPermissions: [String] {
+        var result: [String] = []
+        if status(model.notifications) == .missing { result.append("уведомления") }
+        if status(model.microphone) == .missing { result.append("микрофон") }
+        if !model.axTrusted { result.append("управление компьютером") }
+        if !model.inputMonitoring { result.append("мониторинг ввода") }
+        return result
+    }
+
+    @ViewBuilder
+    private var permissionRows: some View {
+        Group {
             permissionRow(
                 "Уведомления", symbol: "bell",
+                visible: showPermissions || status(model.notifications) != .granted,
                 status: status(model.notifications),
                 detail: "Напоминание ко времени намаза.",
                 denied: "Включается в Системных настройках → Уведомления"
@@ -87,9 +139,9 @@ struct SetupView: View {
                     .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
             }
 
-            divider
             permissionRow(
                 "Микрофон", symbol: "mic",
+                visible: showPermissions || status(model.microphone) != .granted,
                 status: status(model.microphone),
                 detail: "Нужен для диктовки; аудио не сохраняется на диск.",
                 denied: "Включается в Системных настройках → Микрофон"
@@ -98,9 +150,9 @@ struct SetupView: View {
                     .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
             }
 
-            divider
             permissionRow(
                 "Управление компьютером", symbol: "hand.tap",
+                visible: showPermissions || !model.axTrusted,
                 status: model.axTrusted ? .granted : .missing,
                 detail: "Вставка текста прямо в поле. Без него текст остаётся в буфере."
             ) {
@@ -108,9 +160,9 @@ struct SetupView: View {
                     .buttonStyle(AzaCapsuleButtonStyle())
             }
 
-            divider
             permissionRow(
                 "Мониторинг ввода", symbol: "keyboard",
+                visible: showPermissions || !model.inputMonitoring,
                 status: model.inputMonitoring ? .granted : .missing,
                 detail: "Нужен для исправления раскладки. Действует после перезапуска Aza."
             ) {
@@ -164,16 +216,99 @@ struct SetupView: View {
         }
     }
 
+    /// Модели показываем списком: что доступно, что уже скачано и какая
+    /// подходит ЭТОМУ Mac — иначе выбор из трёх слов ничего не объясняет.
     private var dictationCard: some View {
-        card("Диктовка") {
-            Picker("", selection: $profile) {
-                ForEach(DictationController.Profile.allCases) { item in
-                    Text(item.title).tag(item.rawValue)
-                }
+        card("Модель распознавания") {
+            ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in
+                if index > 0 { divider }
+                modelRow(item)
             }
-            .labelsHidden()
-            .onChange(of: profile) { _, _ in model.dictation.profileChanged() }
-            hint(DictationController.Profile(rawValue: profile)?.summary ?? "")
+            hint(capabilities.recommendationReason)
+        }
+    }
+
+    private func modelRow(_ item: DictationController.Profile) -> some View {
+        let isSelected = profile == item.rawValue
+        let isRecommended = capabilities.recommendedProfile == item
+        let isDownloaded = DictationController.isModelCached(item)
+        let tooHeavy = !capabilities.canRun(item)
+
+        return Button {
+            profile = item.rawValue
+            model.dictation.profileChanged()
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isSelected ? AzaStyle.acid : AzaStyle.faint)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(item.title)
+                            .font(AzaStyle.label)
+                            .foregroundStyle(AzaStyle.ink)
+                        if isRecommended {
+                            tag("Рекомендуем", color: AzaStyle.acid,
+                                background: AzaStyle.acidSurface)
+                        }
+                        if isDownloaded {
+                            tag("Скачана", color: AzaStyle.faint,
+                                background: AzaStyle.control)
+                        }
+                    }
+                    Text(item.summary)
+                        .font(AzaStyle.caption)
+                        .foregroundStyle(tooHeavy ? AzaStyle.warning : AzaStyle.faint)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if tooHeavy {
+                        Text("Может не хватить ресурсов этого Mac")
+                            .font(AzaStyle.caption)
+                            .foregroundStyle(AzaStyle.warning)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func tag(_ text: String, color: Color, background: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(background, in: Capsule())
+    }
+
+    /// Автозамена (§10 «Раскладка»): главный тумблер и отдельно —
+    /// исправление опечаток, самая рискованная стадия.
+    private var correctionCard: some View {
+        card("Автозамена") {
+            Toggle("Исправлять раскладку", isOn: $layoutCorrection)
+                .toggleStyle(.switch)
+                .tint(AzaStyle.acid)
+                .font(AzaStyle.body)
+                .foregroundStyle(AzaStyle.ink)
+            hint("ghbdtn → привет, [mj → хьо, 1алам → ӏалам")
+
+            if layoutCorrection {
+                divider
+                Toggle("Исправлять опечатки", isOn: $typoCorrection)
+                    .toggleStyle(.switch)
+                    .tint(AzaStyle.acid)
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                hint("Чеченские слова с опечаткой. Только когда в словаре ровно один похожий вариант.")
+
+                Toggle("Не трогать спорные слова", isOn: $ambiguityAbstention)
+                    .toggleStyle(.switch)
+                    .tint(AzaStyle.acid)
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                hint("Если слово можно прочитать и как русское, и как чеченское — Aza промолчит.")
+            }
         }
     }
 
@@ -226,11 +361,14 @@ struct SetupView: View {
     private func permissionRow<Actions: View>(
         _ title: String,
         symbol: String,
+        visible: Bool,
         status: Status,
         detail: String,
         denied: String? = nil,
         @ViewBuilder actions: () -> Actions
     ) -> some View {
+        // Свёрнутая группа показывает только то, что требует внимания.
+        if visible {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: symbol)
@@ -256,6 +394,7 @@ struct SetupView: View {
                     actions()
                 }
             }
+        }
         }
     }
 

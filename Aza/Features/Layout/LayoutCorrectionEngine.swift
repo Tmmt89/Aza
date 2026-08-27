@@ -207,6 +207,8 @@ enum LayoutCorrectionEngine {
 
     @MainActor
     private static func directCorrection(for word: String) -> (text: String, inputLanguage: String?)? {
+        // Главный тумблер: коррекция раскладки выключена целиком.
+        guard ChechenAutocorrect.isLayoutCorrectionEnabled else { return nil }
         // Пользователь отменял исправление этого слова — не трогаем ни одной
         // стадией (раньше проверялось только в палочке и опечатках, и слово
         // после отмены снова исправлялось ремапом).
