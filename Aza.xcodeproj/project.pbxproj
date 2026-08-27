@@ -271,6 +271,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Координаты нужны только чтобы подобрать ближайший город для расписания намаза. Они не сохраняются и не покидают ваш Mac.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Координаты нужны только чтобы подобрать ближайший город для расписания намаза. Они не сохраняются и не покидают ваш Mac.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Aza распознаёт речь локально на вашем Mac: аудио не сохраняется на диск и не покидает компьютер.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -303,6 +305,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Координаты нужны только чтобы подобрать ближайший город для расписания намаза. Они не сохраняются и не покидают ваш Mac.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Координаты нужны только чтобы подобрать ближайший город для расписания намаза. Они не сохраняются и не покидают ваш Mac.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Aza распознаёт речь локально на вашем Mac: аудио не сохраняется на диск и не покидает компьютер.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

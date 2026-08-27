@@ -12,6 +12,7 @@ struct ContentView: View {
     /// Остров держит времена намаза — панель показывает то же самое.
     @ObservedObject var island: IslandStore
     @AppStorage(PrayerStore.cityStorageKey) private var prayerCityID = ""
+    @StateObject private var locator = CityLocator()
     /// Хранилище появляется после фонового получения ключа Keychain.
     private var clipboardStore: ClipboardStore? { clipboardStartup.store }
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
@@ -78,6 +79,45 @@ struct ContentView: View {
             .font(.caption)
             .onChange(of: prayerCityID) { _, newValue in
                 island.prayer.selectedCityID = newValue.isEmpty ? nil : newValue
+            }
+
+            HStack {
+                Button(locator.state == .locating ? "Определяю…" : "Определить город") {
+                    Task {
+                        if let match = await locator.locate() {
+                            prayerCityID = match.city.id
+                            island.prayer.selectedCityID = match.city.id
+                        }
+                    }
+                }
+                .font(.caption)
+                .disabled(locator.state == .locating)
+                Spacer()
+                Toggle("Уведомления", isOn: Binding(
+                    get: { island.prayer.notificationsEnabled },
+                    set: { enabled in
+                        Task { await island.prayer.setNotifications(enabled: enabled) }
+                    }
+                ))
+                .toggleStyle(.switch)
+                .font(.caption)
+            }
+            switch locator.state {
+            case .locating:
+                Text("Определяю…").font(.caption2).foregroundStyle(.secondary)
+            case let .found(cityID, distance):
+                // Честно: это ближайший ПРОФИЛЬ из списка, а не «ваш город».
+                Text("Ближайший профиль: \(PrayerStore.cities.first { $0.id == cityID }?.name ?? cityID) · \(distance) км")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .denied:
+                Text("Геолокация запрещена — выберите город вручную")
+                    .font(.caption2).foregroundStyle(.orange)
+            case let .failed(message):
+                Text(message).font(.caption2).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .idle:
+                EmptyView()
             }
 
             if let next = island.nextPrayerOccurrence() {

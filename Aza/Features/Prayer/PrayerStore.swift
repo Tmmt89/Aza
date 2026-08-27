@@ -39,21 +39,55 @@ final class PrayerStore: ObservableObject {
                    timeZoneID: "Asia/Yekaterinburg", madhab: .hanafi, method: .muslimWorldLeague),
     ]
 
+    /// Уведомления берут времена ОТСЮДА же: иначе они разошлись бы с тем,
+    /// что показано на экране, вместе с подписью источника.
+    let notifications = PrayerNotifications()
+    @Published private(set) var notificationsEnabled = UserDefaults.standard
+        .bool(forKey: "PrayerNotificationsEnabled")
+
+    /// Одна задача планирования за раз: параллельные пересборки могли
+    /// снять только что добавленное уведомление или вернуть устаревший
+    /// текст поверх нового.
+    private var schedulingTask: Task<Void, Never>?
+
     private let calculated = CalculatedPrayerProvider()
     private var table: ScheduleTablePrayerProvider?
     private var rolloverTimer: Timer?
+    private var settingsRestored = false
 
     init() {
 #if DEBUG
         assert(PrayerScheduleChecks.run())
 #endif
-        let stored = UserDefaults.standard.string(forKey: Self.cityStorageKey)
-        // Города не подставляем молча: чужой город — это чужое расписание.
-        // Нет выбора или город исчез — интерфейс попросит выбрать.
-        selectedCityID = Self.cities.contains { $0.id == stored } ? stored : nil
         table = ScheduleTablePrayerProvider.userProvided()
-        refresh()
-        scheduleRollover()
+        // Настройки читаем НЕ здесь: AzaApp.init выполняется до того, как
+        // песочница подключит контейнер параметров, и UserDefaults в этот
+        // момент отдаёт пустоту — выбранный город «терялся» при каждом
+        // запуске. Первый же виток главного цикла уже видит контейнер.
+        DispatchQueue.main.async { [weak self] in
+            self?.loadPersistedCity()
+        }
+    }
+
+    /// Восстанавливает выбор города из настроек. Города не подставляем
+    /// молча: чужой город — это чужое расписание, поэтому неизвестный
+    /// идентификатор даёт nil и просьбу выбрать.
+    private func loadPersistedCity() {
+        // Однократно и только если пользователь ещё ничего не выбрал сам:
+        // отложенное восстановление не должно перебить свежий выбор.
+        guard !settingsRestored else { return }
+        settingsRestored = true
+        notificationsEnabled = UserDefaults.standard.bool(forKey: "PrayerNotificationsEnabled")
+        guard selectedCityID == nil else {
+            refresh()
+            return
+        }
+        let stored = UserDefaults.standard.string(forKey: Self.cityStorageKey)
+        azaDebugLog("Aza: prayer settings loaded city=\(stored ?? "-")")
+        // Присваивание запускает didSet: refresh и перевзвод таймера
+        // произойдут там, второй раз их звать не нужно.
+        selectedCityID = Self.cities.contains { $0.id == stored } ? stored : nil
+        if selectedCityID == nil { refresh() }
     }
 
     var selectedCity: PrayerCity? {
@@ -78,9 +112,60 @@ final class PrayerStore: ObservableObject {
     func refresh(now: Date = .now) {
         guard let city = selectedCity else {
             today = nil
+            cancelNotifications()
             return
         }
         today = times(for: city, on: now)
+        rescheduleNotifications(now: now)
+    }
+
+    /// Включение спрашивает разрешение (§9: не при запуске, а по действию).
+    func setNotifications(enabled: Bool) async {
+        if enabled, await notifications.requestAuthorization() == false {
+            notificationsEnabled = false
+            UserDefaults.standard.set(false, forKey: "PrayerNotificationsEnabled")
+            return
+        }
+        notificationsEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "PrayerNotificationsEnabled")
+        if enabled {
+            rescheduleNotifications()
+        } else {
+            cancelNotifications()
+        }
+    }
+
+    /// Недельный горизонт из тех же провайдеров, что рисуют расписание.
+    func rescheduleNotifications(now: Date = .now) {
+        azaDebugLog("Aza: prayer reschedule enabled=\(notificationsEnabled ? 1 : 0) city=\(selectedCityID ?? "-")")
+        guard notificationsEnabled, let city = selectedCity else { return }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = city.timeZone
+        var days: [(date: Date, times: DayPrayerTimes)] = []
+        for offset in 0..<PrayerNotifications.horizonDays {
+            guard let date = calendar.date(byAdding: .day, value: offset, to: now),
+                  let times = times(for: city, on: date) else { continue }
+            days.append((date, times))
+        }
+        let snapshot = days
+        let previous = schedulingTask
+        schedulingTask = Task { [notifications] in
+            // Ждём предыдущую пересборку, а не бежим с ней наперегонки.
+            await previous?.value
+            await notifications.reschedule(days: snapshot, city: city, now: now)
+            await notifications.logPending()
+        }
+    }
+
+    /// Снятие уведомлений — через ту же очередь, что и планирование:
+    /// иначе выключение обгоняло бы незавершённую пересборку, и та
+    /// возвращала бы уведомления обратно.
+    private func cancelNotifications() {
+        let previous = schedulingTask
+        schedulingTask = Task { [notifications] in
+            await previous?.value
+            await notifications.cancelAll()
+        }
     }
 
     /// §4.3: таблица приоритетна, расчёт — резерв.
