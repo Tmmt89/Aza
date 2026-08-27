@@ -9,16 +9,61 @@
 /* Begin PBXBuildFile section */
 		ABCD0001000000000000F001 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCD0003000000000000F003 /* WhisperKit */; };
 		ABCD0004000000000000F004 /* Adhan in Frameworks */ = {isa = PBXBuildFile; productRef = ABCD0006000000000000F006 /* Adhan */; };
+		BBBB00000000000000000201 /* ClipboardStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000101 /* ClipboardStore.swift */; };
+		BBBB00000000000000000202 /* ChechenLexicon.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000102 /* ChechenLexicon.swift */; };
+		BBBB00000000000000000203 /* ChechenAutocorrect.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000103 /* ChechenAutocorrect.swift */; };
+		BBBB00000000000000000204 /* KeyboardLayoutMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000104 /* KeyboardLayoutMap.swift */; };
+		BBBB00000000000000000205 /* UserWordLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000105 /* UserWordLists.swift */; };
+		BBBB00000000000000000206 /* ExcludedApps.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000106 /* ExcludedApps.swift */; };
+		BBBB00000000000000000207 /* TextInsertion.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000107 /* TextInsertion.swift */; };
+		BBBB00000000000000000208 /* LayoutCorrectionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000108 /* LayoutCorrectionEngine.swift */; };
+		BBBB00000000000000000209 /* PrayerSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000109 /* PrayerSchedule.swift */; };
+		BBBB0000000000000000020A /* PrayerProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010A /* PrayerProvider.swift */; };
+		BBBB0000000000000000020B /* PrayerNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010B /* PrayerNotifications.swift */; };
+		BBBB0000000000000000020C /* PrayerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010C /* PrayerStore.swift */; };
+		BBBB0000000000000000020D /* PasteboardCategories.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010D /* PasteboardCategories.swift */; };
+		BBBB00000000000000000210 /* chechen-lexicon.tsv in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000110 /* chechen-lexicon.tsv */; };
+		BBBB00000000000000000302 /* Adhan in Frameworks */ = {isa = PBXBuildFile; productRef = BBBB00000000000000000301 /* Adhan */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BBBB0000000000000000000A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2B33910A303C94CF00B76555 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2B339111303C94CF00B76555;
+			remoteInfo = Aza;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		2B339112303C94CF00B76555 /* Aza.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aza.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BBBB00000000000000000001 /* AzaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AzaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		BBBB00000000000000000101 /* ClipboardStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ClipboardStore.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000102 /* ChechenLexicon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ChechenLexicon.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000103 /* ChechenAutocorrect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ChechenAutocorrect.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000104 /* KeyboardLayoutMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/KeyboardLayoutMap.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000105 /* UserWordLists.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/UserWordLists.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000106 /* ExcludedApps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ExcludedApps.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000107 /* TextInsertion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/TextInsertion.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000108 /* LayoutCorrectionEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Layout/LayoutCorrectionEngine.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000109 /* PrayerSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Island/PrayerSchedule.swift; sourceTree = SOURCE_ROOT; };
+		BBBB0000000000000000010A /* PrayerProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Prayer/PrayerProvider.swift; sourceTree = SOURCE_ROOT; };
+		BBBB0000000000000000010B /* PrayerNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Prayer/PrayerNotifications.swift; sourceTree = SOURCE_ROOT; };
+		BBBB0000000000000000010C /* PrayerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Prayer/PrayerStore.swift; sourceTree = SOURCE_ROOT; };
+		BBBB0000000000000000010D /* PasteboardCategories.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/PasteboardCategories.swift; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000110 /* chechen-lexicon.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Aza/Resources/chechen-lexicon.tsv; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		2B339114303C94CF00B76555 /* Aza */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Aza;
+			sourceTree = "<group>";
+		};
+		BBBB00000000000000000002 /* AzaTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = AzaTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -33,6 +78,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BBBB00000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BBBB00000000000000000302 /* Adhan in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -40,6 +93,8 @@
 			isa = PBXGroup;
 			children = (
 				2B339114303C94CF00B76555 /* Aza */,
+				BBBB00000000000000000002 /* AzaTests */,
+				BBBB0000000000000000000C /* Tested Production Sources */,
 				2B339113303C94CF00B76555 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,8 +103,30 @@
 			isa = PBXGroup;
 			children = (
 				2B339112303C94CF00B76555 /* Aza.app */,
+				BBBB00000000000000000001 /* AzaTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		BBBB0000000000000000000C /* Tested Production Sources */ = {
+			isa = PBXGroup;
+			children = (
+				BBBB00000000000000000101 /* ClipboardStore.swift */,
+				BBBB00000000000000000102 /* ChechenLexicon.swift */,
+				BBBB00000000000000000103 /* ChechenAutocorrect.swift */,
+				BBBB00000000000000000104 /* KeyboardLayoutMap.swift */,
+				BBBB00000000000000000105 /* UserWordLists.swift */,
+				BBBB00000000000000000106 /* ExcludedApps.swift */,
+				BBBB00000000000000000107 /* TextInsertion.swift */,
+				BBBB00000000000000000108 /* LayoutCorrectionEngine.swift */,
+				BBBB00000000000000000109 /* PrayerSchedule.swift */,
+				BBBB0000000000000000010A /* PrayerProvider.swift */,
+				BBBB0000000000000000010B /* PrayerNotifications.swift */,
+				BBBB0000000000000000010C /* PrayerStore.swift */,
+				BBBB0000000000000000010D /* PasteboardCategories.swift */,
+				BBBB00000000000000000110 /* chechen-lexicon.tsv */,
+			);
+			name = "Tested Production Sources";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -79,6 +156,30 @@
 			productReference = 2B339112303C94CF00B76555 /* Aza.app */;
 			productType = "com.apple.product-type.application";
 		};
+		BBBB00000000000000000006 /* AzaTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BBBB00000000000000000007 /* Build configuration list for PBXNativeTarget "AzaTests" */;
+			buildPhases = (
+				BBBB00000000000000000003 /* Sources */,
+				BBBB00000000000000000004 /* Frameworks */,
+				BBBB00000000000000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BBBB0000000000000000000B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				BBBB00000000000000000002 /* AzaTests */,
+			);
+			name = AzaTests;
+			packageProductDependencies = (
+				BBBB00000000000000000301 /* Adhan */,
+			);
+			productName = AzaTests;
+			productReference = BBBB00000000000000000001 /* AzaTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -90,6 +191,9 @@
 				LastUpgradeCheck = 2660;
 				TargetAttributes = {
 					2B339111303C94CF00B76555 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					BBBB00000000000000000006 = {
 						CreatedOnToolsVersion = 26.6;
 					};
 				};
@@ -113,6 +217,7 @@
 			projectRoot = "";
 			targets = (
 				2B339111303C94CF00B76555 /* Aza */,
+				BBBB00000000000000000006 /* AzaTests */,
 			);
 		};
 /* End PBXProject section */
@@ -122,6 +227,14 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BBBB00000000000000000005 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BBBB00000000000000000210 /* chechen-lexicon.tsv in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -135,7 +248,35 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BBBB00000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BBBB00000000000000000201 /* ClipboardStore.swift in Sources */,
+				BBBB00000000000000000202 /* ChechenLexicon.swift in Sources */,
+				BBBB00000000000000000203 /* ChechenAutocorrect.swift in Sources */,
+				BBBB00000000000000000204 /* KeyboardLayoutMap.swift in Sources */,
+				BBBB00000000000000000205 /* UserWordLists.swift in Sources */,
+				BBBB00000000000000000206 /* ExcludedApps.swift in Sources */,
+				BBBB00000000000000000207 /* TextInsertion.swift in Sources */,
+				BBBB00000000000000000208 /* LayoutCorrectionEngine.swift in Sources */,
+				BBBB00000000000000000209 /* PrayerSchedule.swift in Sources */,
+				BBBB0000000000000000020A /* PrayerProvider.swift in Sources */,
+				BBBB0000000000000000020B /* PrayerNotifications.swift in Sources */,
+				BBBB0000000000000000020C /* PrayerStore.swift in Sources */,
+				BBBB0000000000000000020D /* PasteboardCategories.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BBBB0000000000000000000B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2B339111303C94CF00B76555 /* Aza */;
+			targetProxy = BBBB0000000000000000000A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		2B33911B303C94D000B76555 /* Debug */ = {
@@ -325,6 +466,36 @@
 			};
 			name = Release;
 		};
+		BBBB00000000000000000008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tmmt.AzaTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		BBBB00000000000000000009 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tmmt.AzaTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -342,6 +513,15 @@
 			buildConfigurations = (
 				2B33911E303C94D000B76555 /* Debug */,
 				2B33911F303C94D000B76555 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BBBB00000000000000000007 /* Build configuration list for PBXNativeTarget "AzaTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BBBB00000000000000000008 /* Debug */,
+				BBBB00000000000000000009 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -374,6 +554,11 @@
 			productName = WhisperKit;
 		};
 		ABCD0006000000000000F006 /* Adhan */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = ABCD0005000000000000F005 /* XCRemoteSwiftPackageReference "adhan-swift" */;
+			productName = Adhan;
+		};
+		BBBB00000000000000000301 /* Adhan */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = ABCD0005000000000000F005 /* XCRemoteSwiftPackageReference "adhan-swift" */;
 			productName = Adhan;

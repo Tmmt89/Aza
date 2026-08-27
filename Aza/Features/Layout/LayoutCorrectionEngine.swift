@@ -1,6 +1,19 @@
 import AppKit
 
 enum LayoutCorrectionEngine {
+    struct PhraseWord {
+        let typed: String
+        let delimiter: String
+        let chechen: Bool
+        let corrected: Bool
+    }
+
+    struct PhraseSpan: Equatable {
+        let original: String
+        let corrected: String
+        let originalWords: [String]
+    }
+
     /// Chechen orthography markers: a Cyrillic word containing one of these is
     /// treated as Chechen — never remapped to Latin, and accepted as a valid
     /// correction target even though it fails the Russian spellchecker.
@@ -141,7 +154,8 @@ enum LayoutCorrectionEngine {
     ///   против межъязыковых подмен);
     /// - кандидат — не имя собственное.
     @MainActor
-    static func typoCorrection(for word: String) -> String? {
+    static func typoCorrection(for word: String,
+                               isValidRussian: ((String) -> Bool)? = nil) -> String? {
         // Пользовательское исключение: слово отменялось через undo.
         guard !UserWordLists.shared.isNeverCorrect(word) else { return nil }
         guard ChechenAutocorrect.isTypoCorrectionEnabled,
@@ -150,7 +164,7 @@ enum LayoutCorrectionEngine {
               !word.isEmpty,
               word.allSatisfy(isCyrillic),
               !ChechenLexicon.shared.contains(word),
-              !isValidWord(word, language: "ru") else { return nil }
+              !(isValidRussian?(word) ?? isValidWord(word, language: "ru")) else { return nil }
 
         guard let neighbor = ChechenLexicon.shared.oneEditNeighbor(of: word),
               neighbor.first == word.lowercased().first else { return nil }
@@ -269,7 +283,9 @@ enum LayoutCorrectionEngine {
     /// частотный порог зависит от длины, слова с ВЕРХНИМ регистром внутри
     /// (бренды: BMW, iOS) и валидные английские не трогаются.
     @MainActor
-    static func chechenContextRemap(for word: String) -> String? {
+    static func chechenContextRemap(for word: String,
+                                    table suppliedTable: [Character: Character]? = nil,
+                                    isValidEnglish: ((String) -> Bool)? = nil) -> String? {
         // Пороги масштабируются с корпусом (сейчас 2,4 млн взвешенных
         // токенов): 50 отсекает OCR-мусор («нр» 29, «чг» 25), оставляя
         // настоящие короткие слова (ду 20114, со 7138, ди 334, ах 137);
@@ -280,11 +296,48 @@ enum LayoutCorrectionEngine {
         guard word.count >= 2,
               !UserWordLists.shared.isNeverCorrect(word),
               word.dropFirst().allSatisfy({ !$0.isUppercase }),
-              !isValidEnglishTyped(word),
-              let table = KeyboardLayoutMap.table(from: "en", to: "ru"),
+              !(isValidEnglish?(word) ?? isValidEnglishTyped(word)),
+              let table = suppliedTable ?? KeyboardLayoutMap.table(from: "en", to: "ru"),
               let mapped = remapped(word, table: table),
               ChechenLexicon.shared.frequency(of: mapped) >= bar else { return nil }
         return mapped
+    }
+
+    /// Короткое слово после чеченского получает контекстный ремап.
+    @MainActor
+    static func forwardContextRemap(for word: String, previousIsChechen: Bool) -> String? {
+        guard previousIsChechen, word.count == 2 else { return nil }
+        return chechenContextRemap(for: word)
+    }
+
+    static func forwardContextRemap(for word: String, previousIsChechen: Bool,
+                                    remap: (String) -> String?) -> String? {
+        guard previousIsChechen, word.count == 2 else { return nil }
+        return remap(word)
+    }
+
+    /// Непрерывный хвост ещё не исправленных слов перед чеченским словом.
+    @MainActor
+    static func backwardContextSpan(previous: [PhraseWord], correctedWord: String) -> PhraseSpan? {
+        backwardContextSpan(previous: previous, correctedWord: correctedWord,
+                            remap: { chechenContextRemap(for: $0) })
+    }
+
+    static func backwardContextSpan(previous: [PhraseWord], correctedWord: String,
+                                    remap: (String) -> String?) -> PhraseSpan? {
+        guard ChechenLexicon.shared.contains(correctedWord) else { return nil }
+        var original = ""
+        var corrected = ""
+        var words: [String] = []
+        for previous in previous.reversed() {
+            guard !previous.corrected, !previous.chechen,
+                  let mapped = remap(previous.typed) else { break }
+            original = previous.typed + previous.delimiter + original
+            corrected = mapped + previous.delimiter + corrected
+            words.insert(previous.typed, at: 0)
+        }
+        guard !original.isEmpty else { return nil }
+        return PhraseSpan(original: original, corrected: corrected, originalWords: words)
     }
 
     @MainActor

@@ -124,7 +124,7 @@ final class PrayerNotifications {
 
     /// Детерминированный идентификатор: повторное планирование заменяет
     /// запись, а не плодит дубликаты.
-    private static func identifier(city: PrayerCity, kind: PrayerKind, date: Date) -> String {
+    static func identifier(city: PrayerCity, kind: PrayerKind, date: Date) -> String {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = city.timeZone
         let day = calendar.dateComponents([.year, .month, .day], from: date)

@@ -52,9 +52,6 @@ final class ClipboardStartup: ObservableObject {
                     monitor.start()
                 }
                 azaDebugLog("Aza: clipboard ready locked=\(self.screenLocked ? 1 : 0) monitoring=\(monitor.isRunning ? 1 : 0) entries=\(store.entries.count)")
-#if DEBUG
-                ClipboardStore.runSelfTest(sample: "буфер-самотест-\(UUID().uuidString)")
-#endif
             }
         }
     }

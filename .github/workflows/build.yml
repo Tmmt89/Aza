@@ -20,10 +20,10 @@ jobs:
       # certificate that only exists on the maintainer's machine.
       # NOTE: locally the project MUST be built with its own signing —
       # ad-hoc signing resets TCC grants and the keychain ACL (§7).
-      - name: Build the app
+      - name: Build and test the app
         run: |
           xcodebuild -project Aza.xcodeproj -scheme Aza \
             -configuration Debug -destination 'platform=macOS,arch=arm64' \
             CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Automatic \
             CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-            build
+            test

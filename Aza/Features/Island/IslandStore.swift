@@ -216,9 +216,9 @@ final class IslandStore: ObservableObject {
     /// Время в часовом поясе ГОРОДА: расписание Грозного, открытое в
     /// поездке, должно оставаться грозненским.
     private func formatted(_ date: Date) -> String {
+        if let city = prayer.selectedCity { return city.formattedTime(date) }
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
-        formatter.timeZone = prayer.selectedCity?.timeZone ?? .current
         return formatter.string(from: date)
     }
 

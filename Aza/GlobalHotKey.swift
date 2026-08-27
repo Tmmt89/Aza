@@ -68,101 +68,6 @@ final class GlobalHotKey: ObservableObject {
     private var inputGeneration = 0
 
     init() {
-#if DEBUG
-        // The layout tables come from the system, so these only hold when the
-        // user actually has a Russian keyboard layout installed.
-        assert(TextInsertion.matchingCase(of: "Ghbdtn ", applyingTo: "привет ") == "Привет ")
-        assert(TextInsertion.matchingCase(of: "ghbdtn ", applyingTo: "привет ") == "привет ")
-        // Политика исключений: терминалы/IDE/менеджеры паролей запрещены,
-        // обычные приложения разрешены.
-        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Terminal"))
-        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.jetbrains.intellij"))
-        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.1password.1password"))
-        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Spotlight"))
-        assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.TextEdit"))
-        assert(!ExcludedApps.isCorrectionDenied(bundleID: "ru.keepcoder.Telegram"))
-        assert(!ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Safari"))
-        // Пользовательский список исключений действует на политику
-        // (восстанавливаем прежнее значение после проверки).
-        let savedExclusions = UserDefaults.standard
-            .stringArray(forKey: ExcludedApps.userDefaultsKey)
-        UserDefaults.standard.set(["com.example.excluded"],
-                                  forKey: ExcludedApps.userDefaultsKey)
-        assert(ExcludedApps.isCorrectionDenied(bundleID: "com.example.excluded"))
-        assert(PasteboardMonitor.excludedBundleIDs.contains("com.example.excluded"))
-        UserDefaults.standard.set(savedExclusions,
-                                  forKey: ExcludedApps.userDefaultsKey)
-
-        // Разбор хвостового токена для защиты от системной автозамены.
-        assert(TextInsertion.trailingToken(of: "дика лор") == "лор")
-        assert(TextInsertion.trailingToken(of: "лор") == "лор")
-        assert(TextInsertion.trailingToken(of: "дика ") == "")
-        // Ассерты обязаны быть герметичными: пользовательские исключения
-        // (заполненные реальной отменой) не должны влиять на эталонные слова.
-        UserWordLists.shared.suspendedForSelfCheck = true
-        defer { UserWordLists.shared.suspendedForSelfCheck = false }
-        if LayoutCorrectionEngine.isAvailable {
-            assert(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text == "привет")
-            assert(LayoutCorrectionEngine.correction(for: "руддщ")?.text == "hello")
-            assert(LayoutCorrectionEngine.correction(for: "hello") == nil)
-            assert(LayoutCorrectionEngine.correction(for: "привет") == nil)
-            // Chechen words stay Cyrillic; EN-typed Chechen becomes Cyrillic
-            assert(LayoutCorrectionEngine.correction(for: "хьо") == nil)
-            assert(LayoutCorrectionEngine.correction(for: "къонах") == nil)
-            assert(LayoutCorrectionEngine.correction(for: "[mj")?.text == "хьо")
-            // Palochka normalization is lexicon-gated: applied only when exactly
-            // one hypothesis is a real Chechen word; without a bundled lexicon
-            // it falls back to the greedy rule.
-            let normalized = LayoutCorrectionEngine.normalizedPalochka("1алам")
-            if ChechenLexicon.shared.isAvailable {
-                assert(normalized == nil || ChechenLexicon.shared.contains(normalized!))
-            } else {
-                assert(normalized == "ӏалам")
-            }
-            // Auto-capitalized first word of a sentence
-            assert(LayoutCorrectionEngine.correction(for: "Ghbdtn")?.text == "Привет")
-            // б and ю live on the , and . keys; Shift gives Х Ъ Ж Э Б Ю
-            // plus the reported incident: typing "vfkj" (slipped first key)
-            // used to produce «мало», although the neighbouring key '[' gives
-            // Chechen «хало» from the lexicon — such input is now abstained.
-            assert(LayoutCorrectionEngine.correction(for: "vfkj") == nil)
-            // Точное чеченское слово побеждает соседей по первой клавише:
-            // «ларам» и «барам» отличаются первой клавишей и раньше взаимно
-            // блокировали друг друга (реальный баг владельца).
-            assert(LayoutCorrectionEngine.correction(for: "kfhfv")?.text == "ларам")
-            assert(LayoutCorrectionEngine.correction(for: ",fhfv")?.text == "барам")
-            assert(LayoutCorrectionEngine.correction(for: "wbuf[m")?.text == "цигахь")
-            // Контекст фразы: короткие слова в чеченском окружении.
-            // «ду»/«со» спасены из русского фильтра порогом частоты корпуса;
-            // «ху» в литературном корпусе отсутствует (разговорная форма) —
-            // появится с разговорным источником, хардкодить нельзя.
-            if ChechenLexicon.shared.isAvailable {
-                assert(LayoutCorrectionEngine.chechenContextRemap(for: "le") == "ду")
-                assert(LayoutCorrectionEngine.chechenContextRemap(for: "cj") == "со")
-                assert(LayoutCorrectionEngine.chechenContextRemap(for: "in") == nil,
-                       "валидное английское слово не трогаем")
-                assert(LayoutCorrectionEngine.chechenContextRemap(for: "BMW") == nil,
-                       "ВЕРХНИЙ регистр внутри — бренд, не трогаем")
-            }
-            // Unambiguous Russian words are still corrected.
-            assert(LayoutCorrectionEngine.correction(for: ",skj")?.text == "было")
-            assert(LayoutCorrectionEngine.correction(for: "k.,jdm")?.text == "любовь")
-            assert(LayoutCorrectionEngine.correction(for: "{jhjij")?.text == "Хорошо")
-            // Trailing punctuation is punctuation, not a letter
-            assert(LayoutCorrectionEngine.correction(for: "ghbdtn,")?.text == "привет,")
-            assert(LayoutCorrectionEngine.correction(for: "hello,") == nil)
-            assert(LayoutCorrectionEngine.correction(for: "привет,") == nil)
-            // Typo stage is OFF by default (PLAN-chechen §3.3): while the
-            // setting is untouched, a misspelled word must never be repaired.
-            if !ChechenAutocorrect.isTypoCorrectionEnabled {
-                assert(LayoutCorrectionEngine.correction(for: "баркла") == nil)
-                assert(LayoutCorrectionEngine.correction(for: "превет") == nil)
-            }
-            // Clipboard self-test переехал в ClipboardStartup: он создаёт
-            // хранилища синхронно и не должен блокировать главный поток
-            // до фонового получения ключа Keychain.
-        }
-#endif
         let monitor = WordMonitor { [weak self] word, delimiter in
             self?.finishWord(word, delimiter: delimiter)
         }
@@ -327,9 +232,9 @@ final class GlobalHotKey: ObservableObject {
         // трёх работает обычный путь) слово с частотным чеченским ремапом
         // тоже исправляется: "wbuf[m le" → «цигахь ду».
         if correction == nil,
-           word.count == 2,
-           recentWords.last?.chechen == true,
-           let remap = LayoutCorrectionEngine.chechenContextRemap(for: word) {
+           let remap = LayoutCorrectionEngine.forwardContextRemap(
+            for: word, previousIsChechen: recentWords.last?.chechen == true
+           ) {
             correction = (remap, "ru")
         }
 
@@ -380,17 +285,16 @@ final class GlobalHotKey: ObservableObject {
         // же атомарную замену: "[e le wbuf[m" → «ху ду цигахь» (пока «ху»
         // нет в корпусе — «[e ду цигахь»). Слово без такого ремапа (бренд,
         // английское, русское) обрывает расширение и остаётся как есть.
-        var spanOriginal = "", spanCorrected = ""
-        var spanWords: [String] = []
-        if ChechenLexicon.shared.contains(correction.text) {
-            for previous in recentWords.reversed() {
-                guard !previous.corrected, !previous.chechen,
-                      let remap = LayoutCorrectionEngine.chechenContextRemap(for: previous.typed) else { break }
-                spanOriginal = previous.typed + previous.delimiter + spanOriginal
-                spanCorrected = remap + previous.delimiter + spanCorrected
-                spanWords.insert(previous.typed, at: 0)
-            }
-        }
+        let span = LayoutCorrectionEngine.backwardContextSpan(
+            previous: recentWords.map {
+                .init(typed: $0.typed, delimiter: $0.delimiter,
+                      chechen: $0.chechen, corrected: $0.corrected)
+            },
+            correctedWord: correction.text
+        )
+        let spanOriginal = span?.original ?? ""
+        let spanCorrected = span?.corrected ?? ""
+        let spanWords = span?.originalWords ?? []
 
         guard let element = TextInsertion.focusedElement(),
               !SecureFieldDetector.isSecure(element) else {

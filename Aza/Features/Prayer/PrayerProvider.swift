@@ -75,6 +75,13 @@ struct PrayerCity: Identifiable, Equatable {
         return calendar
     }
 
+    func formattedTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        formatter.timeZone = timeZone
+        return formatter.string(from: date)
+    }
+
     /// Пока авторитетные параметры ДУМ РФ не подтверждены документально,
     /// подпись называет фактический метод расчёта, а не орган.
     var calculationLabel: String {

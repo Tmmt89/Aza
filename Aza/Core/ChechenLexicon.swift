@@ -25,7 +25,8 @@ final class ChechenLexicon {
     static let ambiguityMinFrequency = 10
 
     private init() {
-        guard let url = Bundle.main.url(forResource: "chechen-lexicon", withExtension: "tsv"),
+        guard let url = Bundle(for: ChechenLexicon.self)
+            .url(forResource: "chechen-lexicon", withExtension: "tsv"),
               let content = try? String(contentsOf: url, encoding: .utf8) else {
             return
         }

@@ -516,9 +516,6 @@ struct ContentView: View {
     private func inspectPasteboard() {
         let items = NSPasteboard.general.pasteboardItems ?? []
         let types = Set(items.flatMap(\.types))
-#if DEBUG
-        assert(Self.categories(for: [.string]) == ["текст"])
-#endif
         let excluded = types.contains {
             $0.rawValue == "org.nspasteboard.ConcealedType" ||
             $0.rawValue == "org.nspasteboard.TransientType"
@@ -531,21 +528,12 @@ struct ContentView: View {
             pasteboardStatus = "Буфер пуст"
         } else {
             pasteboardTypes = types.map(\.rawValue).sorted().joined(separator: "\n")
-            let categories = Self.categories(for: types)
+            let categories = PasteboardCategories.labels(for: types)
             pasteboardStatus = "\(items.count) объект(а): " +
                 (categories.isEmpty ? "неизвестный тип" : categories.joined(separator: ", "))
         }
     }
 
-    private static func categories(for types: Set<NSPasteboard.PasteboardType>) -> [String] {
-        var result: [String] = []
-        if types.contains(.string) { result.append("текст") }
-        if !types.isDisjoint(with: [.rtf, .rtfd, .html]) { result.append("форматированный текст") }
-        if types.contains(.URL) { result.append("ссылка") }
-        if !types.isDisjoint(with: [.png, .tiff]) { result.append("изображение") }
-        if types.contains(.fileURL) { result.append("файл/папка") }
-        return result
-    }
 }
 
 #Preview {

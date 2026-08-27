@@ -56,9 +56,6 @@ final class PrayerStore: ObservableObject {
     private var settingsRestored = false
 
     init() {
-#if DEBUG
-        assert(PrayerScheduleChecks.run())
-#endif
         table = ScheduleTablePrayerProvider.userProvided()
         // Настройки читаем НЕ здесь: AzaApp.init выполняется до того, как
         // песочница подключит контейнер параметров, и UserDefaults в этот
@@ -170,6 +167,12 @@ final class PrayerStore: ObservableObject {
 
     /// §4.3: таблица приоритетна, расчёт — резерв.
     private func times(for city: PrayerCity, on date: Date) -> DayPrayerTimes? {
+        Self.preferredTimes(for: city, on: date, table: table, calculated: calculated)
+    }
+
+    static func preferredTimes(for city: PrayerCity, on date: Date,
+                               table: ScheduleTablePrayerProvider?,
+                               calculated: CalculatedPrayerProvider) -> DayPrayerTimes? {
         if let table, let fromTable = table.times(on: date, city: city) {
             return fromTable
         }

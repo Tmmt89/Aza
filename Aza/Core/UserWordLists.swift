@@ -48,10 +48,10 @@ final class UserWordLists {
     /// Self-check при старте прогоняет движок на эталонных словах; реальные
     /// пользовательские исключения (например, «[mj» после теста отмены)
     /// ломали бы ассерты — на время проверки списки отключаются.
-    var suspendedForSelfCheck = false
+    var suspendedForTests = false
 
     func isNeverCorrect(_ word: String) -> Bool {
-        !suspendedForSelfCheck && neverCorrect.contains(Self.storageForm(word))
+        !suspendedForTests && neverCorrect.contains(Self.storageForm(word))
     }
 
     func addNeverCorrect(_ word: String) {

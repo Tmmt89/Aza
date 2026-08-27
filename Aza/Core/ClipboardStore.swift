@@ -42,9 +42,6 @@ struct ClipEntry: Codable, Equatable, Identifiable {
 /// в Keychain (kSecAttrAccessibleWhenUnlockedThisDeviceOnly). Файл —
 /// Application Support/Aza/clipboard-history.bin.
 ///
-/// Самопроверка шифрования выполняется при старте Debug-сборки
-/// (`runSelfTest`): раундтрип, отсутствие открытого текста на диске
-/// и отказ «расшифровывать» подменённый файл.
 @MainActor
 final class ClipboardStore: ObservableObject {
 
@@ -106,12 +103,12 @@ final class ClipboardStore: ObservableObject {
 
     /// - Parameters:
     ///   - storageURL: файл зашифрованного хранилища.
-    ///   - maxEntries: локальный лимит для самопроверок и тестов;
+    ///   - maxEntries: локальный лимит для тестов;
     ///     в приложении используется статический `maxEntries`.
     private let instanceByteBudget: Int
 
     /// Синхронный init: получает ключ прямо здесь. Keychain-диалог
-    /// заблокирует вызвавший поток — использовать только в self-test.
+    /// заблокирует вызвавший поток — приложение этот путь не использует.
     /// Приложение создаёт хранилище через init(preparedKey:) после
     /// фонового obtainKey().
     convenience init(storageURL: URL? = nil,
@@ -276,7 +273,7 @@ final class ClipboardStore: ObservableObject {
         return removed
     }
 
-    /// Только для self-test: сдвигает дату записи в прошлое.
+    /// Только для тестов: сдвигает дату записи в прошлое.
     func backdate(id: UUID, to date: Date) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[index].createdAt = date
@@ -680,182 +677,4 @@ final class ClipboardStore: ObservableObject {
         return true
     }
 
-    // MARK: Самопроверка (Debug)
-
-    /// Раундтрип шифрования на временном файле. Проверяет: запись читается
-    /// обратно, на диске нет открытого текста, подменённый файл молча
-    /// игнорируется, избранное переживает перезагрузку и автоочистку.
-    static func runSelfTest(sample: String) {
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aza-clipboard-selftest-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-
-        let store = ClipboardStore(storageURL: tempURL, maxEntries: 3)
-        store.add(text: sample, sourceAppBundleID: nil, sourceAppName: nil)
-        assert(store.entries.first?.text == sample)
-
-        // Избранное: пометка, перезагрузка, защита от автоочистки.
-        store.toggleFavorite(id: store.entries[0].id)
-        assert(store.entries[0].isFavorite == true)
-
-        for suffix in ["а", "б", "в"] {
-            store.add(text: sample + suffix,
-                      sourceAppBundleID: nil, sourceAppName: nil)
-        }
-        assert(store.entries.count == 3)
-        assert(store.entries.contains { $0.text == sample && $0.isFavorite == true },
-               "избранное удалено автоочисткой")
-        assert(store.entries.first?.text == sample + "в",
-               "автоочистка удалила новейшую запись вместо старейшей")
-        assert(!store.entries.contains { $0.text == sample + "а" },
-               "автоочистка не удалила старейшую запись")
-
-        let rawOnDisk = (try? Data(contentsOf: tempURL)) ?? Data()
-        assert(!rawOnDisk.isEmpty)
-        assert(rawOnDisk.range(of: Data(sample.utf8)) == nil, "plaintext leaked to disk")
-
-        let reloaded = ClipboardStore(storageURL: tempURL, maxEntries: 3)
-        assert(reloaded.entries.first { $0.text == sample }?.isFavorite == true,
-               "избранное потеряно при перезагрузке")
-        assert(reloaded.entries.count == 3)
-
-        // Удаление с отменой: запись возвращается на хронологическое место
-        // даже после нового копирования между delete и restore.
-        let victim = reloaded.entries[1]
-        let deleted = reloaded.delete(id: victim.id)
-        assert(deleted != nil && !reloaded.entries.contains { $0.id == victim.id })
-        reloaded.add(text: sample + "г", sourceAppBundleID: nil, sourceAppName: nil)
-        reloaded.restore(deleted!)
-        assert(reloaded.entries[2].id == victim.id,
-               "отмена удаления не вернула запись на хронологическое место")
-
-        reloaded.clearAll()
-        assert(reloaded.entries.map(\.text) == [sample],
-               "clearAll обязан сохранить избранное и удалить остальное")
-
-        // Хранение по сроку: просроченное удаляется, избранное — нет.
-        let aged = ClipboardStore(storageURL: tempURL, maxEntries: 3, retentionDays: 7)
-        aged.add(text: sample + "старое", sourceAppBundleID: nil, sourceAppName: nil)
-        aged.backdate(id: aged.entries[0].id, to: Date().addingTimeInterval(-8 * 86_400))
-        let agedReload = ClipboardStore(storageURL: tempURL, maxEntries: 3, retentionDays: 7)
-        assert(!agedReload.entries.contains { $0.text == sample + "старое" },
-               "просроченная запись не удалена")
-        assert(agedReload.entries.contains { $0.text == sample && $0.isFavorite == true },
-               "избранное не должно устаревать")
-
-        // Виды записей: изображение в зашифрованном blob-е.
-        let richURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aza-clipboard-rich-\(UUID().uuidString)")
-        let blobsDir = richURL.deletingPathExtension().appendingPathExtension("blobs")
-        defer {
-            try? FileManager.default.removeItem(at: richURL)
-            try? FileManager.default.removeItem(at: blobsDir)
-        }
-        let rich = ClipboardStore(storageURL: richURL, maxEntries: 10, retentionDays: 0)
-        let pngMagic = Data([0x89, 0x50, 0x4E, 0x47])
-        let png = pngMagic + Data(repeating: 0xAB, count: 64)
-        rich.addImage(png: png, label: "Изображение 2×2",
-                      thumbnail: Data([0x01, 0x02]),
-                      sourceAppBundleID: nil, sourceAppName: nil)
-        assert(rich.entries.first?.resolvedKind == .image)
-        assert(rich.entries.first?.thumbnailData == Data([0x01, 0x02]),
-               "миниатюра не сохранилась")
-        assert(rich.imageData(for: rich.entries[0]) == png, "blob не расшифровался")
-        let richReload = ClipboardStore(storageURL: richURL, maxEntries: 10, retentionDays: 0)
-        assert(richReload.entries.first?.thumbnailData == Data([0x01, 0x02]),
-               "миниатюра не пережила перезагрузку")
-        let blobFiles = (try? FileManager.default
-            .contentsOfDirectory(atPath: blobsDir.path)) ?? []
-        assert(blobFiles.count == 1)
-        let rawBlob = (try? Data(contentsOf: blobsDir.appendingPathComponent(blobFiles[0]))) ?? Data()
-        assert(rawBlob.range(of: pngMagic) == nil, "PNG-сигнатура в открытом виде на диске")
-
-        // Дедуп изображения по хешу.
-        rich.addImage(png: png, label: "Изображение 2×2", thumbnail: nil,
-                      sourceAppBundleID: nil, sourceAppName: nil)
-        assert(rich.entries.filter { $0.resolvedKind == .image }.count == 1)
-
-        // Удаление: blob живёт всё окно «Отменить», restore возвращает данные.
-        let deletedImage = rich.delete(id: rich.entries[0].id)!
-        assert(FileManager.default.fileExists(atPath: blobsDir
-            .appendingPathComponent(deletedImage.entry.id.uuidString + ".bin").path),
-               "blob удалён до финализации — restore был бы сломан")
-        rich.restore(deletedImage)
-        assert(rich.imageData(for: deletedImage.entry) == png)
-        let deletedAgain = rich.delete(id: deletedImage.entry.id)!
-        rich.finalizeDelete(deletedAgain)
-        assert(!FileManager.default.fileExists(atPath: blobsDir
-            .appendingPathComponent(deletedAgain.entry.id.uuidString + ".bin").path),
-               "blob не удалён при финализации")
-
-        // Файлы и RTF: классификация, дедуп RTF по хешу данных.
-        rich.addFiles(paths: ["/tmp/a.txt", "/tmp/b.png"],
-                      sourceAppBundleID: nil, sourceAppName: nil)
-        assert(rich.entries.first?.resolvedKind == .files &&
-               rich.entries.first?.text == "a.txt, b.png")
-        let rtfBytes = Data("{\\rtf1 test}".utf8)
-        rich.addRTF(text: "test", rtf: rtfBytes,
-                    sourceAppBundleID: nil, sourceAppName: nil)
-        rich.addRTF(text: "test", rtf: rtfBytes,
-                    sourceAppBundleID: nil, sourceAppName: nil)
-        assert(rich.entries.filter { $0.resolvedKind == .rtf }.count == 1)
-
-        // Sweep сирот: чужой файл в blob-каталоге исчезает после загрузки.
-        let stray = blobsDir.appendingPathComponent("\(UUID().uuidString).bin")
-        try? Data([0x01]).write(to: stray)
-        _ = ClipboardStore(storageURL: richURL, maxEntries: 10, retentionDays: 0)
-        assert(!FileManager.default.fileExists(atPath: stray.path), "сирота не удалён")
-
-        // Бюджет байтов: старые не-избранные вылетают при переполнении.
-        let budgetURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aza-clipboard-budget-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: budgetURL) }
-        let tight = ClipboardStore(storageURL: budgetURL, maxEntries: 10,
-                                   retentionDays: 0, byteBudget: 200)
-        for suffix in ["один", "два", "три"] {
-            tight.add(text: String(repeating: "x", count: 90) + suffix,
-                      sourceAppBundleID: nil, sourceAppName: nil)
-        }
-        assert(tight.entries.count == 2, "бюджет байтов не сработал")
-        assert(tight.entries.first?.text.hasSuffix("три") == true,
-               "бюджет удалил новое вместо старого")
-
-        // Массовое удаление (§8.7): избранное пропускается, пакетная
-        // отмена возвращает всё на хронологические места.
-        let batchStore = ClipboardStore(storageURL: budgetURL, maxEntries: 10,
-                                        retentionDays: 0)
-        batchStore.toggleFavorite(id: batchStore.entries.last!.id)
-        let batch = batchStore.deleteBatch(ids: batchStore.entries.map(\.id))
-        assert(batchStore.entries.count == 1 &&
-               batchStore.entries[0].isFavorite == true,
-               "массовое удаление обязано пропустить избранное")
-        assert(batch.count == 1, "пакет отмены неверного размера")
-        batch.forEach { batchStore.restore($0) }
-        assert(batchStore.entries.count == 2, "пакетная отмена не вернула записи")
-
-        // Блокировка экрана (§8.9): память чистится, диск нетронут,
-        // мутация в заблокированном окне не переживает разблокировку.
-        let beforeLock = tight.entries.map(\.id)
-        tight.wipeInMemory()
-        assert(tight.entries.isEmpty, "память не выгружена при блокировке")
-        tight.add(text: "мутация-под-блокировкой",
-                  sourceAppBundleID: nil, sourceAppName: nil)
-        tight.reloadFromDisk()
-        assert(tight.entries.map(\.id) == beforeLock,
-               "диск должен пережить блокировку нетронутым")
-        assert(!tight.entries.contains { $0.text == "мутация-под-блокировкой" },
-               "мутация под блокировкой просочилась на диск")
-
-        try? Data([0x00, 0x01, 0x02]).write(to: tempURL)
-        let tampered = ClipboardStore(storageURL: tempURL, maxEntries: 3)
-        assert(tampered.entries.isEmpty)
-        // Нерасшифрованный файл не должен затираться: иначе смена ключа
-        // молча уничтожает всю историю (уже случалось — 185 записей).
-        assert(tampered.isReadOnly, "нечитаемое хранилище обязано быть read-only")
-        tampered.add(text: "не должно попасть на диск",
-                     sourceAppBundleID: nil, sourceAppName: nil)
-        let onDiskAfterWrite = (try? Data(contentsOf: tempURL)) ?? Data()
-        assert(onDiskAfterWrite == Data([0x00, 0x01, 0x02]),
-               "запись поверх нечитаемой истории — потеря данных")
-    }
 }
