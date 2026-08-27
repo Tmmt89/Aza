@@ -24,6 +24,12 @@ struct SetupView: View {
     @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
     @State private var dictationHotKey = HotKeyBinding.load(
         HotKeyBinding.dictationKey, fallback: .dictationDefault)
+    @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
+    /// Разделы, переехавшие из меню: там они дублировали настройки и
+    /// растягивали список на два экрана. Здесь — за кнопкой, чтобы окно
+    /// по-прежнему помещалось целиком.
+    @State private var showDataSheet = false
+    @State private var showAppsSheet = false
     /// Характеристики этого Mac — под них подбирается рекомендация.
     private let capabilities = MacCapabilities.current()
 
@@ -59,6 +65,8 @@ struct SetupView: View {
         // Закрыли настройки — прослушивание смолкло. Звук, доигрывающий
         // за закрытым окном, пользователь остановить уже не может.
         .onDisappear { soundPreview.stop() }
+        .sheet(isPresented: $showDataSheet) { DataSheet(model: model) }
+        .sheet(isPresented: $showAppsSheet) { AppExclusionsSheet() }
     }
 
     // MARK: Шапка и подвал
@@ -193,16 +201,11 @@ struct SetupView: View {
     private var prayerCard: some View {
         card("Намаз") {
             HStack(spacing: 8) {
-                Picker("", selection: $cityID) {
-                    Text("Город не выбран").tag("")
-                    ForEach(model.prayer.allCities) { city in
-                        Text(city.name).tag(city.id)
+                CityPickerView(cityID: $cityID, cities: model.prayer.allCities)
+                    .buttonStyle(AzaCapsuleButtonStyle())
+                    .onChange(of: cityID) { _, value in
+                        model.prayer.selectedCityID = value.isEmpty ? nil : value
                     }
-                }
-                .labelsHidden()
-                .onChange(of: cityID) { _, value in
-                    model.prayer.selectedCityID = value.isEmpty ? nil : value
-                }
                 Button(locator.state == .locating ? "Определяю…" : "По геопозиции") {
                     Task {
                         if let match = await locator.locate() {
@@ -321,7 +324,23 @@ struct SetupView: View {
     }
 
     private var dictationCard: some View {
-        card("Модель распознавания") {
+        card("Диктовка") {
+            HStack {
+                Text("Язык")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                Spacer(minLength: 8)
+                Picker("", selection: $dictationLanguage) {
+                    Text("Авто").tag("auto")
+                    Text("Русский").tag("ru")
+                    Text("English").tag("en")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            .help("Авто: при сомнении выбирается русский")
+            divider
             ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in
                 if index > 0 { divider }
                 modelRow(item)
@@ -420,6 +439,21 @@ struct SetupView: View {
                               help: "Чеченские слова с опечаткой — только когда в словаре ровно один похожий вариант.")
                 settingToggle("Пропускать спорные", isOn: $ambiguityAbstention,
                               help: "Если слово читается и как русское, и как чеченское — Aza промолчит.")
+                // Список исключений показывается, только когда он не пуст:
+                // пустая строка «Исключений: 0» занимает место и ничего
+                // не сообщает.
+                if !UserWordLists.shared.neverCorrect.isEmpty {
+                    divider
+                    HStack {
+                        Text("Слова-исключения: \(UserWordLists.shared.neverCorrect.count)")
+                            .font(AzaStyle.body)
+                            .foregroundStyle(AzaStyle.ink)
+                        Spacer(minLength: 8)
+                        Button("Очистить") { UserWordLists.shared.clearNeverCorrect() }
+                            .buttonStyle(AzaCapsuleButtonStyle())
+                    }
+                    .help("Двойной правый Shift отменяет исправление и заносит слово сюда")
+                }
             }
         }
     }
@@ -479,6 +513,15 @@ struct SetupView: View {
             if model.loginItem == .requiresApproval {
                 hint("Подтвердите в Системных настройках → Элементы входа.")
             }
+            divider
+            HStack(spacing: 8) {
+                Button("Данные…") { showDataSheet = true }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+                Button("Исключения…") { showAppsSheet = true }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+                Spacer()
+            }
+            .help("Что хранится на диске и в каких приложениях Aza молчит")
         }
     }
 
@@ -600,5 +643,186 @@ struct SetupView: View {
             .font(AzaStyle.caption)
             .foregroundStyle(AzaStyle.warning)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Что хранится на диске и как это удалить (§20). Раньше жило в меню
+/// строки меню, где занимало половину списка и дублировало настройки.
+private struct DataSheet: View {
+    @ObservedObject var model: SetupModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var items: [PrivacyCleanup.Item] = []
+    @State private var error: String?
+    @State private var confirmWipe = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Данные на этом компьютере")
+                .font(AzaStyle.sectionTitle)
+                .foregroundStyle(AzaStyle.ink)
+
+            ForEach(items) { item in
+                HStack {
+                    Text(item.title)
+                        .font(AzaStyle.body)
+                        .foregroundStyle(AzaStyle.ink)
+                    Spacer(minLength: 8)
+                    Text(PrivacyCleanup.humanSize(item.bytes))
+                        .font(AzaStyle.caption.monospacedDigit())
+                        .foregroundStyle(AzaStyle.muted)
+                }
+            }
+
+            Text(PrivacyCleanup.outboundTraffic)
+                .font(AzaStyle.caption)
+                .foregroundStyle(AzaStyle.faint)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let error {
+                Text("Не удалось удалить — \(error)")
+                    .font(AzaStyle.caption)
+                    .foregroundStyle(AzaStyle.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().overlay(AzaStyle.line)
+
+            // Удаление доступно только когда диктовка свободна: иначе она
+            // допишет файлы уже после удаления.
+            let busy = model.dictation.state != .idle
+            HStack(spacing: 8) {
+                Button("Удалить модели") {
+                    model.dictation.unloadModel()
+                    error = PrivacyCleanup.deleteModels()
+                    refresh()
+                }
+                .buttonStyle(AzaCapsuleButtonStyle())
+                .disabled(busy)
+                Button("Удалить историю буфера") {
+                    Task {
+                        await model.prayer.shutdownForCleanup()
+                        error = PrivacyCleanup.deleteClipboardHistory()
+                    }
+                }
+                .buttonStyle(AzaCapsuleButtonStyle())
+                Spacer()
+            }
+            if confirmWipe {
+                Text("Удалить историю, модели, слова, расписания и настройки? Aza закроется.")
+                    .font(AzaStyle.caption)
+                    .foregroundStyle(AzaStyle.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Да, удалить всё") {
+                        guard !busy else {
+                            error = "диктовка занята — попробуйте снова"
+                            confirmWipe = false
+                            return
+                        }
+                        Task {
+                            model.dictation.unloadModel()
+                            await model.prayer.shutdownForCleanup()
+                            error = PrivacyCleanup.deleteEverything()
+                        }
+                    }
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.danger, prominent: true))
+                    Button("Отмена") { confirmWipe = false }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                    Spacer()
+                }
+            } else {
+                Button("Удалить все данные Aza") { confirmWipe = true }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+                    .disabled(busy)
+            }
+            if busy {
+                Text("Удаление доступно, когда диктовка не занята")
+                    .font(AzaStyle.caption)
+                    .foregroundStyle(AzaStyle.faint)
+            }
+
+            HStack {
+                Spacer()
+                Button("Закрыть") { dismiss() }
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+        .background(AzaStyle.stage)
+        .preferredColorScheme(.dark)
+        .task { refresh() }
+    }
+
+    private func refresh() {
+        Task { items = await PrivacyCleanup.inventorySnapshot() }
+    }
+}
+
+/// Приложения, в которых Aza молчит: ни исправлений, ни истории (§8.9).
+private struct AppExclusionsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var apps = UserDefaults.standard
+        .stringArray(forKey: ExcludedApps.userDefaultsKey) ?? []
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Приложения-исключения")
+                .font(AzaStyle.sectionTitle)
+                .foregroundStyle(AzaStyle.ink)
+            Text("Aza не исправляет текст и не записывает историю, пока активно одно из этих приложений.")
+                .font(AzaStyle.caption)
+                .foregroundStyle(AzaStyle.faint)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(apps, id: \.self) { bundleID in
+                HStack {
+                    Text(bundleID)
+                        .font(AzaStyle.caption.monospaced())
+                        .foregroundStyle(AzaStyle.ink)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Button {
+                        apps.removeAll { $0 == bundleID }
+                        save()
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(AzaStyle.muted)
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("com.example.app", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(AzaStyle.caption.monospaced())
+                Button("Добавить") {
+                    let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty, !apps.contains(trimmed) else { return }
+                    apps.append(trimmed)
+                    draft = ""
+                    save()
+                }
+                .buttonStyle(AzaCapsuleButtonStyle())
+            }
+
+            HStack {
+                Spacer()
+                Button("Закрыть") { dismiss() }
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+        .background(AzaStyle.stage)
+        .preferredColorScheme(.dark)
+    }
+
+    private func save() {
+        UserDefaults.standard.set(apps, forKey: ExcludedApps.userDefaultsKey)
     }
 }

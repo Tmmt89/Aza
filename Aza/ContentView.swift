@@ -13,125 +13,70 @@ struct ContentView: View {
     @ObservedObject var island: IslandStore
     /// Открыть окно настройки (§9) — оно же страница состояния прав.
     var openSetup: () -> Void = {}
-    @AppStorage(PrayerStore.cityStorageKey) private var prayerCityID = ""
-    @StateObject private var locator = CityLocator()
     /// Хранилище появляется после фонового получения ключа Keychain.
     private var clipboardStore: ClipboardStore? { clipboardStartup.store }
-    @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
-    @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstentionEnabled = true
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
-    @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
-    @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
-    @AppStorage(DictationController.profileStorageKey) private var dictationProfile = "balanced"
-    @State private var pasteboardStatus = "Типы ещё не проверялись"
-    @State private var pasteboardTypes = ""
     @State private var searchText = ""
     @State private var visibleLimit = 10
     @State private var confirmMassDelete = false
-    @State private var excludedApps = UserDefaults.standard
-        .stringArray(forKey: ExcludedApps.userDefaultsKey) ?? []
-    @State private var newExcludedApp = ""
     /// Запись, открытая в popover «Показать целиком».
     @State private var previewEntry: ClipEntry?
-    @State private var showPrivacy = false
-    @State private var confirmWipe = false
-    @State private var privacyItems: [PrivacyCleanup.Item] = []
-    @State private var cleanupError: String?
-    @State private var inventoryTask: Task<Void, Never>?
+
+    /// Что сейчас мешает работать. Пусто — значит всё в порядке, и место
+    /// в меню занимать нечем.
+    private var warnings: [String] {
+        var result: [String] = []
+        if let error = hotKey.registrationError {
+            result.append("Горячая клавиша недоступна (\(error))")
+        }
+        if !hotKey.inputMonitoringGranted {
+            result.append("Нет мониторинга ввода — исправление раскладки не работает")
+        }
+        if let issue = island.prayer.notificationIssue {
+            result.append(issue)
+        }
+        if let store = clipboardStore, store.isReadOnly {
+            result.append(store.isUnreadable
+                          ? "История на диске не читается этим ключом — она сохранена нетронутой"
+                          : "Нет доступа к ключу истории — изменения не переживут перезапуск")
+        }
+        return result
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Aza работает локально", systemImage: "waveform")
-                .font(.headline)
-
-            if let error = hotKey.registrationError {
-                Label("Горячая клавиша недоступна (\(error))", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red)
-            } else {
-                Text("Поставьте курсор в текстовое поле и нажмите ⌘⇧A")
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(hotKey.insertionStatus)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("Срабатываний: \(hotKey.activationCount)")
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            if hotKey.inputMonitoringGranted {
-                Text("Везде, кроме терминалов, IDE и менеджеров паролей: ghbdtn · руддщ · [mj · 1алам + пробел")
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("\(hotKey.correctionStatus) · исправлений: \(hotKey.correctionCount)")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Button("Разрешить Input Monitoring") {
-                    hotKey.requestInputMonitoring()
-                }
-                Text("Нужно для анализа завершённого слова")
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            // Намаз (§4): город выбирается вручную, источник называется
-            // честно — таблица ДУМ, если она есть, иначе расчёт.
-            Picker("Город", selection: $prayerCityID) {
-                Text("Не выбран").tag("")
-                ForEach(island.prayer.allCities) { city in
-                    Text(city.name).tag(city.id)
-                }
-            }
-            .pickerStyle(.menu)
-            .font(.caption)
-            .onChange(of: prayerCityID) { _, newValue in
-                island.prayer.selectedCityID = newValue.isEmpty ? nil : newValue
-            }
-
-            HStack {
-                Button(locator.state == .locating ? "Определяю…" : "Определить город") {
-                    Task {
-                        if let match = await locator.locate() {
-                            prayerCityID = match.city.id
-                            island.prayer.selectedCityID = match.city.id
-                        }
-                    }
-                }
-                .font(.caption)
-                .disabled(locator.state == .locating)
+        VStack(alignment: .leading, spacing: 10) {
+            // Меню — не вторые настройки. Здесь только то, ради чего его
+            // открывают: что сейчас происходит и история буфера. Всё
+            // настраиваемое живёт в окне настроек, и дублировать его
+            // значит заставлять пользователя гадать, где менять.
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                    .foregroundStyle(.tint)
+                Text("Aza")
+                    .font(.headline)
                 Spacer()
-                Toggle("Уведомления", isOn: Binding(
-                    get: { island.prayer.notificationsEnabled },
-                    set: { enabled in
-                        Task { await island.prayer.setNotifications(enabled: enabled) }
-                    }
-                ))
-                .toggleStyle(.switch)
-                .font(.caption)
-            }
-            switch locator.state {
-            case .locating:
-                Text("Определяю…").font(.caption2).foregroundStyle(.secondary)
-            case let .found(cityID, distance):
-                // Честно: это ближайший ПРОФИЛЬ из списка, а не «ваш город».
-                Text("Ближайший профиль: \(island.prayer.allCities.first { $0.id == cityID }?.name ?? cityID) · \(distance) км")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .denied:
-                Text("Геолокация запрещена — выберите город вручную")
-                    .font(.caption2).foregroundStyle(.orange)
-            case let .failed(message):
-                Text(message).font(.caption2).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .idle:
-                EmptyView()
+                Text(island.prayerSourceLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
-            // Причина показывается ДО ветвления: сегодняшних времён может
-            // не быть, а ближайший намаз при этом найтись на завтра —
-            // тогда одна ветка «или-или» умолчала бы о сегодняшнем дне.
-            if let reason = island.prayerUnavailableReason {
+            // Ближайший намаз — главное, за чем сюда заглядывают.
+            if let next = island.nextPrayerOccurrence() {
+                HStack(spacing: 6) {
+                    Image(systemName: next.kind.symbol)
+                        .font(.caption)
+                        .foregroundStyle(.tint)
+                    Text("\(next.kind.title) в \(next.time)")
+                        .font(.callout)
+                    Spacer()
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(next.countdown(from: context.date))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else if let reason = island.prayerUnavailableReason {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(island.prayer.selectedCity == nil
@@ -139,94 +84,28 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let next = island.nextPrayerOccurrence() {
-                Text("\(next.kind.title) в \(next.time) · \(island.prayerSourceLabel(for: next))")
+            // Предупреждения показываются, только когда есть что чинить:
+            // исправная работа не должна занимать место.
+            ForEach(warnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-                if let issue = island.prayer.notificationIssue {
-                    Text(issue)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let caveat = next.source?.caveat {
-                    Text(caveat)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
 
-            Divider()
-
-            // Диктовка (§5): удержание ⌃⇧D. Модель качается при первом
-            // использовании, поэтому статус живёт отдельной строкой.
-            Label(dictation.status, systemImage: dictation.state == .recording
-                  ? "mic.fill" : "mic")
-                .font(.caption)
-                .foregroundStyle(dictation.state == .recording ? .red : .secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Picker("Язык диктовки", selection: $dictationLanguage) {
-                Text("Авто").tag("auto")
-                Text("Русский").tag("ru")
-                Text("English").tag("en")
+            if dictation.state != .idle {
+                Label(dictation.status, systemImage: dictation.state == .recording ? "mic.fill" : "mic")
+                    .font(.caption)
+                    .foregroundStyle(dictation.state == .recording ? .red : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .pickerStyle(.segmented)
-            .font(.caption)
-            Text("Авто: при сомнении выбирается русский")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
 
-            // Профиль модели (§5.4): размер против точности.
-            Picker("Модель", selection: $dictationProfile) {
-                ForEach(DictationController.Profile.allCases) { profile in
-                    Text(profile.title).tag(profile.rawValue)
-                }
-            }
-            .pickerStyle(.menu)
-            .font(.caption)
-            .onChange(of: dictationProfile) { _, _ in
-                dictation.profileChanged()
-            }
-            Text(DictationController.Profile(rawValue: dictationProfile)?.summary ?? "")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
-            Toggle("Исправлять чеченские опечатки", isOn: $typoCorrectionEnabled)
-                .toggleStyle(.switch)
-            Text("Выключено по умолчанию: исправляет слово, только если в словаре ровно один кандидат на расстоянии одной правки")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Toggle("Воздерживаться при неоднозначности с чеченским словом", isOn: $ambiguityAbstentionEnabled)
-                .toggleStyle(.switch)
-            Text("Включено по умолчанию: если замена или пропуск первой клавиши даёт чеченское слово — слово не трогается")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
+            // Пауза — действие, а не настройка: её включают на минуту,
+            // когда копируют чужое. Место ей здесь, а срок хранения — в
+            // настройках.
             Toggle("Собирать историю буфера", isOn: $clipboardHistoryEnabled)
                 .toggleStyle(.switch)
-
-            if clipboardHistoryEnabled {
-                Picker("Хранить", selection: $retentionDays) {
-                    Text("День").tag(1)
-                    Text("Неделю").tag(7)
-                    Text("Месяц").tag(30)
-                    Text("Год").tag(365)
-                    Text("Бессрочно").tag(0)
-                }
-                .pickerStyle(.menu)
                 .font(.caption)
-            }
 
             if clipboardHistoryEnabled, clipboardStore == nil {
                 // Ключ Keychain добывается на фоне — возможно, ждёт ответа
@@ -239,15 +118,6 @@ struct ContentView: View {
             }
 
             if clipboardHistoryEnabled, let clipboardStore {
-                if clipboardStore.isReadOnly {
-                    Label(clipboardStore.isUnreadable
-                          ? "История на диске не читается этим ключом — она сохранена нетронутой, новые записи не пишутся"
-                          : "Нет доступа к ключу истории — изменения не сохранятся до перезапуска",
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
                 TextField("Поиск по истории", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .font(.caption)
@@ -396,175 +266,14 @@ struct ContentView: View {
 
             Divider()
 
-            Button("Прочитать типы буфера") {
-                inspectPasteboard()
-            }
-            Text(pasteboardStatus)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if !pasteboardTypes.isEmpty {
-                Text(pasteboardTypes)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(5)
-                    .textSelection(.enabled)
-            }
-
-            Divider()
-
-            Text("Двойной правый Shift — отменить последнее исправление (слово попадёт в исключения)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Text("Исключений: \(UserWordLists.shared.neverCorrect.count)")
+                Button("Настройки…") { openSetup() }
                     .font(.caption)
-                    .foregroundStyle(.secondary)
                 Spacer()
-                if !UserWordLists.shared.neverCorrect.isEmpty {
-                    Button("Очистить") {
-                        UserWordLists.shared.clearNeverCorrect()
-                    }
+                Button("Завершить") { NSApp.terminate(nil) }
                     .font(.caption)
-                }
+                    .keyboardShortcut("q")
             }
-
-            Divider()
-
-            // Исключения приложений (спец. §8.9): ни коррекции, ни истории.
-            Text("Приложения-исключения (bundle ID)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ForEach(excludedApps, id: \.self) { bundleID in
-                HStack {
-                    Text(bundleID)
-                        .font(.caption.monospaced())
-                        .lineLimit(1)
-                    Spacer()
-                    Button {
-                        excludedApps.removeAll { $0 == bundleID }
-                        saveExcludedApps()
-                    } label: {
-                        Image(systemName: "minus.circle")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            HStack {
-                TextField("com.example.app", text: $newExcludedApp)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.caption.monospaced())
-                Button("Добавить") {
-                    let trimmed = newExcludedApp.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty, !excludedApps.contains(trimmed) else { return }
-                    excludedApps.append(trimmed)
-                    newExcludedApp = ""
-                    saveExcludedApps()
-                }
-                .font(.caption)
-            }
-
-            Divider()
-
-            // Конфиденциальность (§10/§12): что хранится, что уходит
-            // наружу и как всё удалить.
-            DisclosureGroup(isExpanded: $showPrivacy) {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(privacyItems) { item in
-                        HStack {
-                            Text(item.title).font(.caption2)
-                            Spacer()
-                            Text(PrivacyCleanup.humanSize(item.bytes))
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Text(PrivacyCleanup.outboundTraffic)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if let error = cleanupError {
-                        Text("Не удалось удалить — \(error)")
-                            .font(.caption2)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    Button("Удалить загруженные модели") {
-                        // Сперва выгружаем из памяти: иначе останется
-                        // ссылка на исчезнувшие файлы.
-                        dictation.unloadModel()
-                        cleanupError = PrivacyCleanup.deleteModels()
-                        refreshPrivacyInventory()
-                    }
-                    .font(.caption)
-                    .disabled(dictation.state != .idle)
-
-                    Button("Удалить историю буфера") {
-                        Task {
-                            await island.prayer.shutdownForCleanup()
-                            cleanupError = PrivacyCleanup.deleteClipboardHistory()
-                        }
-                    }
-                    .font(.caption)
-
-                    if confirmWipe {
-                        Text("Удалить историю, модели, слова, импортированные расписания и настройки? Aza закроется.")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack {
-                            Button("Да, удалить всё", role: .destructive) {
-                                guard dictation.state == .idle else {
-                                    cleanupError = "диктовка занята — попробуйте снова"
-                                    confirmWipe = false
-                                    return
-                                }
-                                Task {
-                                    // Гасим производителей до удаления:
-                                    // иначе они допишут данные после него.
-                                    dictation.unloadModel()
-                                    await island.prayer.shutdownForCleanup()
-                                    cleanupError = PrivacyCleanup.deleteEverything()
-                                }
-                            }
-                            .font(.caption)
-                            .disabled(dictation.state != .idle)
-                            Button("Отмена") { confirmWipe = false }
-                                .font(.caption)
-                        }
-                    } else {
-                        Button("Удалить все данные Aza") { confirmWipe = true }
-                            .font(.caption)
-                            .disabled(dictation.state != .idle)
-                    }
-                    if dictation.state != .idle {
-                        Text("Удаление доступно, когда диктовка не занята")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.top, 4)
-                .task(id: showPrivacy) {
-                    // Обход папки моделей — вне главного потока и только
-                    // когда раздел открыт.
-                    guard showPrivacy else { return }
-                    refreshPrivacyInventory()
-                }
-            } label: {
-                Text("Конфиденциальность").font(.caption)
-            }
-
-            Divider()
-
-            Button("Настройка и разрешения…") { openSetup() }
-
-            Button("Завершить Aza") {
-                NSApp.terminate(nil)
-            }
-            .keyboardShortcut("q")
         }
         .padding(16)
         .frame(width: 340)
@@ -616,21 +325,6 @@ struct ContentView: View {
         .frame(minWidth: 260, maxWidth: 360, minHeight: 80, maxHeight: 420)
     }
 
-    /// Пересчёт описи с отменой предыдущего: иначе старый, более долгий
-    /// обход мог бы перезаписать свежий результат после удаления.
-    private func refreshPrivacyInventory() {
-        inventoryTask?.cancel()
-        inventoryTask = Task {
-            let items = await PrivacyCleanup.inventorySnapshot()
-            guard !Task.isCancelled else { return }
-            privacyItems = items
-        }
-    }
-
-    private func saveExcludedApps() {
-        UserDefaults.standard.set(excludedApps, forKey: ExcludedApps.userDefaultsKey)
-    }
-
     /// Иконка вида записи; текст без иконки — карточек-текстов большинство.
     static func kindIcon(for entry: ClipEntry) -> String? {
         switch entry.resolvedKind {
@@ -655,27 +349,6 @@ struct ContentView: View {
         let when = formatter.localizedString(for: entry.createdAt, relativeTo: Date())
         let source = entry.sourceAppName ?? (entry.sourceAppBundleID ?? "неизвестно")
         return "\(source) · \(when)"
-    }
-
-    private func inspectPasteboard() {
-        let items = NSPasteboard.general.pasteboardItems ?? []
-        let types = Set(items.flatMap(\.types))
-        let excluded = types.contains {
-            $0.rawValue == "org.nspasteboard.ConcealedType" ||
-            $0.rawValue == "org.nspasteboard.TransientType"
-        }
-        if excluded {
-            pasteboardTypes = ""
-            pasteboardStatus = "Исключено: confidential/transient"
-        } else if items.isEmpty {
-            pasteboardTypes = ""
-            pasteboardStatus = "Буфер пуст"
-        } else {
-            pasteboardTypes = types.map(\.rawValue).sorted().joined(separator: "\n")
-            let categories = PasteboardCategories.labels(for: types)
-            pasteboardStatus = "\(items.count) объект(а): " +
-                (categories.isEmpty ? "неизвестный тип" : categories.joined(separator: ", "))
-        }
     }
 
 }
