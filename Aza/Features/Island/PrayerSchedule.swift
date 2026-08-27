@@ -49,6 +49,36 @@ struct PrayerSource: Decodable {
         default: name
         }
     }
+
+    /// Агрегаторы, которые владелец разрешил использовать ТОЛЬКО для
+    /// сверки, но не как источник времён в продукте. Их данные не должны
+    /// попасть в интерфейс под видом выверенного расписания — даже если
+    /// кто-то положит такой файл в папку расписаний вручную.
+    private static let qaOnlyOrigins = ["sajda", "1muslim", "muslim.by"]
+
+    /// Годится ли источник для продукта.
+    ///
+    /// Списка «правильных» организаций здесь нет и быть не может: правило
+    /// владельца разрешает расписание любой мечети, а решать, какая мечеть
+    /// легитимна, — не наше дело. Вместо этого требуем ПРОСЛЕЖИВАЕМОСТЬ:
+    /// таблица считается выверенной, только если умеет показать, откуда
+    /// взята — имя, ссылка на первоисточник и его хеш. Плюс прямой запрет
+    /// на два агрегатора, которые владелец разрешил только для сверки.
+    var isUsableInProduct: Bool { rejectionReason == nil }
+
+    /// Почему источник непригоден — для диагностики. Одна причина на все
+    /// отказы врала бы в логе: «qa-only» на самом деле мог означать
+    /// отсутствующий хеш.
+    var rejectionReason: String? {
+        func filled(_ value: String) -> Bool {
+            !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard filled(name) else { return "no-name" }
+        guard filled(url) else { return "no-source-url" }
+        guard filled(sha256) else { return "no-source-hash" }
+        let haystack = (name + " " + url).lowercased()
+        return Self.qaOnlyOrigins.contains { haystack.contains($0) } ? "qa-only-source" : nil
+    }
 }
 
 struct CityPrayerSchedule: Identifiable, Decodable {
@@ -63,6 +93,19 @@ struct CityPrayerSchedule: Identifiable, Decodable {
     let days: [PrayerDay]
 
     var isComplete: Bool { coverageStatus == "complete" }
+
+    /// Попадает ли день в объявленное покрытие. Даты ISO сравниваются как
+    /// строки — порядок у них совпадает с календарным. День берётся в
+    /// часовом поясе города, а не системном.
+    func covers(_ date: Date) -> Bool {
+        guard let timeZone = TimeZone(identifier: timeZone) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        let key = String(format: "%04d-%02d-%02d",
+                         parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+        return key >= coverageStart && key <= coverageEnd
+    }
 }
 
 struct PrayerOccurrence {
@@ -95,31 +138,49 @@ struct PrayerCatalog: Decodable {
     /// (§4.3). Опционально — старые файлы без поля читаются как прежде.
     let sourceLabel: String?
 
-    static let bundled: PrayerCatalog = {
-        #if SWIFT_PACKAGE
-        let bundle = Bundle.module
-        #else
-        let bundle = Bundle.main
-        #endif
-        guard let url = bundle.url(forResource: "prayer-schedules-2026", withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let catalog = try? JSONDecoder().decode(PrayerCatalog.self, from: data) else {
-            return PrayerCatalog(
-                schemaVersion: 1, year: 2026, cityCount: 0,
-                completeCityCount: 0, partialCityCount: 0, cities: [],
-                sourceLabel: nil
-            )
-        }
-        return catalog
-    }()
+    // Каталога в бандле нет и быть не должно: расписания приходят из
+    // Application Support и проходят проверку происхождения в
+    // ScheduleTablePrayerProvider.userProvided(). Прежний `bundled`
+    // читал бы файл из бандла мимо этой проверки — удалён.
 
-    func city(id: String) -> CityPrayerSchedule? {
-        cities.first { $0.id == id }
+    // Поиска по id здесь намеренно нет: после слияния годовых файлов
+    // идентификаторы перестали быть уникальными, и «первый с таким id»
+    // возвращал день из чужого снимка.
+
+    /// Поиск по НАЗВАНИЮ: идентификаторы каталога и приложения живут
+    /// независимо (в каталоге — кириллица «казань», в списке городов —
+    /// латиница «kazan»), поэтому сопоставляем по нормализованному имени.
+    /// Одноимённых городов быть не должно (в текущем каталоге их нет), но
+    /// каталог приходит извне: при совпадении имён молча взять первый —
+    /// значит показать пользователю расписание ЧУЖОГО города. Лучше
+    /// честно отказаться и уйти в расчёт.
+    func city(named name: String, on date: Date? = nil) -> CityPrayerSchedule? {
+        let target = Self.normalized(name)
+        let matches = cities.filter { Self.normalized($0.name) == target }
+        if matches.count > 1, let date {
+            // Один город может прийти из нескольких годовых файлов —
+            // выбираем тот, чьё покрытие включает нужный день.
+            let covering = matches.filter { $0.covers(date) }
+            return covering.count == 1 ? covering[0] : nil
+        }
+        return matches.count == 1 ? matches[0] : nil
     }
 
-    func prayers(cityID: String, on date: Date) -> [PrayerOccurrence] {
-        guard let city = city(id: cityID),
-              let calendar = calendar(for: city),
+    /// Нижний регистр, «ё» → «е», дефисы и пробелы — к одному виду:
+    /// «Набережные Челны», «набережные-челны» — один город.
+    static func normalized(_ name: String) -> String {
+        name.lowercased()
+            .replacingOccurrences(of: "ё", with: "е")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+    }
+
+    /// Принимает САМ город, а не его идентификатор: после слияния годовых
+    /// файлов идентификаторы перестали быть уникальными, и повторный поиск
+    /// по id вернул бы день из другого снимка под подписью выбранного.
+    func prayers(_ city: CityPrayerSchedule, on date: Date) -> [PrayerOccurrence] {
+        guard let calendar = calendar(for: city),
               let day = city.days.first(where: { $0.date == dateKey(date, calendar: calendar) }) else {
             return []
         }
@@ -133,17 +194,6 @@ struct PrayerCatalog: Decodable {
                   ) else { return nil }
             return PrayerOccurrence(kind: kind, time: time, date: occurrenceDate)
         }
-    }
-
-    func nextPrayer(cityID: String, after now: Date) -> PrayerOccurrence? {
-        guard let city = city(id: cityID), let calendar = calendar(for: city) else { return nil }
-        for offset in 0...1 {
-            guard let localDate = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
-            if let prayer = (prayers(cityID: cityID, on: localDate)
-                .filter { $0.kind != .sunrise && $0.date > now }
-                .min(by: { $0.date < $1.date })) { return prayer }
-        }
-        return nil
     }
 
     private func calendar(for city: CityPrayerSchedule) -> Calendar? {

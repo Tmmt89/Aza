@@ -67,8 +67,14 @@ final class CityLocator: NSObject, ObservableObject {
 
     /// Ближайший город из списка профилей.
     private func nearestCity(to location: CLLocation) -> Match? {
-        let candidates = PrayerStore.cities.map { city -> (PrayerCity, CLLocationDistance) in
-            let target = CLLocation(latitude: city.latitude, longitude: city.longitude)
+        // Города без координат в сравнении не участвуют — расстояние до
+        // них неизвестно.
+        let candidates = PrayerStore.cities.compactMap {
+            city -> (PrayerCity, CLLocationDistance)? in
+            guard let latitude = city.latitude, let longitude = city.longitude else {
+                return nil
+            }
+            let target = CLLocation(latitude: latitude, longitude: longitude)
             return (city, location.distance(from: target))
         }
         guard let best = candidates.min(by: { $0.1 < $1.1 }) else { return nil }

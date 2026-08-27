@@ -56,8 +56,12 @@ protocol PrayerTimesProvider {
 struct PrayerCity: Identifiable, Equatable {
     let id: String
     let name: String
-    let latitude: Double
-    let longitude: Double
+    /// Координаты нужны ТОЛЬКО для расчёта. У городов, пришедших из
+    /// официального каталога, их может не быть: выдумывать координаты
+    /// населённого пункта ради красивого запасного пути — значит
+    /// показывать пользователю выдуманное время намаза.
+    let latitude: Double?
+    let longitude: Double?
     /// Идентификатор IANA: считать день нужно в местном календаре, иначе
     /// «сегодня» уедет на сутки, а переход на летнее время сдвинет времена.
     let timeZoneID: String
@@ -105,7 +109,11 @@ struct CalculatedPrayerProvider: PrayerTimesProvider {
     private static let highLatitudeThreshold = 48.0
 
     func times(on date: Date, city: PrayerCity) -> DayPrayerTimes? {
-        let coordinates = Coordinates(latitude: city.latitude, longitude: city.longitude)
+        // Без координат считать нечего — честнее не показать ничего.
+        guard let latitude = city.latitude, let longitude = city.longitude else {
+            return nil
+        }
+        let coordinates = Coordinates(latitude: latitude, longitude: longitude)
         let components = city.calendar.dateComponents([.year, .month, .day], from: date)
 
         var params = city.method.params
@@ -118,7 +126,7 @@ struct CalculatedPrayerProvider: PrayerTimesProvider {
             return nil
         }
 
-        let isHighLatitude = abs(city.latitude) > Self.highLatitudeThreshold
+        let isHighLatitude = abs(latitude) > Self.highLatitudeThreshold
         let source = PrayerTimesSource(
             label: city.calculationLabel,
             isVerifiedTable: false,
@@ -151,24 +159,56 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
         )) ?? []
-        for file in files where file.pathExtension.lowercased() == "json" {
+        // Файлов может быть несколько (годовые каталоги живут рядом), и
+        // брать «первый попавшийся» нельзя: подходящий год мог оказаться
+        // вторым. Собираем города из ВСЕХ пригодных файлов — какой
+        // конкретно подходит запрошенному дню, решает уже поиск по
+        // покрытию.
+        var cities: [CityPrayerSchedule] = []
+        var year = 0
+        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        where file.pathExtension.lowercased() == "json" {
             guard let data = boundedData(from: file),
                   let catalog = try? JSONDecoder().decode(PrayerCatalog.self, from: data),
                   !catalog.cities.isEmpty else { continue }
-            return ScheduleTablePrayerProvider(catalog: catalog)
+            // Источник, разрешённый только для сверки, в продукт не идёт:
+            // иначе его времена показались бы как выверенная таблица.
+            let reasons = Set(catalog.cities.compactMap(\.source.rejectionReason))
+            guard reasons.isEmpty else {
+                azaDebugLog("Aza: prayer catalog rejected file=\(file.lastPathComponent) "
+                            + "reasons=\(reasons.sorted().joined(separator: ","))")
+                continue
+            }
+            cities.append(contentsOf: catalog.cities)
+            year = max(year, catalog.year)
         }
-        return nil
+        guard !cities.isEmpty else { return nil }
+        // Общая подпись намеренно nil: файлы бывают сводными, и подпись
+        // берётся у КАЖДОГО города своя.
+        return ScheduleTablePrayerProvider(catalog: PrayerCatalog(
+            schemaVersion: 1, year: year, cityCount: cities.count,
+            completeCityCount: cities.filter(\.isComplete).count,
+            partialCityCount: cities.filter { !$0.isComplete }.count,
+            cities: cities, sourceLabel: nil
+        ))
     }
 
     func times(on date: Date, city: PrayerCity) -> DayPrayerTimes? {
-        guard let tableCity = catalog.city(id: city.id),
+        // Ищем по НАЗВАНИЮ: идентификаторы каталога приходят из чужого
+        // конвейера (кириллица «казань») и с нашими не совпадают.
+        // Часовой пояс обязан совпасть — иначе это другой город.
+        guard let tableCity = catalog.city(named: city.name, on: date),
               tableCity.timeZone == city.timeZoneID else { return nil }
-        let occurrences = catalog.prayers(cityID: city.id, on: date)
+        let occurrences = catalog.prayers(tableCity, on: date)
         guard occurrences.count == PrayerKind.allCases.count,
               occurrences.map(\.date) == occurrences.map(\.date).sorted() else { return nil }
-        let label = (catalog.sourceLabel?.trimmingCharacters(in: .whitespacesAndNewlines))
-            .flatMap { $0.isEmpty ? nil : $0 }
-            ?? tableCity.source.shortName
+        // Источник ГОРОДА главнее общей подписи каталога. Каталог бывает
+        // сводным (ДУМ РТ + ЦДУМ + РДУМ ЧО в одном файле), и общий ярлык
+        // подписал бы времена одного муфтията именем другого — ровно то
+        // смешивание источников, которое запрещено.
+        let label = nonEmpty(tableCity.source.shortName)
+            ?? nonEmpty(catalog.sourceLabel ?? "")
+            ?? ""
         guard !label.isEmpty else { return nil }
         var result = DayPrayerTimes(
             source: PrayerTimesSource(label: label, isVerifiedTable: true)
@@ -184,6 +224,11 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
             }
         }
         return result
+    }
+
+    private func nonEmpty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func boundedData(from file: URL) -> Data? {

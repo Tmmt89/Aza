@@ -79,7 +79,7 @@ struct ContentView: View {
             // честно — таблица ДУМ, если она есть, иначе расчёт.
             Picker("Город", selection: $prayerCityID) {
                 Text("Не выбран").tag("")
-                ForEach(PrayerStore.cities) { city in
+                ForEach(island.prayer.allCities) { city in
                     Text(city.name).tag(city.id)
                 }
             }
@@ -115,7 +115,7 @@ struct ContentView: View {
                 Text("Определяю…").font(.caption2).foregroundStyle(.secondary)
             case let .found(cityID, distance):
                 // Честно: это ближайший ПРОФИЛЬ из списка, а не «ваш город».
-                Text("Ближайший профиль: \(PrayerStore.cities.first { $0.id == cityID }?.name ?? cityID) · \(distance) км")
+                Text("Ближайший профиль: \(island.prayer.allCities.first { $0.id == cityID }?.name ?? cityID) · \(distance) км")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             case .denied:
@@ -126,6 +126,17 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
             case .idle:
                 EmptyView()
+            }
+
+            // Причина показывается ДО ветвления: сегодняшних времён может
+            // не быть, а ближайший намаз при этом найтись на завтра —
+            // тогда одна ветка «или-или» умолчала бы о сегодняшнем дне.
+            if let reason = island.prayerUnavailableReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(island.prayer.selectedCity == nil
+                                     ? Color.secondary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let next = island.nextPrayerOccurrence() {
@@ -145,10 +156,6 @@ struct ContentView: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-            } else {
-                Text("Выберите город, чтобы видеть время намаза")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Divider()

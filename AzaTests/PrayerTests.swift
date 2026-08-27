@@ -22,7 +22,7 @@ final class PrayerTests: XCTestCase {
         let date = try XCTUnwrap(grozny.calendar.date(
             from: DateComponents(year: 2026, month: 8, day: 27)
         ))
-        let source = PrayerSource(name: "ДУМ ЧР", url: "", sha256: "fixture")
+        let source = PrayerSource(name: "ДУМ ЧР", url: "https://example.org/schedule.xlsx", sha256: "fixture")
         let day = PrayerDay(date: "2026-08-27",
                             times: ["04:00", "05:30", "12:10", "16:00", "18:50", "20:30"])
         let city = CityPrayerSchedule(
@@ -75,6 +75,201 @@ final class PrayerTests: XCTestCase {
             timeZoneID: "Asia/Yekaterinburg", madhab: .hanafi, method: .muslimWorldLeague
         )
         XCTAssertEqual(ufa.formattedTime(instant), "20:41")
+    }
+
+    /// Правило исследования: источники не смешиваются молча. День вне
+    /// покрытия таблицы обязан считаться расчётом И сменить подпись —
+    /// иначе расчётное время выглядело бы как выверенное расписание.
+    func testDayOutsideTableCoverageFallsBackAndRelabels() throws {
+        let source = PrayerSource(name: "РДУМ ЧО", url: "https://example.org/schedule.xlsx", sha256: "fixture")
+        let covered = PrayerDay(date: "2026-08-27",
+                                times: ["04:00", "05:30", "12:10", "16:00", "18:50", "20:30"])
+        let city = CityPrayerSchedule(
+            id: grozny.id, name: grozny.name, timeZone: grozny.timeZoneID,
+            coverageStatus: "partial", coverageStart: covered.date, coverageEnd: covered.date,
+            releaseStatus: "test", source: source, days: [covered]
+        )
+        let catalog = PrayerCatalog(
+            schemaVersion: 1, year: 2026, cityCount: 1,
+            completeCityCount: 0, partialCityCount: 1, cities: [city], sourceLabel: "РДУМ ЧО"
+        )
+        let table = ScheduleTablePrayerProvider(catalog: catalog)
+
+        // День внутри покрытия — таблица.
+        let inside = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 27)))
+        let fromTable = try XCTUnwrap(PrayerStore.preferredTimes(
+            for: grozny, on: inside, table: table, calculated: CalculatedPrayerProvider()))
+        XCTAssertTrue(fromTable.source.isVerifiedTable)
+
+        // День вне покрытия — расчёт с другой подписью.
+        let outside = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 10, day: 1)))
+        let fallback = try XCTUnwrap(PrayerStore.preferredTimes(
+            for: grozny, on: outside, table: table, calculated: CalculatedPrayerProvider()))
+        XCTAssertFalse(fallback.source.isVerifiedTable,
+                       "вне покрытия таблицы источник обязан перестать быть выверенным")
+        XCTAssertNotEqual(fallback.source.label, fromTable.source.label,
+                          "подпись источника обязана смениться вместе с ним")
+    }
+
+    /// Sajda и 1Muslim разрешены владельцем только для сверки: их данные
+    /// не имеют права попасть в продукт как выверенная таблица.
+    func testQAOnlySourcesAreNotUsableInProduct() {
+        XCTAssertFalse(PrayerSource(name: "Sajda", url: "https://sajda.app",
+                                    sha256: "x").isUsableInProduct)
+        XCTAssertFalse(PrayerSource(name: "Календарь", url: "https://1muslim.pro/x",
+                                    sha256: "x").isUsableInProduct)
+        XCTAssertFalse(PrayerSource(name: " ", url: "https://x.ru", sha256: "x").isUsableInProduct,
+                       "безымянный источник — не источник")
+        XCTAssertFalse(PrayerSource(name: "ДУМ РТ", url: "", sha256: "x").isUsableInProduct,
+                       "без ссылки на первоисточник таблица не прослеживается")
+        XCTAssertFalse(PrayerSource(name: "ДУМ РТ", url: "https://dumrt.ru/x.xlsx",
+                                    sha256: " ").isUsableInProduct,
+                       "без хеша нельзя проверить, что данные не подменены")
+        XCTAssertTrue(PrayerSource(name: "ЦДУМ России", url: "https://cdum.ru",
+                                   sha256: "x").isUsableInProduct)
+        // Причина отказа должна называть себя, а не сваливать всё в одну.
+        XCTAssertEqual(PrayerSource(name: "ДУМ РТ", url: "", sha256: "x").rejectionReason,
+                       "no-source-url")
+        XCTAssertEqual(PrayerSource(name: "Sajda", url: "https://sajda.app",
+                                    sha256: "x").rejectionReason, "qa-only-source")
+        XCTAssertEqual(PrayerSource(name: " ", url: "https://x.ru",
+                                    sha256: "x").rejectionReason, "no-name")
+        XCTAssertEqual(PrayerSource(name: "ДУМ РТ", url: "https://dumrt.ru/x.xlsx",
+                                    sha256: " ").rejectionReason, "no-source-hash")
+    }
+
+    /// Два годовых файла дают два города с одним названием: выбирать надо
+    /// тот, чьё покрытие включает запрошенный день.
+    func testOverlappingCatalogsPickCoveringYear() throws {
+        func city(_ id: String, from: String, to: String, day: PrayerDay,
+                  source: String) -> CityPrayerSchedule {
+            CityPrayerSchedule(
+                id: id, name: grozny.name, timeZone: grozny.timeZoneID,
+                coverageStatus: "complete", coverageStart: from, coverageEnd: to,
+                releaseStatus: "test",
+                source: PrayerSource(name: source, url: "https://example.org/schedule.xlsx", sha256: "fixture"),
+                days: [day])
+        }
+        let old = city("y2026", from: "2026-01-01", to: "2026-12-31",
+                       day: PrayerDay(date: "2026-08-27",
+                                      times: ["01:11", "02:22", "03:33", "04:44", "05:55", "06:56"]),
+                       source: "ЦДУМ России")
+        let new = city("y2027", from: "2027-01-01", to: "2027-12-31",
+                       day: PrayerDay(date: "2027-08-27",
+                                      times: ["01:12", "02:23", "03:34", "04:45", "05:56", "06:57"]),
+                       source: "ДУМ РТ")
+        let catalog = PrayerCatalog(
+            schemaVersion: 1, year: 2027, cityCount: 2,
+            completeCityCount: 2, partialCityCount: 0,
+            cities: [old, new], sourceLabel: nil)
+
+        let in2026 = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 27)))
+        let in2027 = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2027, month: 8, day: 27)))
+        XCTAssertEqual(catalog.city(named: grozny.name, on: in2026)?.id, "y2026")
+        XCTAssertEqual(catalog.city(named: grozny.name, on: in2027)?.id, "y2027")
+        // Без даты выбирать не из чего — отказ вместо угадывания.
+        XCTAssertNil(catalog.city(named: grozny.name))
+    }
+
+    /// Годовые файлы переиспользуют одни и те же идентификаторы: провайдер
+    /// обязан взять день ИЗ ВЫБРАННОГО снимка, а не из первого с таким id.
+    func testCollidingIdentifiersDoNotLeakDaysAcrossSnapshots() throws {
+        func snapshot(from: String, to: String, day: PrayerDay,
+                      source: String) -> CityPrayerSchedule {
+            CityPrayerSchedule(
+                id: "город", name: grozny.name, timeZone: grozny.timeZoneID,
+                coverageStatus: "complete", coverageStart: from, coverageEnd: to,
+                releaseStatus: "test",
+                source: PrayerSource(name: source, url: "https://example.org/schedule.xlsx", sha256: "fixture"),
+                days: [day])
+        }
+        let catalog = PrayerCatalog(
+            schemaVersion: 1, year: 2027, cityCount: 2,
+            completeCityCount: 2, partialCityCount: 0,
+            cities: [
+                snapshot(from: "2026-01-01", to: "2026-12-31",
+                         day: PrayerDay(date: "2026-08-27",
+                                        times: ["01:11", "02:22", "03:33", "04:44", "05:55", "06:56"]),
+                         source: "ЦДУМ России"),
+                snapshot(from: "2027-01-01", to: "2027-12-31",
+                         day: PrayerDay(date: "2027-08-27",
+                                        times: ["07:11", "08:22", "09:33", "10:44", "11:55", "12:56"]),
+                         source: "ДУМ РТ"),
+            ],
+            sourceLabel: nil)
+        let provider = ScheduleTablePrayerProvider(catalog: catalog)
+
+        let date2027 = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2027, month: 8, day: 27)))
+        let times = try XCTUnwrap(provider.times(on: date2027, city: grozny))
+        XCTAssertEqual(times.source.label, "ДУМ РТ")
+        let hour = grozny.calendar.component(.hour, from: try XCTUnwrap(times.fajr))
+        XCTAssertEqual(hour, 7, "взят день из снимка 2026 года")
+    }
+
+    /// Сводный каталог: у каждого города своя подпись. Общий ярлык не
+    /// имеет права переименовать чужой муфтият.
+    func testCitySourceWinsOverCatalogWideLabel() throws {
+        let day = PrayerDay(date: "2026-08-27",
+                            times: ["04:00", "05:30", "12:10", "16:00", "18:50", "20:30"])
+        let city = CityPrayerSchedule(
+            id: "город", name: grozny.name, timeZone: grozny.timeZoneID,
+            coverageStatus: "complete", coverageStart: day.date, coverageEnd: day.date,
+            releaseStatus: "test",
+            source: PrayerSource(name: "ЦДУМ России", url: "https://example.org/schedule.xlsx", sha256: "fixture"),
+            days: [day]
+        )
+        let catalog = PrayerCatalog(
+            schemaVersion: 1, year: 2026, cityCount: 1,
+            completeCityCount: 1, partialCityCount: 0, cities: [city],
+            sourceLabel: "ДУМ РТ"
+        )
+        let date = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 27)))
+        let times = try XCTUnwrap(ScheduleTablePrayerProvider(catalog: catalog)
+            .times(on: date, city: grozny))
+        XCTAssertEqual(times.source.label, "ЦДУМ России",
+                       "подпись обязана принадлежать источнику ГОРОДА")
+    }
+
+    /// Каталог приходит из чужого конвейера с кириллическими id, наши —
+    /// латиницей: сопоставление идёт по нормализованному названию.
+    func testCatalogMatchesCityByNameNotIdentifier() throws {
+        let source = PrayerSource(name: "ДУМ РТ", url: "https://example.org/schedule.xlsx", sha256: "fixture")
+        let day = PrayerDay(date: "2026-08-27",
+                            times: ["01:11", "02:22", "03:33", "04:44", "05:55", "06:56"])
+        let city = CityPrayerSchedule(
+            id: "казань", name: "Казань", timeZone: grozny.timeZoneID,
+            coverageStatus: "complete", coverageStart: day.date, coverageEnd: day.date,
+            releaseStatus: "permissionRequired", source: source, days: [day]
+        )
+        let catalog = PrayerCatalog(
+            schemaVersion: 1, year: 2026, cityCount: 1,
+            completeCityCount: 1, partialCityCount: 0, cities: [city], sourceLabel: "ДУМ РТ"
+        )
+        XCTAssertNotNil(catalog.city(named: "казань"), "регистр не должен мешать")
+        XCTAssertNotNil(catalog.city(named: "Казань"))
+        XCTAssertNil(catalog.city(named: "Москва"))
+        // Одноимённые города — отказ, а не «первый попавшийся».
+        let twin = CityPrayerSchedule(
+            id: "казань-2", name: "Казань", timeZone: grozny.timeZoneID,
+            coverageStatus: "complete", coverageStart: day.date, coverageEnd: day.date,
+            releaseStatus: "permissionRequired", source: source, days: [day]
+        )
+        let ambiguous = PrayerCatalog(
+            schemaVersion: 1, year: 2026, cityCount: 2,
+            completeCityCount: 2, partialCityCount: 0,
+            cities: [city, twin], sourceLabel: "ДУМ РТ"
+        )
+        XCTAssertNil(ambiguous.city(named: "Казань"),
+                     "при неоднозначности каталог обязан отказаться, а не угадывать")
+        XCTAssertEqual(PrayerCatalog.normalized("Набережные  Челны"), "набережные челны")
+        XCTAssertEqual(PrayerCatalog.normalized("Ростов-на-Дону"),
+                       PrayerCatalog.normalized("ростов на дону"))
     }
 
     func testNotificationIdentifierIsStableForShiftedTime() throws {

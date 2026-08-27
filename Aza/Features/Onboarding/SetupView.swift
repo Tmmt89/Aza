@@ -189,7 +189,7 @@ struct SetupView: View {
             HStack(spacing: 8) {
                 Picker("", selection: $cityID) {
                     Text("Город не выбран").tag("")
-                    ForEach(PrayerStore.cities) { city in
+                    ForEach(model.prayer.allCities) { city in
                         Text(city.name).tag(city.id)
                     }
                 }
@@ -211,7 +211,7 @@ struct SetupView: View {
             switch locator.state {
             case let .found(id, distance):
                 // Честно: ближайший ПРОФИЛЬ из списка, а не «ваш город».
-                hint("Ближайший профиль: \(PrayerStore.cities.first { $0.id == id }?.name ?? id) · \(distance) км")
+                hint("Ближайший профиль: \(model.prayer.allCities.first { $0.id == id }?.name ?? id) · \(distance) км")
             case .denied:
                 warn("Геолокация запрещена — выберите город вручную")
             case let .failed(message):
@@ -232,20 +232,29 @@ struct SetupView: View {
     /// Спецификация §4.3 требует называть источник, а не молчать о нём.
     @ViewBuilder
     private var sourceStatus: some View {
+        // Три состояния, а не два. Третье — «времён нет вообще»: у города
+        // из официального каталога может не быть координат, и когда день
+        // выходит за покрытие таблицы, считать не по чему. Раньше здесь
+        // писалось «рассчитано по координатам», хотя расчёта не было.
         let table = model.prayer.hasVerifiedTable
+        let unavailable = model.prayer.unavailableReason
+        let hasTimes = unavailable == nil
         HStack(alignment: .top, spacing: 6) {
-            Image(systemName: table ? "checkmark.seal.fill" : "function")
+            Image(systemName: !hasTimes ? "exclamationmark.triangle.fill"
+                                        : (table ? "checkmark.seal.fill" : "function"))
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(table ? AzaStyle.acid : AzaStyle.muted)
+                .foregroundStyle(!hasTimes ? AzaStyle.warning
+                                           : (table ? AzaStyle.acid : AzaStyle.muted))
             VStack(alignment: .leading, spacing: 2) {
-                Text(table
-                     ? "Источник: \(model.prayer.source?.label ?? "расписание")"
+                Text(!hasTimes ? "Времён на сегодня нет"
+                     : table ? "Источник: \(model.prayer.source?.label ?? "расписание")"
                      : "Готового расписания нет — считаем сами")
                     .font(AzaStyle.label)
                     .foregroundStyle(AzaStyle.ink)
-                Text(table
-                     ? "Времена берутся из добавленного расписания."
-                     : "Сохранённого расписания для этого города нет, поэтому время рассчитано автоматически по координатам (\(model.prayer.source?.label ?? "расчёт")).")
+                Text(unavailable
+                     ?? (table
+                         ? "Времена берутся из добавленного расписания."
+                         : "Сохранённого расписания для этого города нет, поэтому время рассчитано автоматически по координатам (\(model.prayer.source?.label ?? "расчёт"))."))
                     .font(AzaStyle.caption)
                     .foregroundStyle(AzaStyle.faint)
                     .fixedSize(horizontal: false, vertical: true)

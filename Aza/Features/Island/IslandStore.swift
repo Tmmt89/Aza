@@ -155,7 +155,6 @@ final class IslandStore: ObservableObject {
     @Published var showsFavorites = false
     @Published var searchQuery = ""
 
-    let prayerCatalog: PrayerCatalog
     let startup: ClipboardStartup
     let dictation: DictationController
     /// Времена намаза: таблица, если есть, иначе расчёт (§4.3).
@@ -170,12 +169,10 @@ final class IslandStore: ObservableObject {
 
     init(startup: ClipboardStartup,
          dictation: DictationController,
-         prayer: PrayerStore,
-         prayerCatalog: PrayerCatalog = .bundled) {
+         prayer: PrayerStore) {
         self.startup = startup
         self.dictation = dictation
         self.prayer = prayer
-        self.prayerCatalog = prayerCatalog
 
         // Остров живёт поверх чужих ObservableObject — пересобираем вид,
         // когда меняется история, окно отмены или состояние диктовки.
@@ -248,6 +245,20 @@ final class IslandStore: ObservableObject {
     func prayerSourceLabel(for occurrence: PrayerOccurrence?) -> String {
         occurrence?.source?.label ?? prayerSourceLabel
     }
+
+    /// Подпись ближайшего намаза, ЕСЛИ она отличается от подписи
+    /// сегодняшней сетки. После иши ближайший намаз уже завтрашний, а на
+    /// границе покрытия расписания завтра может считаться расчётом —
+    /// одна общая подпись на два разных источника и есть то самое молчащее
+    /// смешивание.
+    func differingSourceLabel(for occurrence: PrayerOccurrence?) -> String? {
+        guard let label = occurrence?.source?.label,
+              label != prayer.source?.label else { return nil }
+        return label
+    }
+
+    /// Почему времён нет. Пустой экран без объяснения — тоже обман.
+    var prayerUnavailableReason: String? { prayer.unavailableReason }
 
     var commands: ClipboardCommands { startup.commands }
     var entries: [ClipEntry] { startup.store?.entries ?? [] }

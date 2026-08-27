@@ -150,6 +150,15 @@ private struct IdleIslandView: View {
                     Text(next.map { "в \($0.time)" } ?? "расписание")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(AzaStyle.muted)
+                    // Источник обязан быть виден и здесь: время расчёта без
+                    // подписи «Расчёт …» выглядит как выверенное расписание.
+                    if next != nil {
+                        Text(store.prayerSourceLabel(for: next))
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(AzaStyle.faint)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
                 }
                 .frame(width: 92, alignment: .trailing)
             }
@@ -213,6 +222,19 @@ private struct HomeIslandView: View {
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(AzaStyle.muted)
                             }
+                            // Ближайший намаз из другого источника, чем
+                            // сетка ниже — говорим об этом прямо.
+                            if let other = store.differingSourceLabel(for: next) {
+                                Text("источник: \(other)")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(AzaStyle.warning)
+                            }
+                            if let reason = store.prayerUnavailableReason {
+                                Text(reason)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(AzaStyle.warning)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
 
                         HStack(spacing: 4) {
@@ -243,7 +265,11 @@ private struct HomeIslandView: View {
                                     .foregroundStyle(AzaStyle.ink)
                             }
                             Spacer()
-                            Text(store.prayerSourceLabel(for: next))
+                            // Капсула подписывает СЕГОДНЯШНЮЮ сетку. Раньше
+                            // она брала источник ближайшего намаза — а он
+                            // после иши уже завтрашний и на границе покрытия
+                            // приходит из другого источника.
+                            Text(store.prayerSourceLabel)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(AzaStyle.acid)
                                 .lineLimit(1)
@@ -251,7 +277,7 @@ private struct HomeIslandView: View {
                                 .padding(.vertical, 5)
                                 .background(AzaStyle.deep, in: Capsule())
                                 .overlay(Capsule().stroke(AzaStyle.line))
-                                .help(next?.source?.caveat ?? store.prayerSourceLabel(for: next))
+                                .help(store.prayer.source?.caveat ?? store.prayerSourceLabel)
                         }
                         Spacer(minLength: 4)
                         Button {

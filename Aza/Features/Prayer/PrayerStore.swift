@@ -99,6 +99,31 @@ final class PrayerStore: ObservableObject {
                    timeZoneID: timeZone, madhab: madhab, method: .muslimWorldLeague)
     }
 
+    /// Полный список для выбора: наши города с координатами плюс города
+    /// из установленного каталога расписаний. У последних координат нет —
+    /// они работают по готовой таблице, а не по расчёту.
+    static func availableCities(
+        catalog: PrayerCatalog? = ScheduleTablePrayerProvider.userProvided()?.catalog
+    ) -> [PrayerCity] {
+        var result = cities
+        // Множество пополняется на ходу: один город приходит из каждого
+        // годового файла, и без этого он попал бы в список несколько раз —
+        // с одинаковым названием и разными идентификаторами.
+        var known = Set(cities.map { PrayerCatalog.normalized($0.name) })
+        for entry in catalog?.cities ?? [] {
+            let key = PrayerCatalog.normalized(entry.name)
+            guard known.insert(key).inserted else { continue }
+            result.append(PrayerCity(
+                id: "catalog:" + key, name: entry.name,
+                latitude: nil, longitude: nil,
+                timeZoneID: entry.timeZone, madhab: .hanafi,
+                method: .muslimWorldLeague))
+        }
+        return result.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
     /// Уведомления берут времена ОТСЮДА же: иначе они разошлись бы с тем,
     /// что показано на экране, вместе с подписью источника.
     let notifications = PrayerNotifications()
@@ -146,12 +171,15 @@ final class PrayerStore: ObservableObject {
         azaDebugLog("Aza: prayer settings loaded city=\(stored ?? "-")")
         // Присваивание запускает didSet: refresh и перевзвод таймера
         // произойдут там, второй раз их звать не нужно.
-        selectedCityID = Self.cities.contains { $0.id == stored } ? stored : nil
+        selectedCityID = allCities.contains { $0.id == stored } ? stored : nil
         if selectedCityID == nil { refresh() }
     }
 
+    /// Города для выбора: с координатами и/или с расписанием.
+    private(set) lazy var allCities: [PrayerCity] = Self.availableCities()
+
     var selectedCity: PrayerCity? {
-        Self.cities.first { $0.id == selectedCityID }
+        allCities.first { $0.id == selectedCityID }
     }
 
     var source: PrayerTimesSource? { today?.source }
@@ -159,6 +187,16 @@ final class PrayerStore: ObservableObject {
     /// Есть ли для выбранного города готовая таблица. Пользователь должен
     /// понимать, что показано: выверенное расписание или наш расчёт.
     var hasVerifiedTable: Bool { today?.source.isVerifiedTable == true }
+
+    /// Почему времён нет — одна формулировка на все экраны. Пустой экран
+    /// без причины пользователь читает как поломку.
+    var unavailableReason: String? {
+        guard today == nil else { return nil }
+        guard selectedCity != nil else {
+            return "Выберите город, чтобы видеть время намаза"
+        }
+        return "Расписание не покрывает сегодняшний день, а рассчитать нечем — выберите ближайший крупный город"
+    }
 
     /// Куда класть таблицы, если они появятся.
     static var scheduleFolder: URL {
@@ -187,6 +225,7 @@ final class PrayerStore: ObservableObject {
             return
         }
         today = times(for: city, on: now)
+        azaDebugLog("Aza: prayer source=\(today?.source.label ?? "-") table=\(today?.source.isVerifiedTable == true ? 1 : 0) city=\(city.name)")
         rescheduleNotifications(now: now)
     }
 

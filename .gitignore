@@ -1,6 +1,7 @@
 .DS_Store
 .build/
 DerivedData/
+build_dd/
 xcuserdata/
 *.xcuserstate
 .playwright-cli/
@@ -16,3 +17,10 @@ work/
 Tools/BuildChechenLexicon/datasets/
 Tools/BuildChechenLexicon/out_lexicon/
 Tools/BuildChechenLexicon/config.json
+
+# Официальные расписания намаза: источники не очищены для распространения.
+# Каталог живёт локально в Application Support/Aza/prayer-schedules,
+# в релиз попадёт только после письменного разрешения правообладателя
+# (см. docs/PLAN-prayer-schedules.md).
+prayer-schedules*.json
+Aza/Resources/prayer-schedules*.json
