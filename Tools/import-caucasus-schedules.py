@@ -51,11 +51,30 @@ def valid_day(times):
     return minutes == sorted(minutes) and len(set(minutes)) == 6
 
 
+# Часовые пояса берутся отсюда, а не подставляются московским: для
+# Екатеринбурга, Самары и Волгограда это сдвиг на час-два, то есть
+# заведомо неверные времена намаза.
+TIME_ZONES = {
+    "Грозный": "Europe/Moscow",
+    "Махачкала": "Europe/Moscow",
+    "Нальчик": "Europe/Moscow",
+    "Казань": "Europe/Moscow",
+    "Москва": "Europe/Moscow",
+    "Ростов-на-Дону": "Europe/Moscow",
+    "Самара": "Europe/Samara",
+    "Волгоград": "Europe/Volgograd",
+    "Екатеринбург": "Asia/Yekaterinburg",
+}
+
+
 def city_entry(city_id, name, source, days):
+    zone = TIME_ZONES.get(name)
+    if zone is None:
+        raise ValueError(f"{name}: часовой пояс неизвестен — добавьте его в TIME_ZONES")
     return {
         "id": city_id,
         "name": name,
-        "timeZone": "Europe/Moscow",
+        "timeZone": zone,
         "coverageStatus": "complete",
         "coverageStart": f"{YEAR}-01-01",
         "coverageEnd": f"{YEAR}-12-31",
@@ -87,11 +106,23 @@ def read_makhachkala(root):
     }, days)
 
 
-def read_grozny(path):
-    """Годовой XLSX: лист «Весь год», колонки Дата, День, Месяц и шесть
-    времён. Данные сверены с публикациями ДУМ ЧР — см. документацию."""
+def read_govzalla_xlsx(path, source_name):
+    """Годовой XLSX формата «Ламазан хенаш»: лист «Весь год», колонки
+    Дата, День, Месяц и шесть времён. Название города берётся из
+    заголовка, чтобы оно не разъезжалось с содержимым файла.
+
+    Внимание: такие файлы бывают и настоящей таблицей муфтията, и
+    расчётом. Отличать — по фиксированному зухру (см. документацию);
+    скрипт этого НЕ решает, решение принимает человек.
+    """
     import openpyxl
-    sheet = openpyxl.load_workbook(path, data_only=True)["Весь год"]
+    book = openpyxl.load_workbook(path, data_only=True)
+    sheet = book["Весь год"]
+    title = str(sheet.cell(1, 1).value or "")
+    parts = [p.strip() for p in title.split("•")]
+    if len(parts) < 2 or not parts[1]:
+        raise ValueError(f"{os.path.basename(path)}: не разобрал город из заголовка «{title}»")
+    name = parts[1]
     found = {}
     for row in sheet.iter_rows(min_row=2, values_only=True):
         if not row or not isinstance(row[0], str):
@@ -112,10 +143,10 @@ def read_grozny(path):
         for day in range(1, count + 1):
             times = found.get((month_index, day))
             if times is None:
-                raise ValueError(f"Грозный: нет дня {month_index:02d}-{day:02d}, разобрано {len(found)}")
+                raise ValueError(f"{name}: нет дня {month_index:02d}-{day:02d}, разобрано {len(found)}")
             days.append({"date": f"{YEAR}-{month_index:02d}-{day:02d}", "times": times})
-    return city_entry("грозный", "Грозный", {
-        "name": "ДУМ ЧР",
+    return city_entry(name.lower(), name, {
+        "name": source_name,
         "url": "https://govzalla.com/ламазан-хенаш-время-молитв",
         "sha256": sha256(path),
     }, days)
@@ -170,15 +201,20 @@ def main():
     catalog = json.load(io.open(catalog_path, encoding="utf-8"))
     known = {c["name"] for c in catalog["cities"]}
 
-    grozny_path = None
-    if "--grozny" in sys.argv:
-        grozny_path = sys.argv[sys.argv.index("--grozny") + 1]
+    # --xlsx ПУТЬ ПОДПИСЬ — годовой файл формата «Ламазан хенаш».
+    # --replace разрешает заменить город, уже лежащий в каталоге: без
+    # него существующая запись никогда не перезаписывается молча.
+    extra = []
+    for i, arg in enumerate(sys.argv):
+        if arg == "--xlsx":
+            extra.append((sys.argv[i + 1], sys.argv[i + 2]))
+    replace = "--replace" in sys.argv
 
     readers = [read_makhachkala, read_nalchik]
-    if grozny_path:
-        readers.append(lambda _root: read_grozny(grozny_path))
+    for path, label in extra:
+        readers.append(lambda _root, p=path, l=label: read_govzalla_xlsx(p, l))
 
-    added = []
+    added, replaced = [], []
     for reader in readers:
         try:
             entry = reader(root)
@@ -186,18 +222,26 @@ def main():
             print("ПРОПУЩЕН:", error)
             continue
         if entry["name"] in known:
-            print("уже в каталоге:", entry["name"])
+            if not replace:
+                print("уже в каталоге:", entry["name"])
+                continue
+            replaced.append(entry)
+            print(f"ЗАМЕНА: {entry['name']} — {len(entry['days'])} дней, {entry['source']['name']}")
             continue
         added.append(entry)
         print(f"готов: {entry['name']} — {len(entry['days'])} дней, {entry['source']['name']}")
 
-    if not added:
+    if not added and not replaced:
         print("нечего добавлять")
         return 1
     if not write:
-        print("\nпробный прогон; добавить: --write")
+        print("\nпробный прогон; применить: --write")
         return 0
 
+    if replaced:
+        names = {e["name"] for e in replaced}
+        catalog["cities"] = [c for c in catalog["cities"] if c["name"] not in names]
+        catalog["cities"].extend(replaced)
     catalog["cities"].extend(added)
     catalog["cities"].sort(key=lambda c: c["name"])
     catalog["cityCount"] = len(catalog["cities"])

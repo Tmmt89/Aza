@@ -165,16 +165,18 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
         let directory = ClipboardStore.defaultStorageURL()
             .deletingLastPathComponent()
             .appendingPathComponent("prayer-schedules", isDirectory: true)
-        var files = bundledCatalogURLs()
-        files += (try? FileManager.default.contentsOfDirectory(
+        let bundled = bundledCatalogURLs()
+        let userFiles = ((try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
-        )) ?? []
+        )) ?? []).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let files = bundled + userFiles
         // Файлов может быть несколько (годовые каталоги живут рядом), и
         // брать «первый попавшийся» нельзя: подходящий год мог оказаться
         // вторым. Собираем города из ВСЕХ пригодных файлов — какой
         // конкретно подходит запрошенному дню, решает уже поиск по
         // покрытию.
         var cities: [CityPrayerSchedule] = []
+        var userCityNames: Set<String> = []
         var year = 0
         for file in files where file.pathExtension.lowercased() == "json" {
             guard let data = boundedData(from: file),
@@ -187,6 +189,19 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
                 azaDebugLog("Aza: prayer catalog rejected file=\(file.lastPathComponent) "
                             + "reasons=\(reasons.sorted().joined(separator: ","))")
                 continue
+            }
+            // Свой файл ПЕРЕКРЫВАЕТ поставляемый для тех же городов.
+            // Иначе один и тот же город приходил дважды, различить их по
+            // покрытию было нельзя, и он молча уходил в расчёт — ровно
+            // это и случалось, когда рядом лежала копия каталога.
+            if !bundled.contains(file) {
+                let names = Set(catalog.cities.map { PrayerCatalog.normalized($0.name) })
+                userCityNames.formUnion(names)
+                cities.removeAll { names.contains(PrayerCatalog.normalized($0.name)) }
+            } else if !userCityNames.isEmpty {
+                // Поставляемый читается первым, так что сюда не попадём;
+                // проверка оставлена на случай смены порядка.
+                cities.removeAll { userCityNames.contains(PrayerCatalog.normalized($0.name)) }
             }
             cities.append(contentsOf: catalog.cities)
             year = max(year, catalog.year)

@@ -345,17 +345,30 @@ final class PrayerTests: XCTestCase {
     func testBundledCatalogResolvesCaucasusCitiesToTables() throws {
         let provider = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(),
                                      "каталог не найден в бандле")
+        // Подпись обязана называть ФАКТИЧЕСКИЙ источник записи. Казань и
+        // Грозный — таблицы муфтиятов; пять городов заменены по решению
+        // владельца файлами govzalla, и подпись это показывает, а не
+        // выдаёт их за ЦДУМ.
         let expected = [
             ("Грозный", "ДУМ ЧР"),
+            ("Казань", "ДУМ РТ"),
             ("Махачкала", "Муфтият РД"),
             ("Нальчик", "ДУМ КБР"),
+            ("Москва", "govzalla.com"),
+            ("Волгоград", "govzalla.com"),
         ]
         let date = try XCTUnwrap(grozny.calendar.date(
             from: DateComponents(year: 2026, month: 8, day: 28)))
         for (name, label) in expected {
+            // Часовой пояс берём из НАШЕГО списка городов: таблица
+            // отдаётся только при совпадении пояса, и подставлять всем
+            // московский значило бы проверять не то.
+            let zone = try XCTUnwrap(
+                PrayerStore.cities.first { $0.name == name }?.timeZoneID,
+                "\(name): нет в списке городов")
             let city = PrayerCity(id: "test:" + name, name: name,
                                   latitude: nil, longitude: nil,
-                                  timeZoneID: "Europe/Moscow", madhab: .shafi,
+                                  timeZoneID: zone, madhab: .shafi,
                                   method: .muslimWorldLeague)
             let times = try XCTUnwrap(provider.times(on: date, city: city),
                                       "\(name): таблицы нет")
