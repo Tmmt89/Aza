@@ -82,10 +82,12 @@ final class PrayerStore: ObservableObject {
         city("medina", "Медина", 24.5247, 39.5692, "Asia/Riyadh", .shafi),
         city("cairo", "Каир", 30.0444, 31.2357, "Africa/Cairo", .shafi),
         city("almaty", "Алматы", 43.2220, 76.8512, "Asia/Almaty", .hanafi),
+        city("karaganda", "Караганда", 49.8047, 73.1094, "Asia/Almaty", .hanafi),
         city("tashkent", "Ташкент", 41.2995, 69.2401, "Asia/Tashkent", .hanafi),
         city("bishkek", "Бишкек", 42.8746, 74.5698, "Asia/Bishkek", .hanafi),
         city("berlin", "Берлин", 52.5200, 13.4050, "Europe/Berlin", .hanafi),
         city("london", "Лондон", 51.5074, -0.1278, "Europe/London", .hanafi),
+        city("prague", "Прага", 50.0755, 14.4378, "Europe/Prague", .hanafi),
     ]
     .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
@@ -102,9 +104,11 @@ final class PrayerStore: ObservableObject {
     /// Полный список для выбора: наши города с координатами плюс города
     /// из установленного каталога расписаний. У последних координат нет —
     /// они работают по готовой таблице, а не по расчёту.
-    static func availableCities(
-        catalog: PrayerCatalog? = ScheduleTablePrayerProvider.userProvided()?.catalog
-    ) -> [PrayerCity] {
+    /// Каталог берётся ВНУТРИ, а не значением по умолчанию: значения по
+    /// умолчанию вычисляются в контексте вызывающего, а он бывает вне
+    /// главного актора — в Swift 6 это уже ошибка, а не предупреждение.
+    static func availableCities(catalog: PrayerCatalog? = nil) -> [PrayerCity] {
+        let catalog = catalog ?? ScheduleTablePrayerProvider.userProvided()?.catalog
         var result = cities
         // Множество пополняется на ходу: один город приходит из каждого
         // годового файла, и без этого он попал бы в список несколько раз —

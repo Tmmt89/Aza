@@ -45,11 +45,11 @@ struct ClipEntry: Codable, Equatable, Identifiable {
 @MainActor
 final class ClipboardStore: ObservableObject {
 
-    static let maxEntries = 200
-    static let maxItemCharacters = 100_000
+    nonisolated static let maxEntries = 200
+    nonisolated static let maxItemCharacters = 100_000
     /// Спецификация §8.8: максимум на отдельный объект и общий бюджет.
-    static let maxObjectBytes = 100 * 1024 * 1024
-    static let totalByteBudget = 2 * 1024 * 1024 * 1024
+    nonisolated static let maxObjectBytes = 100 * 1024 * 1024
+    nonisolated static let totalByteBudget = 2 * 1024 * 1024 * 1024
 
     /// Срок хранения в днях (спецификация §8.8): 1/7/30/365, 0 — бессрочно.
     static let retentionKey = "ClipboardRetentionDays"
@@ -671,9 +671,13 @@ final class ClipboardStore: ObservableObject {
         // лежит копия нечитаемой истории: копия зашифрована ДРУГИМ
         // ключом, и вполне возможно, что именно тем, который сейчас в
         // этом файле. Перезапись «поверх» уничтожила бы его молча.
+        // Сравнение намеренно через Optional: если прежний ключ не
+        // прочитался, `current` равен nil, nil никогда не равен байтам
+        // нового — и мы откладываем файл. Отказ чтения обязан вести к
+        // сохранению, а не к тихой перезаписи.
+        let currentKeyBytes = try? Data(contentsOf: url)
         if backupExists(), fileState(at: url) != .absent,
-           let current = try? Data(contentsOf: url),
-           current != rescued.withUnsafeBytes({ Data($0) }) {
+           currentKeyBytes != rescued.withUnsafeBytes({ Data($0) }) {
             guard quarantineSpoiledKey(at: url) else {
                 NSLog("Aza: a backup exists and the old key could not be set aside — "
                       + "leaving everything as is, history is read-only this session")
@@ -760,7 +764,7 @@ final class ClipboardStore: ObservableObject {
     private nonisolated static func keychainKey() -> (SymmetricKey, Bool) {
         let service = "com.tmmt.Aza.clipboard"
         let account = "history-key"
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -891,7 +895,7 @@ final class ClipboardStore: ObservableObject {
     /// Итог обращения к связке. Важно отличать «ответ получен» от «не
     /// смогли спросить»: на первом можно строить решение «больше не
     /// спрашивать», на втором — нельзя.
-    enum KeychainLookup {
+    nonisolated enum KeychainLookup {
         case found(SymmetricKey)
         /// Элемента нет или он не похож на ключ — ответ определённый.
         case missing
@@ -945,7 +949,7 @@ final class ClipboardStore: ObservableObject {
     /// удалось прочитать»: обе давали true. На этом строилось решение
     /// удалить файловый ключ — то есть временный сбой чтения приводил к
     /// уничтожению единственного годного ключа.
-    enum HistoryState {
+    nonisolated enum HistoryState {
         /// Истории нет — терять нечего.
         case absent
         /// Ключ открывает историю.
@@ -973,7 +977,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// Итог попытки достать настоящий ключ из испорченных байтов.
-    enum Salvage {
+    nonisolated enum Salvage {
         /// Ключ найден и подтверждён расшифровкой истории.
         case recovered(SymmetricKey)
         /// Истории нет — терять нечего, байты можно заменять.
@@ -1054,9 +1058,21 @@ final class ClipboardStore: ObservableObject {
     /// обычных запусков: на первом создаётся пустая история новым ключом,
     /// на втором он её открывает, и файл, открывавший копию, удаляется.
     private nonisolated static func disposeRedundantDebugKey(given working: SymmetricKey) {
-        guard !backupExists() else { return }
-        guard historyState(for: working) == .opens || isSafeToDiscard(working) else { return }
+        guard shouldDiscardKey(working: working, historyURL: defaultStorageURL()) else { return }
         discardKeyFile(at: debugKeyURL())
+    }
+
+    /// Само решение — отдельно от файловых действий и с явным путём:
+    /// иначе его нельзя проверить тестом, не трогая настоящую историю
+    /// пользователя.
+    nonisolated static func shouldDiscardKey(working: SymmetricKey, historyURL: URL) -> Bool {
+        // Копия перекрывает всё: она зашифрована ДРУГИМ ключом, и им
+        // вполне может быть этот файл.
+        guard fileState(at: unreadableBackupURL(for: historyURL)) == .absent else { return false }
+        switch historyState(for: working, at: historyURL) {
+        case .opens, .absent: return true
+        case .doesNotOpen, .unreadable: return false
+        }
     }
 
     /// Лежит ли рядом копия нечитаемой истории. `.unknown` считаем «лежит»:
@@ -1116,7 +1132,7 @@ final class ClipboardStore: ObservableObject {
     /// Есть ли файл. Именно ТРИ состояния: `fileExists` возвращает false и
     /// когда файла нет, и когда проверить не удалось, а решения об
     /// удалении ключей на такой ответ опирать нельзя.
-    enum FileState { case absent, present, unknown }
+    nonisolated enum FileState { case absent, present, unknown }
 
     /// «Файла нет» приходит ДВУМЯ разными кодами: fileNoSuchFile (4) и
     /// fileReadNoSuchFile (260). Принимаем оба для ЛЮБОЙ операции: какой
