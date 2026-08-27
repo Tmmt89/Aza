@@ -264,24 +264,46 @@ final class ClipboardStoreTests: XCTestCase {
         }
     }
 
-    /// Пока рядом лежит копия нечитаемой истории, файл ключа не
-    /// удаляется НИ ПО КАКОМУ основанию: копия зашифрована другим ключом,
-    /// и им вполне может быть этот файл. Раньше хватало двух обычных
-    /// запусков, чтобы его потерять.
-    func testBackupBlocksKeyDisposalEvenWhenHistoryOpens() throws {
-        let support = ClipboardStore.defaultStorageURL()
-        let backup = ClipboardStore.unreadableBackupURL(for: support)
-        let manager = FileManager.default
-        // Имя копии обязано выводиться одной формулой на весь код.
-        XCTAssertEqual(backup.lastPathComponent, "clipboard-history.unreadable.bin")
+    /// Решение об удалении файла ключа. Копия нечитаемой истории
+    /// перекрывает ВСЁ: она зашифрована другим ключом, и им вполне может
+    /// быть этот файл. Раньше хватало двух обычных запусков, чтобы его
+    /// потерять — ветка «рабочий ключ открывает историю» шла мимо
+    /// проверки копии.
+    func testBackupBlocksKeyDisposalOnEveryGround() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = directory.appendingPathComponent("clipboard-history.bin")
+        let backup = ClipboardStore.unreadableBackupURL(for: history)
+        XCTAssertEqual(backup.lastPathComponent, "clipboard-history.unreadable.bin",
+                       "имя копии обязано выводиться одной формулой на весь код")
 
-        // Настоящая копия пользователя не трогается: если её нет, кладём
-        // свою и убираем за собой.
-        let existed = manager.fileExists(atPath: backup.path)
-        if !existed { try Data(repeating: 0xAB, count: 32).write(to: backup) }
-        defer { if !existed { try? manager.removeItem(at: backup) } }
+        let other = SymmetricKey(data: Data(repeating: 0x11, count: 32))
 
-        XCTAssertTrue(manager.fileExists(atPath: backup.path))
+        // Истории нет и копии нет — терять нечего, удалять можно.
+        XCTAssertTrue(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
+
+        // История открывается рабочим ключом — тоже можно.
+        let store = makeStore(at: history)
+        store.add(text: "запись", sourceAppBundleID: nil, sourceAppName: nil)
+        XCTAssertTrue(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
+
+        // История есть, но рабочий ключ её не открывает — нельзя:
+        // AES-GCM не отличает неверный ключ от повреждённых данных.
+        XCTAssertFalse(ClipboardStore.shouldDiscardKey(working: other, historyURL: history))
+
+        // Появилась копия — нельзя НИ ПО КАКОМУ основанию, включая то,
+        // на котором ключ терялся: рабочий ключ открывает историю.
+        try Data(repeating: 0xEE, count: 64).write(to: backup)
+        XCTAssertFalse(ClipboardStore.shouldDiscardKey(working: key, historyURL: history),
+                       "копия обязана перекрывать ветку «ключ открывает историю»")
+
+        // И при отсутствующей истории копия тоже защищает.
+        try FileManager.default.removeItem(at: history)
+        XCTAssertFalse(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
+
+        // Убрали копию — запрет снят.
+        try FileManager.default.removeItem(at: backup)
+        XCTAssertTrue(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
     }
 
     func testEncryptedRoundTripAndUnreadableGuard() throws {
