@@ -32,6 +32,19 @@ final class DictationController: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var status = "Диктовка: удерживайте ⌃⇧D"
+    /// Начало текущей записи — для таймера в острове.
+    @Published private(set) var recordingStartedAt: Date?
+
+    /// Язык, которым идёт/шла последняя диктовка (для подписи в острове).
+    private(set) var activeLanguage = DictationController.preferredLanguage == "auto"
+        ? "ru" : DictationController.preferredLanguage
+
+    /// mm:ss текущей записи.
+    var elapsedText: String {
+        guard let start = recordingStartedAt else { return "00:00" }
+        let seconds = Int(Date().timeIntervalSince(start))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
 
     /// Модель MVP: одна, multilingual small — терпимый русский при ~500 МБ.
     /// Выбор из трёх профилей (§5.4) появится вместе с онбордингом.
@@ -334,6 +347,7 @@ final class DictationController: ObservableObject {
             return
         }
         state = .recording
+        recordingStartedAt = Date()
         status = isLatched
             ? "Запись зафиксирована — нажмите ⌃⇧D, чтобы остановить"
             : "Запись… отпустите ⌃⇧D, чтобы вставить текст"
@@ -366,6 +380,7 @@ final class DictationController: ObservableObject {
         audio?.purgeAudioSamples(keepingLast: 0)
         audio = nil
         targetElement = nil
+        recordingStartedAt = nil
         // Сбрасывать в idle можно только из записи: во время загрузки
         // модели это открыло бы дверь параллельным загрузкам (guard в
         // keyDown пропускает только idle).
@@ -383,6 +398,20 @@ final class DictationController: ObservableObject {
         // В режиме фиксации отпускание клавиши ничего не значит — запись
         // остановит следующее нажатие.
         guard !isLatched else { return }
+        finishRecording()
+    }
+
+    /// Остановка записи из интерфейса (кнопка в острове, §5.1).
+    /// Не путать со `stop()`, который снимает хоткей и гасит контроллер.
+    func stopFromUI() {
+        guard state == .recording else { return }
+        // Пробную запись (диалог TCC) не распознаём: модели может не быть,
+        // и состояние застряло бы в .transcribing.
+        guard !isPermissionProbe else {
+            cancelRecording()
+            return
+        }
+        isLatched = false
         finishRecording()
     }
 
@@ -408,6 +437,7 @@ final class DictationController: ObservableObject {
         }
 
         state = .transcribing
+        recordingStartedAt = nil
         status = "Распознаю…"
         NSSound(named: "Pop")?.play()
         let element = targetElement
@@ -434,6 +464,7 @@ final class DictationController: ObservableObject {
                         decodeOptions: Self.options(for: language))
                 }
                 azaDebugLog("Aza: dictation language=\(language) results=\(results.count)")
+                self.activeLanguage = language
                 let text = results.map(\.text)
                     .joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)

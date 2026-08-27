@@ -5,6 +5,10 @@ struct ContentView: View {
     @ObservedObject var hotKey: GlobalHotKey
     @ObservedObject var clipboardStartup: ClipboardStartup
     @ObservedObject var dictation: DictationController
+    /// Явные подписки: команды и хранилище — отдельные ObservableObject,
+    /// и без них открытая панель не перерисовывалась бы на изменение
+    /// истории или окна «Отменить».
+    @ObservedObject var commands: ClipboardCommands
     /// Хранилище появляется после фонового получения ключа Keychain.
     private var clipboardStore: ClipboardStore? { clipboardStartup.store }
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
@@ -14,11 +18,8 @@ struct ContentView: View {
     @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
     @State private var pasteboardStatus = "Типы ещё не проверялись"
     @State private var pasteboardTypes = ""
-    @State private var copyStatus = ""
     @State private var searchText = ""
     @State private var visibleLimit = 10
-    @State private var lastDeleted: [ClipboardStore.Deleted] = []
-    @State private var undoToken = UUID()
     @State private var confirmMassDelete = false
     @State private var excludedApps = UserDefaults.standard
         .stringArray(forKey: ExcludedApps.userDefaultsKey) ?? []
@@ -136,7 +137,7 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.caption)
 
-                let visibleEntries = Self.filtered(
+                let visibleEntries = ClipboardCommands.filtered(
                     entries: clipboardStore.entries, query: searchText
                 )
 
@@ -148,7 +149,7 @@ struct ContentView: View {
                     ForEach(visibleEntries.prefix(visibleLimit)) { entry in
                         HStack(alignment: .top, spacing: 6) {
                             Button {
-                                insertIntoActiveApp(entry)
+                                commands.insertIntoActiveApp(entry)
                             } label: {
                                 Image(systemName: "arrow.down.to.line")
                                     .font(.caption)
@@ -157,7 +158,7 @@ struct ContentView: View {
                             .help("Вставить в активное поле предыдущего приложения")
 
                             Button {
-                                copyToPasteboard(entry)
+                                commands.copyToPasteboard(entry)
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 4) {
@@ -204,7 +205,7 @@ struct ContentView: View {
                                 previewEntry = entry
                             }
                             Button("Удалить", role: .destructive) {
-                                deleteEntry(entry)
+                                commands.delete(entry)
                             }
                         }
                         .popover(isPresented: Binding(
@@ -234,7 +235,7 @@ struct ContentView: View {
                             if !deletable.isEmpty {
                                 if confirmMassDelete {
                                     Button("Точно удалить \(deletable.count)?", role: .destructive) {
-                                        massDelete(visibleEntries)
+                                        commands.deleteAll(visibleEntries)
                                     }
                                     .font(.caption)
                                     Button("Нет") { confirmMassDelete = false }
@@ -249,32 +250,26 @@ struct ContentView: View {
                             Button("Сбросить поиск") { searchText = "" }
                                 .font(.caption)
                         }
-                        Button("Очистить") {
-                            clipboardStore.clearAll()
-                            copyStatus = "История очищена (избранное сохранено)"
-                        }
+                        Button("Очистить") { commands.clearAll() }
                         .font(.caption)
                     }
                 }
                 // Вне ветки списка: «Отменить» доступна и когда удалили
                 // последнюю видимую карточку (список/поиск пуст).
-                if !lastDeleted.isEmpty {
+                if !commands.pendingUndo.isEmpty {
                     HStack(spacing: 6) {
-                        Text(lastDeleted.count == 1
-                             ? "Удалено: \(Self.preview(of: lastDeleted[0].entry.text))"
-                             : "Удалено записей: \(lastDeleted.count)")
+                        Text(commands.pendingUndo.count == 1
+                             ? "Удалено: \(Self.preview(of: commands.pendingUndo[0].entry.text))"
+                             : "Удалено записей: \(commands.pendingUndo.count)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        Button("Отменить") {
-                            lastDeleted.forEach { clipboardStore.restore($0) }
-                            lastDeleted = []
-                        }
-                        .font(.caption)
+                        Button("Отменить") { commands.undo() }
+                            .font(.caption)
                     }
                 }
-                if !copyStatus.isEmpty {
-                    Text(copyStatus)
+                if !commands.status.isEmpty {
+                    Text(commands.status)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -372,80 +367,10 @@ struct ContentView: View {
         }
     }
 
-    /// Клик по карточке: копия в буфер + попытка вставить прямо в поле
-    /// предыдущего приложения. Панель скрывается, фокус возвращается,
-    /// через 180 мс берём сфокусированный элемент системы и вставляем.
-    private func insertIntoActiveApp(_ entry: ClipEntry) {
-        guard clipboardStore != nil else { return }
-        copyToPasteboard(entry)
-        // AX-вставка умеет только текст; изображения и файлы уже в буфере.
-        guard entry.resolvedKind == .text || entry.resolvedKind == .link
-                || entry.resolvedKind == .rtf else {
-            copyStatus = "В буфере — вставьте ⌘V в нужном месте"
-            return
-        }
-        copyStatus = "Вставляю в активное приложение…"
-        NSApp.hide(nil)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
-            guard let element = TextInsertion.focusedElement(),
-                  TextInsertion.isTextLike(element),
-                  !SecureFieldDetector.isSecure(element) else {
-                copyStatus = "Активное текстовое поле не найдено — текст в буфере (⌘V)"
-                return
-            }
-            let result = TextInsertion.insert(entry.text, into: element)
-            copyStatus = result == .success
-                ? "Вставлено в активное приложение"
-                : "Прямая вставка не поддержана (\(result.rawValue)) — ⌘V"
-        }
-    }
 
-    /// Удаляет карточку и показывает «Отменить» на пять секунд (спец. §8.7).
-    private func deleteEntry(_ entry: ClipEntry) {
-        guard let store = clipboardStore,
-              let deleted = store.delete(id: entry.id) else { return }
-        performDelete([deleted])
-    }
 
-    /// Массовое удаление видимых результатов поиска (§8.7): избранное
-    /// пропускает само хранилище.
-    private func massDelete(_ visible: [ClipEntry]) {
-        guard let store = clipboardStore else { return }
-        confirmMassDelete = false
-        performDelete(store.deleteBatch(ids: visible.map(\.id)))
-    }
 
-    /// Общий финал удаления: прежний пакет финализируется, новый живёт
-    /// пять секунд с кнопкой «Отменить». Blob изображения стирается только
-    /// при финализации — restore работает всё окно.
-    private func performDelete(_ batch: [ClipboardStore.Deleted]) {
-        guard let store = clipboardStore, !batch.isEmpty else { return }
-        lastDeleted.forEach { store.finalizeDelete($0) }
-        lastDeleted = batch
-        let token = UUID()
-        undoToken = token
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-            guard undoToken == token, !lastDeleted.isEmpty else { return }
-            let expired = lastDeleted
-            lastDeleted = []
-            expired.forEach { store.finalizeDelete($0) }
-        }
-    }
-
-    /// Фильтр поиска + сортировка: избранное сверху, затем по свежести.
-    static func filtered(entries: [ClipEntry], query: String) -> [ClipEntry] {
-        let query = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let matched = query.isEmpty
-            ? entries
-            : entries.filter { $0.text.lowercased().contains(query) }
-        return matched.sorted {
-            if ($0.isFavorite == true) != ($1.isFavorite == true) {
-                return $0.isFavorite == true
-            }
-            return $0.createdAt > $1.createdAt
-        }
-    }
 
     static func footerLine(entries: [ClipEntry], shown: Int) -> String {
         let favorites = entries.filter { $0.isFavorite == true }.count
@@ -454,33 +379,6 @@ struct ContentView: View {
             " · шифрование AES-GCM"
     }
 
-    /// Копирует запись истории обратно в системный буфер — по виду записи.
-    private func copyToPasteboard(_ entry: ClipEntry) {
-        guard let store = clipboardStore else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        switch entry.resolvedKind {
-        case .files:
-            let urls = (entry.filePaths ?? []).map { URL(fileURLWithPath: $0) as NSURL }
-            pasteboard.writeObjects(urls)
-        case .image:
-            if let data = store.imageData(for: entry) {
-                pasteboard.setData(data, forType: .png)
-            } else {
-                copyStatus = "Изображение недоступно (blob не читается)"
-                return
-            }
-        case .rtf:
-            if let rtf = entry.rtfData {
-                pasteboard.setData(rtf, forType: .rtf)
-            }
-            pasteboard.setString(entry.text, forType: .string)
-        case .text, .link:
-            pasteboard.setString(entry.text, forType: .string)
-        }
-        copyStatus = "Скопировано: \(Self.preview(of: entry.text)) — вставьте ⌘V"
-        store.touch(id: entry.id)
-    }
 
     /// Полный просмотр записи. Настоящий Quick Look не используется
     /// сознательно: QLPreviewPanel требует файл на диске, а расшифрованное
@@ -575,7 +473,9 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView(hotKey: GlobalHotKey(), clipboardStartup: ClipboardStartup(),
-                dictation: DictationController(clipboardStore: { nil }))
+    let startup = ClipboardStartup()
+    return ContentView(hotKey: GlobalHotKey(), clipboardStartup: startup,
+                       dictation: DictationController(clipboardStore: { nil }),
+                       commands: startup.commands)
 }
 

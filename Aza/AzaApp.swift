@@ -12,6 +12,8 @@ import SwiftUI
 final class ClipboardStartup: ObservableObject {
     @Published private(set) var store: ClipboardStore?
     @Published private(set) var monitor: PasteboardMonitor?
+    /// Общий владелец операций для панели меню и острова.
+    private(set) lazy var commands = ClipboardCommands { [weak self] in self?.store }
 
     /// Чего хочет пользователь (тумблер) — применяется только когда экран
     /// не заблокирован; после разблокировки восстанавливается.
@@ -72,6 +74,7 @@ final class ClipboardStartup: ObservableObject {
         screenLocked = true
         monitor?.stop()
         store?.wipeInMemory()
+        commands.wipeOnLock()
         NSApp.hide(nil)
     }
 
@@ -91,6 +94,9 @@ struct AzaApp: App {
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @StateObject private var clipboardStartup: ClipboardStartup
     @StateObject private var dictation: DictationController
+    /// Остров у выреза — основной интерфейс (спецификация §3.1).
+    /// Меню-бар остаётся постоянной резервной точкой входа.
+    private let island: IslandPanelController
 
     init() {
         // Второй экземпляр смертельно опасен: у каждого свой монитор слов,
@@ -114,12 +120,17 @@ struct AzaApp: App {
         })
         dictation.start()
         _dictation = StateObject(wrappedValue: dictation)
+
+        let islandStore = IslandStore(startup: startup, dictation: dictation)
+        island = IslandPanelController(store: islandStore)
+        island.show()
     }
 
     var body: some Scene {
         MenuBarExtra("Aza", systemImage: "waveform") {
             ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup,
-                        dictation: dictation)
+                        dictation: dictation,
+                        commands: clipboardStartup.commands)
         }
         .menuBarExtraStyle(.window)
         .onChange(of: clipboardHistoryEnabled) { _, isEnabled in

@@ -71,9 +71,14 @@ final class ClipboardStore: ObservableObject {
     /// чтобы не затереть файл, зашифрованный настоящим ключом.
     private let keyIsPersistent: Bool
 
-    /// Сессия без доступа к настоящему ключу: изменения не переживут
-    /// перезапуск. Показывается в меню.
-    var isReadOnly: Bool { !keyIsPersistent }
+    /// На диске лежит история, которую этот ключ не расшифровывает.
+    /// Пока флаг поднят, писать в файл запрещено — иначе чужие данные
+    /// будут стёрты безвозвратно.
+    private(set) var isUnreadable = false
+
+    /// Сессия без доступа к настоящему ключу или к существующей истории:
+    /// изменения не переживут перезапуск. Показывается в меню.
+    var isReadOnly: Bool { !keyIsPersistent || isUnreadable }
 
     /// Экран заблокирован (спецификация §8.9): расшифрованная история
     /// выгружена из памяти, save() не пишет — случайная мутация в этом
@@ -142,7 +147,7 @@ final class ClipboardStore: ObservableObject {
         blobsDirectory.appendingPathComponent(id.uuidString + ".bin")
     }
 
-    static func defaultStorageURL() -> URL {
+    nonisolated static func defaultStorageURL() -> URL {
         let directory = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Aza", isDirectory: true)
@@ -425,7 +430,7 @@ final class ClipboardStore: ObservableObject {
     // MARK: Шифрование и диск
 
     private func save() {
-        guard keyIsPersistent, !screenLocked else { return }
+        guard keyIsPersistent, !screenLocked, !isUnreadable else { return }
         do {
             let payload = try JSONEncoder().encode(Payload(entries: entries))
             let sealed = try AES.GCM.seal(payload, using: key).combined!
@@ -438,13 +443,45 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func load() {
-        guard let sealedData = try? Data(contentsOf: storageURL),
-              !sealedData.isEmpty,
-              let box = try? AES.GCM.SealedBox(combined: sealedData),
-              let payload = try? AES.GCM.open(box, using: key),
-              let decoded = try? JSONDecoder().decode(Payload.self, from: payload) else {
+        // Файла нет — обычный первый запуск, писать можно. А вот ошибка
+        // ЧТЕНИЯ существующего файла (права, том отвалился) — не то же
+        // самое: данные на месте, перезаписывать их нельзя.
+        guard FileManager.default.fileExists(atPath: storageURL.path) else {
+            isUnreadable = false
             return
         }
+        guard let sealedData = try? Data(contentsOf: storageURL) else {
+            isUnreadable = true
+            NSLog("Aza: clipboard history exists but cannot be read; staying read-only")
+            return
+        }
+        guard !sealedData.isEmpty else {
+            isUnreadable = false
+            return
+        }
+
+        guard let box = try? AES.GCM.SealedBox(combined: sealedData),
+              let payload = try? AES.GCM.open(box, using: key),
+              let decoded = try? JSONDecoder().decode(Payload.self, from: payload) else {
+            // Файл ЕСТЬ, но не читается этим ключом (ключ пересоздан,
+            // повреждение). Данные пользователя всё ещё в нём: писать
+            // поверх нельзя — иначе первое же копирование сотрёт историю
+            // навсегда. Уходим в read-only и откладываем копию файла.
+            isUnreadable = true
+            // Одна копия на хранилище, а не на каждую попытку загрузки:
+            // разблокировки экрана перезапускают load() и наплодили бы
+            // бесконечные бэкапы.
+            let backup = storageURL.deletingPathExtension()
+                .appendingPathExtension("unreadable.bin")
+            if !FileManager.default.fileExists(atPath: backup.path) {
+                try? FileManager.default.copyItem(at: storageURL, to: backup)
+                NSLog("Aza: clipboard history could not be decrypted; kept intact, backup at %@",
+                      backup.lastPathComponent)
+            }
+            return
+        }
+        // Дошли сюда — файл расшифрован: прежний запрет на запись снят.
+        isUnreadable = false
         entries = decoded.entries
         // Записи-изображения без blob-а бесполезны (например, ручное
         // удаление файлов) — выбрасываем, чтобы не показывать пустышки.
@@ -472,6 +509,44 @@ final class ClipboardStore: ObservableObject {
     }
 
     private nonisolated static func loadOrCreateKey() -> (SymmetricKey, Bool) {
+#if DEBUG
+        // ACL связки ключей привязан к хэшу КОНКРЕТНОГО бинарника, а не к
+        // сертификату, поэтому каждая пересборка для системы — новая
+        // программа: диалог «Разрешить всегда» возвращался после каждой
+        // сборки, а отказ или сбой чтения оборачивался потерей истории.
+        // В отладке ключ лежит файлом 0600 рядом с историей: шифрование
+        // на машине разработчика становится формальным, зато данные и
+        // рабочий процесс целы. В Release — по-прежнему Keychain.
+        return developmentKey()
+#else
+        return keychainKey()
+#endif
+    }
+
+#if DEBUG
+    private nonisolated static func developmentKey() -> (SymmetricKey, Bool) {
+        let url = defaultStorageURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("debug-history.key")
+        if let data = try? Data(contentsOf: url), data.count == 32 {
+            return (SymmetricKey(data: data), true)
+        }
+        let key = SymmetricKey(size: .bits256)
+        let data = key.withUnsafeBytes { Data($0) }
+        do {
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                  ofItemAtPath: url.path)
+            NSLog("Aza: DEBUG build uses a file-based history key (no keychain prompts)")
+            return (key, true)
+        } catch {
+            NSLog("Aza: could not create the debug key (%@)", error.localizedDescription)
+            return (key, false)
+        }
+    }
+#endif
+
+    private nonisolated static func keychainKey() -> (SymmetricKey, Bool) {
         let service = "com.tmmt.Aza.clipboard"
         let account = "history-key"
         var query: [String: Any] = [
@@ -772,6 +847,15 @@ final class ClipboardStore: ObservableObject {
                "мутация под блокировкой просочилась на диск")
 
         try? Data([0x00, 0x01, 0x02]).write(to: tempURL)
-        assert(ClipboardStore(storageURL: tempURL, maxEntries: 3).entries.isEmpty)
+        let tampered = ClipboardStore(storageURL: tempURL, maxEntries: 3)
+        assert(tampered.entries.isEmpty)
+        // Нерасшифрованный файл не должен затираться: иначе смена ключа
+        // молча уничтожает всю историю (уже случалось — 185 записей).
+        assert(tampered.isReadOnly, "нечитаемое хранилище обязано быть read-only")
+        tampered.add(text: "не должно попасть на диск",
+                     sourceAppBundleID: nil, sourceAppName: nil)
+        let onDiskAfterWrite = (try? Data(contentsOf: tempURL)) ?? Data()
+        assert(onDiskAfterWrite == Data([0x00, 0x01, 0x02]),
+               "запись поверх нечитаемой истории — потеря данных")
     }
 }
