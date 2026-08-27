@@ -199,7 +199,7 @@ enum LayoutCorrectionEngine {
         }
 
         for key in latinKeys where key != base[0] {
-            var variant = [key] + tail
+            let variant = [key] + tail
             if remapsToFrequentChechen(variant) { return true }
         }
         return remapsToFrequentChechen(Array(tail))

@@ -354,11 +354,24 @@ private struct PrayerTimeCell: View {
 private struct DictationIslandView: View {
     @ObservedObject var store: IslandStore
 
+    /// Отпустили клавишу — запись кончилась, идёт распознавание: волна и
+    /// кнопка стоп в этот момент врут (стоп вообще не работает вне записи).
+    private var isTranscribing: Bool { store.dictation.state == .transcribing }
+
     var body: some View {
         NotchRow(reservesNotch: store.hasNotch, height: 54, horizontalPadding: 28) {
             HStack(spacing: 14) {
-                Circle().fill(AzaStyle.acid).frame(width: 12, height: 12)
-                WaveformView()
+                if isTranscribing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(AzaStyle.acid)
+                    Text("Распознаю…")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AzaStyle.ink)
+                } else {
+                    Circle().fill(AzaStyle.acid).frame(width: 12, height: 12)
+                    WaveformView()
+                }
             }
         } right: {
             HStack(spacing: 0) {
@@ -367,18 +380,22 @@ private struct DictationIslandView: View {
                     .foregroundStyle(AzaStyle.muted)
                     .frame(width: 30, alignment: .trailing)
                 Color.clear.frame(width: 4)
-                Text(store.dictation.elapsedText)
+                Text(isTranscribing ? "" : store.dictation.elapsedText)
                     .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
                     .foregroundStyle(AzaStyle.ink)
                     .frame(width: 52)
                 Color.clear.frame(width: 14)
-                Button { store.dictation.stopFromUI() } label: {
-                    Image(systemName: "square")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(width: 20, height: 20)
-                        .foregroundStyle(AzaStyle.ink)
+                if !isTranscribing {
+                    Button { store.dictation.stopFromUI() } label: {
+                        Image(systemName: "square")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 20, height: 20)
+                            .foregroundStyle(AzaStyle.ink)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Color.clear.frame(width: 20, height: 20)
                 }
-                .buttonStyle(.plain)
             }
             .frame(width: 120)
         }

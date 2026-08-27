@@ -72,7 +72,8 @@ final class IslandPanelController {
             }
 
         let timer = Timer(timeInterval: 1, repeats: true) { [weak store] _ in
-            Task { @MainActor in store?.updateIslandPresence() }
+            guard let store else { return }
+            Task { @MainActor in store.updateIslandPresence() }
         }
         RunLoop.main.add(timer, forMode: .common)
         presenceTimer = timer

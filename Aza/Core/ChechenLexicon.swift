@@ -66,7 +66,7 @@ final class ChechenLexicon {
         func significant(_ variant: String) -> Bool {
             isFrequent(variant) || isFrequent(canonicalTwins(in: variant))
         }
-        var characters = Array(lower)
+        let characters = Array(lower)
 
         for index in characters.indices {
             var variant = characters
@@ -130,7 +130,7 @@ final class ChechenLexicon {
         let lower = Self.replacingUkrainianI(in: word).lowercased()
         guard lower.count >= 4 else { return nil }
 
-        var characters = Array(lower)
+        let characters = Array(lower)
         var candidates = Set<String>()
 
         func register(_ variant: [Character]) {

@@ -244,7 +244,9 @@ struct SetupView: View {
     private var soundPicker: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Звук уведомления")
+                // Короткая подпись: полная «Звук уведомления» не влезает
+                // в колонку и обрезалась в «Звук уведо…».
+                Text("Звук")
                     .font(AzaStyle.body)
                     .foregroundStyle(AzaStyle.ink)
                 Spacer(minLength: 8)

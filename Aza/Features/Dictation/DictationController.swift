@@ -15,14 +15,6 @@ import WhisperKit
 @MainActor
 final class DictationController: ObservableObject {
 
-    /// Языки на кириллице: детектор часто путает их с русским, и для
-    /// нашей пары ru/en они однозначно ближе к русскому.
-    private enum Constants {
-        static let cyrillicLanguages: Set<String> = [
-            "ru", "uk", "be", "bg", "sr", "mk", "kk", "ky", "mn", "tg",
-        ]
-    }
-
     enum State: Equatable {
         case idle
         case loadingModel(String)
@@ -392,7 +384,10 @@ final class DictationController: ObservableObject {
     }
 
     private static func options(for language: String) -> DecodingOptions {
-        DecodingOptions(task: .transcribe, language: language, usePrefillPrompt: true)
+        // Без таймстемпов: диктовке нужны слова, а не разметка по секундам,
+        // и декодер тратит меньше токенов на сегмент.
+        DecodingOptions(task: .transcribe, language: language,
+                        usePrefillPrompt: true, withoutTimestamps: true)
     }
 
     /// Средняя уверенность распознавания: по ней сравниваем две гипотезы.
@@ -405,32 +400,30 @@ final class DictationController: ObservableObject {
     /// Автоопределение с приоритетом русского (§5.2).
     ///
     /// Детектор WhisperKit на коротких фразах уверенно ошибается (русскую
-    /// речь принимал за английскую и транслитерировал), а полного
-    /// распределения по языкам он не отдаёт — только вероятность уже
-    /// выбранного токена. Поэтому язык выбираем по РЕЗУЛЬТАТУ: если
-    /// детектор указал не-кириллический язык, распознаём дважды и
-    /// сравниваем уверенность. Русский побеждает при равенстве и в
-    /// пределах форы `russianBias` — это и есть «приоритет русского».
+    /// речь принимал за английской и транслитерировал), поэтому язык
+    /// выбираем по РЕЗУЛЬТАТУ. Но и распознавать всегда дважды дорого:
+    /// раньше авто-режим делал детектор + два полных прогона, и обработка
+    /// шла в 2–3 раза дольше одного прохода (отсюда «медленнее Handy»).
+    /// Теперь русский прогон идёт первым и единственным, пока он уверенный;
+    /// английский — только как проверка неуверенного результата. Русский
+    /// побеждает при равенстве и в пределах форы `russianBias`.
     private static let russianBias: Float = 0.15
+    /// Порог «русский прогон уверен, второй не нужен»: чистая речь на
+    /// своём языке держит avgLogprob заметно выше, чужой язык — ниже.
+    // ponytail: порог консервативный, подстроить по azaDebugLog scores
+    private static let confidentRussianScore: Float = -0.35
 
     private static func autoTranscribe(
         whisper: WhisperKit, samples: [Float]
     ) async throws -> (String, [TranscriptionResult]) {
-        let detected = try? await whisper.detectLangauge(audioArray: samples)
-        let detectedLanguage = detected?.language ?? "ru"
-        azaDebugLog("Aza: dictation detector=\(detectedLanguage)")
-
-        // Кириллица (uk/be/… — частая путаница на коротких фразах) —
-        // сразу русский, второй прогон не нужен.
-        if Constants.cyrillicLanguages.contains(detectedLanguage) {
-            let results = try await whisper.transcribe(
-                audioArray: samples, decodeOptions: options(for: "ru"))
-            return ("ru", results)
-        }
-
         // Упавший прогон не должен обнулять удачный: берём то, что есть.
         let russian = try? await whisper.transcribe(
             audioArray: samples, decodeOptions: options(for: "ru"))
+        if let russian {
+            let score = confidence(of: russian)
+            azaDebugLog("Aza: dictation ru score=\(score)")
+            if score >= Self.confidentRussianScore { return ("ru", russian) }
+        }
         let english = try? await whisper.transcribe(
             audioArray: samples, decodeOptions: options(for: "en"))
         switch (russian, english) {
@@ -467,17 +460,21 @@ final class DictationController: ObservableObject {
         state = .loadingModel("0%")
         status = "Загрузка модели распознавания…"
         Task { [weak self] in
+            // Разворачиваем сразу: дальше вложенные замыкания берут
+            // константу, а не захваченную переменную — иначе Swift 6
+            // считает это гонкой.
+            guard let self else { return }
             do {
                 let profile = Self.preferredProfile
                 let folder = try await WhisperKit.download(
                     variant: profile.variant,
                     downloadBase: Self.modelStorageDirectory,
                     progressCallback: { progress in
-                        Task { @MainActor [weak self] in
+                        Task { @MainActor in
                             // Колбэк прогресса приходит асинхронно и может
                             // опоздать: обновляем только пока грузимся,
                             // иначе вернули бы idle обратно в loadingModel.
-                            guard let self, case .loadingModel = self.state else { return }
+                            guard case .loadingModel = self.state else { return }
                             let percent = Int(progress.fractionCompleted * 100)
                             self.downloadProgress = progress.fractionCompleted
                             self.state = .loadingModel("\(percent)%")
@@ -488,8 +485,8 @@ final class DictationController: ObservableObject {
                 // Скачивание позади — полоса прогресса уходит сразу, не
                 // дожидаясь загрузки в память: это ещё несколько секунд,
                 // и «100%» всё это время выглядело бы зависшим.
-                self?.downloadProgress = nil
-                self?.status = "Готовлю модель…"
+                self.downloadProgress = nil
+                self.status = "Готовлю модель…"
                 // tokenizerFolder — тоже корень кэша: токенизатор качается
                 // отдельно от модели и иначе снова уедет в ~/Documents.
                 let whisper = try await WhisperKit(
@@ -497,7 +494,6 @@ final class DictationController: ObservableObject {
                     tokenizerFolder: Self.modelStorageDirectory,
                     load: true
                 )
-                guard let self else { return }
                 self.whisper = whisper
                 self.loadedProfile = profile
                 self.downloadProgress = nil
@@ -506,7 +502,6 @@ final class DictationController: ObservableObject {
                 self.applyPendingProfileChange()
                 azaDebugLog("Aza: dictation model loaded")
             } catch {
-                guard let self else { return }
                 self.state = .idle
                 self.downloadProgress = nil
                 self.status = "Модель не загрузилась: \(error.localizedDescription)"

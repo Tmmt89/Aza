@@ -9,6 +9,7 @@ struct CityPickerView: View {
 
     @State private var isOpen = false
     @State private var query = ""
+    @State private var hoveredID: String?
     @FocusState private var searchFocused: Bool
 
     private var selectedName: String {
@@ -36,33 +37,45 @@ struct CityPickerView: View {
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
             VStack(spacing: 0) {
                 TextField("Поиск города", text: $query)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
                     .focused($searchFocused)
                     .onSubmit {
                         guard let first = filtered.first else { return }
                         cityID = first.id
                         isOpen = false
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(AzaStyle.control, in: RoundedRectangle(
+                        cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(searchFocused ? AzaStyle.acid.opacity(0.6) : AzaStyle.line))
                     .padding(8)
                 Divider()
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        if query.isEmpty {
-                            row(id: "", name: "Город не выбран")
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            if query.isEmpty {
+                                row(id: "", name: "Город не выбран")
+                            }
+                            ForEach(filtered) { city in
+                                row(id: city.id, name: city.name)
+                            }
+                            if filtered.isEmpty {
+                                Text("Ничего не найдено")
+                                    .foregroundStyle(.secondary)
+                                    .padding(10)
+                            }
                         }
-                        ForEach(filtered) { city in
-                            row(id: city.id, name: city.name)
-                        }
-                        if filtered.isEmpty {
-                            Text("Ничего не найдено")
-                                .foregroundStyle(.secondary)
-                                .padding(10)
-                        }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
+                    // Открылся — выбранный город виден, а не где-то за
+                    // экраном в середине алфавита.
+                    .onAppear { proxy.scrollTo(cityID, anchor: .center) }
                 }
             }
             .frame(width: 240, height: 300)
+            .tint(AzaStyle.acid)
             .onAppear { searchFocused = true }
         }
     }
@@ -78,6 +91,7 @@ struct CityPickerView: View {
                 if id == cityID {
                     Image(systemName: "checkmark")
                         .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AzaStyle.acid)
                 }
             }
             .contentShape(Rectangle())
@@ -85,5 +99,8 @@ struct CityPickerView: View {
             .padding(.vertical, 5)
         }
         .buttonStyle(.plain)
+        .id(id)
+        .background(hoveredID == id ? Color.primary.opacity(0.08) : .clear)
+        .onHover { hoveredID = $0 ? id : (hoveredID == id ? nil : hoveredID) }
     }
 }
