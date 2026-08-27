@@ -8,23 +8,13 @@ struct CityPickerView: View {
     let cities: [PrayerCity]
 
     @State private var isOpen = false
-    @State private var query = ""
-    @State private var hoveredID: String?
-    @FocusState private var searchFocused: Bool
 
     private var selectedName: String {
         cities.first { $0.id == cityID }?.name ?? "Город не выбран"
     }
 
-    private var filtered: [PrayerCity] {
-        query.isEmpty ? cities : cities.filter {
-            $0.name.localizedCaseInsensitiveContains(query)
-        }
-    }
-
     var body: some View {
         Button {
-            query = ""
             isOpen = true
         } label: {
             HStack(spacing: 5) {
@@ -35,55 +25,80 @@ struct CityPickerView: View {
             }
         }
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
-            VStack(spacing: 0) {
-                TextField("Поиск города", text: $query)
-                    .textFieldStyle(.plain)
-                    .focused($searchFocused)
-                    .onSubmit {
-                        guard let first = filtered.first else { return }
-                        cityID = first.id
-                        isOpen = false
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(AzaStyle.control, in: RoundedRectangle(
-                        cornerRadius: 6, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(searchFocused ? AzaStyle.acid.opacity(0.6) : AzaStyle.line))
-                    .padding(8)
-                Divider()
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            if query.isEmpty {
-                                row(id: "", name: "Город не выбран")
-                            }
-                            ForEach(filtered) { city in
-                                row(id: city.id, name: city.name)
-                            }
-                            if filtered.isEmpty {
-                                Text("Ничего не найдено")
-                                    .foregroundStyle(.secondary)
-                                    .padding(10)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    // Открылся — выбранный город виден, а не где-то за
-                    // экраном в середине алфавита.
-                    .onAppear { proxy.scrollTo(cityID, anchor: .center) }
-                }
-            }
-            .frame(width: 240, height: 300)
-            .tint(AzaStyle.acid)
-            .onAppear { searchFocused = true }
+            CityPickerList(cityID: $cityID, cities: cities, dismiss: { isOpen = false })
         }
+    }
+}
+
+/// Содержимое поповера: поиск + список. Отдельная вью, чтобы её можно
+/// было показать и без поповера (превью, скриншоты).
+struct CityPickerList: View {
+    @Binding var cityID: String
+    let cities: [PrayerCity]
+    var dismiss: () -> Void = {}
+
+    @State private var query = ""
+    @State private var hoveredID: String?
+    @FocusState private var searchFocused: Bool
+
+    private var filtered: [PrayerCity] {
+        query.isEmpty ? cities : cities.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private func choose(_ id: String) {
+        cityID = id
+        dismiss()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("Поиск города", text: $query)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+                .onSubmit {
+                    guard let first = filtered.first else { return }
+                    choose(first.id)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(AzaStyle.control, in: RoundedRectangle(
+                    cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(searchFocused ? AzaStyle.acid.opacity(0.6) : AzaStyle.line))
+                .padding(8)
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if query.isEmpty {
+                            row(id: "", name: "Город не выбран")
+                        }
+                        ForEach(filtered) { city in
+                            row(id: city.id, name: city.name)
+                        }
+                        if filtered.isEmpty {
+                            Text("Ничего не найдено")
+                                .foregroundStyle(.secondary)
+                                .padding(10)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                // Открылся — выбранный город виден, а не где-то за
+                // экраном в середине алфавита.
+                .onAppear { proxy.scrollTo(cityID, anchor: .center) }
+            }
+        }
+        .frame(width: 240, height: 300)
+        .tint(AzaStyle.acid)
+        .onAppear { searchFocused = true }
     }
 
     private func row(id: String, name: String) -> some View {
         Button {
-            cityID = id
-            isOpen = false
+            choose(id)
         } label: {
             HStack {
                 Text(name)

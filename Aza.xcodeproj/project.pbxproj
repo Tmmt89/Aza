@@ -62,6 +62,7 @@
 		BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/PasteboardCategories.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Aza/Resources/chechen-lexicon.tsv"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Aza/Resources/prayer-schedules-2026.json"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000131 /* Aza/Aza.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Aza/Aza.entitlements"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000113 /* Aza/Resources/tone-chime.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-chime.caf"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000114 /* Aza/Resources/tone-twotone.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-twotone.caf"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000115 /* Aza/Resources/tone-warm.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-warm.caf"; sourceTree = SOURCE_ROOT; };
@@ -142,6 +143,7 @@
 				BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */,
 				BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */,
 				BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */,
+				BBBB00000000000000000131 /* Aza/Aza.entitlements */,
 				BBBB00000000000000000121 /* Aza/Resources/adhan-1.caf */,
 				BBBB00000000000000000122 /* Aza/Resources/adhan-2.caf */,
 				BBBB00000000000000000123 /* Aza/Resources/adhan-3.caf */,
@@ -467,6 +469,8 @@
 		2B33911F303C94D000B76555 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Aza/Aza.entitlements";
+				ENABLE_HARDENED_RUNTIME = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;

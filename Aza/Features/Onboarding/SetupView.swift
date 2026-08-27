@@ -30,6 +30,7 @@ struct SetupView: View {
     /// по-прежнему помещалось целиком.
     @State private var showDataSheet = false
     @State private var showAppsSheet = false
+    @State private var showExceptionWords = false
     /// Характеристики этого Mac — под них подбирается рекомендация.
     private let capabilities = MacCapabilities.current()
 
@@ -447,12 +448,40 @@ struct SetupView: View {
                 if !UserWordLists.shared.neverCorrect.isEmpty {
                     divider
                     HStack {
-                        Text("Слова-исключения: \(UserWordLists.shared.neverCorrect.count)")
-                            .font(AzaStyle.body)
-                            .foregroundStyle(AzaStyle.ink)
+                        // Перед «Очистить» список можно посмотреть: клик
+                        // по счётчику раскрывает слова в поповере.
+                        Button {
+                            showExceptionWords = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("Слова-исключения: \(UserWordLists.shared.neverCorrect.count)")
+                                    .font(AzaStyle.body)
+                                    .foregroundStyle(AzaStyle.ink)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(AzaStyle.faint)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showExceptionWords, arrowEdge: .bottom) {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ForEach(UserWordLists.shared.neverCorrect.sorted(), id: \.self) { word in
+                                        Text(word)
+                                            .font(AzaStyle.body)
+                                            .foregroundStyle(AzaStyle.ink)
+                                    }
+                                }
+                                .padding(12)
+                            }
+                            .frame(minWidth: 160, maxHeight: 240)
+                        }
                         Spacer(minLength: 8)
-                        Button("Очистить") { UserWordLists.shared.clearNeverCorrect() }
-                            .buttonStyle(AzaCapsuleButtonStyle())
+                        Button("Очистить") {
+                            UserWordLists.shared.clearNeverCorrect()
+                            showExceptionWords = false
+                        }
+                        .buttonStyle(AzaCapsuleButtonStyle())
                     }
                     .help("Двойной правый Shift отменяет исправление и заносит слово сюда")
                 }

@@ -22,3 +22,6 @@ Tools/BuildChechenLexicon/config.json
 # включить в проект — см. docs/PLAN-prayer-schedules.md, раздел об
 # источниках и атрибуции. Каталоги, которые пользователь кладёт себе сам,
 # лежат в Application Support и в репозиторий не попадают по своей природе.
+build_rel/
+build_release/
+dist/
