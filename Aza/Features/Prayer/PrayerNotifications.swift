@@ -69,6 +69,7 @@ final class PrayerNotifications {
                     city: PrayerCity,
                     now: Date = .now) async {
         var wanted: Set<String> = []
+        var hadFailures = false
 
         for day in days {
             for occurrence in day.times.occurrences {
@@ -80,17 +81,29 @@ final class PrayerNotifications {
                 guard fireDate > now else { continue }
 
                 let id = Self.identifier(city: city, kind: occurrence.kind, date: occurrence.date)
-                wanted.insert(id)
                 let request = UNNotificationRequest(
                     identifier: id,
                     content: Self.content(kind: occurrence.kind, at: occurrence.date,
                                           city: city, source: day.times.source, mode: mode),
                     trigger: Self.trigger(for: fireDate, city: city)
                 )
-                try? await center.add(request)
+                do {
+                    try await center.add(request)
+                    wanted.insert(id)
+                } catch {
+                    hadFailures = true
+                    azaDebugLog("Aza: prayer notification add failed")
+                }
             }
         }
 
+        // Чистим устаревшее ТОЛЬКО если новое расписание встало целиком.
+        // Иначе неудачная постановка сняла бы старые уведомления, не
+        // поставив новые, и пользователь остался бы вообще без напоминаний.
+        guard !hadFailures else {
+            azaDebugLog("Aza: prayer reschedule incomplete — keeping old requests")
+            return
+        }
         let pending = await center.pendingNotificationRequests()
         let stale = pending
             .map(\.identifier)

@@ -21,10 +21,17 @@ final class UserWordLists {
         var confirmed: [String] = []
     }
 
+    /// Файл есть, но не читается: личный список сохраняем как есть и
+    /// больше не пишем — иначе первая же правка затрёт его пустым.
+    private(set) var isUnreadable = false
+
     private init() {
         fileURL = Self.defaultFileURL()
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         guard let data = try? Data(contentsOf: fileURL),
               let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
+            isUnreadable = true
+            NSLog("Aza: user-words.json exists but cannot be read; keeping it untouched")
             return
         }
         neverCorrect = Set(payload.neverCorrect.map(Self.storageForm))
@@ -45,9 +52,9 @@ final class UserWordLists {
         LayoutCorrectionEngine.canonicalPalochkaForm(of: word.lowercased())
     }
 
-    /// Self-check при старте прогоняет движок на эталонных словах; реальные
-    /// пользовательские исключения (например, «[mj» после теста отмены)
-    /// ломали бы ассерты — на время проверки списки отключаются.
+    /// Тесты движка (AzaTests) прогоняют эталонные слова; реальные
+    /// пользовательские исключения (например, «[mj» после отмены) ломали
+    /// бы их — на время проверки списки отключаются.
     var suspendedForTests = false
 
     func isNeverCorrect(_ word: String) -> Bool {
@@ -65,6 +72,7 @@ final class UserWordLists {
     }
 
     private func save() {
+        guard !isUnreadable else { return }
         let payload = Payload(
             neverCorrect: neverCorrect.sorted(),
             confirmed: confirmed.sorted()

@@ -222,7 +222,9 @@ final class ClipboardStore: ObservableObject {
                   sourceAppBundleID: String?, sourceAppName: String?) {
         // Read-only-сессия не пишет blob-ы: эфемерный ключ сделает файл
         // нечитаемым, а до следующего успешного запуска копились бы сироты.
-        guard keyIsPersistent else { return }
+        // То же при нечитаемой истории: метаданные не сохранятся, и blob
+        // останется сиротой, которого sweep не подберёт.
+        guard keyIsPersistent, !isUnreadable else { return }
         guard png.count <= Self.maxObjectBytes else { return }
         let hash = Self.sha256(png)
         if dedup(where: { $0.resolvedKind == .image && $0.contentHash == hash }) { return }
@@ -313,7 +315,10 @@ final class ClipboardStore: ObservableObject {
     /// В read-only-сессии (эфемерный ключ) blob-ы НЕ трогаем: метаданные
     /// не сохраняются, и удаление стёрло бы изображения настоящей истории.
     private func commit(removingBlobsOf removed: [ClipEntry]) {
-        save()
+        guard save() else {
+            NSLog("Aza: metadata not saved — keeping %d blob(s)", removed.count)
+            return
+        }
         guard keyIsPersistent else { return }
         for entry in removed where entry.resolvedKind == .image {
             try? FileManager.default.removeItem(at: blobURL(for: entry.id))
@@ -349,6 +354,9 @@ final class ClipboardStore: ObservableObject {
     func finalizeDelete(_ deleted: Deleted) {
         guard keyIsPersistent, !screenLocked else { return }
         guard !entries.contains(where: { $0.id == deleted.entry.id }) else { return }
+        // Метаданные без этой записи должны быть на диске — иначе индекс
+        // будет ссылаться на удалённое изображение.
+        guard save() else { return }
         if deleted.entry.resolvedKind == .image {
             try? FileManager.default.removeItem(at: blobURL(for: deleted.entry.id))
         }
@@ -426,16 +434,17 @@ final class ClipboardStore: ObservableObject {
 
     // MARK: Шифрование и диск
 
-    private func save() {
-        guard keyIsPersistent, !screenLocked, !isUnreadable else { return }
+    @discardableResult
+    private func save() -> Bool {
+        guard keyIsPersistent, !screenLocked, !isUnreadable else { return false }
         do {
             let payload = try JSONEncoder().encode(Payload(entries: entries))
             let sealed = try AES.GCM.seal(payload, using: key).combined!
             try sealed.write(to: storageURL, options: .atomic)
+            return true
         } catch {
-            #if DEBUG
-            print("ClipboardStore.save error:", error.localizedDescription)
-            #endif
+            NSLog("Aza: clipboard save failed (%@)", error.localizedDescription)
+            return false
         }
     }
 
@@ -558,123 +567,84 @@ final class ClipboardStore: ObservableObject {
         let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &item)
         if readStatus == errSecSuccess,
            let attributes = item as? [String: Any],
-           let data = attributes[kSecValueData as String] as? Data {
-            // Одноразовая миграция: метка отмечает, что элемент уже
-            // пересоздан подписанным приложением.
-            if attributes[kSecAttrLabel as String] as? String != Self.keyOwnershipLabel {
-                guard reassignKeyOwnership(query: query, keyData: data) else {
-                    return (SymmetricKey(data: data), false)
+           let data = attributes[kSecValueData as String] as? Data,
+           data.count == 32 {
+            let stored = SymmetricKey(data: data)
+            // Ключ из связки может оказаться не тем, которым зашифрована
+            // лежащая рядом история (например, остался от прежних опытов,
+            // а история накоплена отладочной сборкой). Проверяем по факту
+            // и, если он не подходит, а отладочный ключ подходит — берём
+            // тот, что действительно открывает данные.
+            if !opensExistingHistory(stored), let debugKey = debugFileKey(),
+               opensExistingHistory(debugKey) {
+                let raw = debugKey.withUnsafeBytes { Data($0) }
+                var replace = query
+                replace[kSecReturnData as String] = nil
+                if SecItemUpdate(replace as CFDictionary,
+                                 [kSecValueData as String: raw] as CFDictionary) == errSecSuccess {
+                    try? FileManager.default.removeItem(at: debugKeyURL())
+                    NSLog("Aza: adopted the debug history key (the keychain key did not fit)")
+                    return (debugKey, true)
                 }
+                return (debugKey, false)
             }
-            return (SymmetricKey(data: data), true)
+            return (stored, true)
         }
         guard readStatus == errSecItemNotFound else {
             NSLog("Aza: keychain read failed (%d) — history is read-only this session", readStatus)
             return (SymmetricKey(size: .bits256), false)
         }
 
-        let key = SymmetricKey(size: .bits256)
+        // Ключ из отладочной сборки переносим, если он есть: иначе вся
+        // накопленная история станет нечитаемой при первом же переходе
+        // на подписанную сборку.
+        let inherited = debugFileKey()
+        let key = inherited ?? SymmetricKey(size: .bits256)
+
         let status = addKeyItem(query: query, keyData: key.withUnsafeBytes { Data($0) })
         if status != errSecSuccess {
             NSLog("Aza: keychain SecItemAdd failed (%d) — history will not survive relaunch", status)
             return (key, false)
         }
+        if inherited != nil {
+            // Файл больше не нужен и хранить его рядом с историей опасно.
+            try? FileManager.default.removeItem(at: debugKeyURL())
+            NSLog("Aza: migrated the debug history key into the keychain")
+        }
         return (key, true)
     }
 
-    /// Метка мигрированного элемента: миграция выполняется один раз НА
-    /// КОНФИГУРАЦИЮ. Метки Debug и Release различаются: иначе Release,
-    /// встретив Debug-элемент (ACL «любое приложение»), пропустил бы
-    /// миграцию и унаследовал слабый ACL. Смена конфигурации мигрирует
-    /// элемент заново в правильную сторону (ключ сохраняется).
-#if DEBUG
-    private static let keyOwnershipLabel = "Aza clipboard key v3 (debug, open ACL)"
-#else
-    private static let keyOwnershipLabel = "Aza clipboard key v3"
-#endif
+    private nonisolated static func debugKeyURL() -> URL {
+        defaultStorageURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("debug-history.key")
+    }
+
+    /// Ключ отладочной сборки, если файл цел.
+    private nonisolated static func debugFileKey() -> SymmetricKey? {
+        guard let data = try? Data(contentsOf: debugKeyURL()), data.count == 32 else {
+            return nil
+        }
+        return SymmetricKey(data: data)
+    }
+
+    /// Открывает ли ключ уже лежащую на диске историю. Пустой или
+    /// отсутствующий файл считается «подходит» — терять нечего.
+    private nonisolated static func opensExistingHistory(_ key: SymmetricKey) -> Bool {
+        let url = defaultStorageURL()
+        guard let sealed = try? Data(contentsOf: url), !sealed.isEmpty,
+              let box = try? AES.GCM.SealedBox(combined: sealed) else { return true }
+        return (try? AES.GCM.open(box, using: key)) != nil
+    }
 
     private nonisolated static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {
         var add = query
         add[kSecReturnData as String] = nil
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        add[kSecAttrLabel as String] = keyOwnershipLabel
         add[kSecValueData as String] = keyData
-#if DEBUG
-        // Dev-сборки переподписываются при каждой пересборке, а self-signed
-        // сертификат не даёт стабильного designated requirement — строгий
-        // ACL вызывает диалог Keychain на КАЖДЫЙ новый бинарник и блокирует
-        // старт в AzaApp.init. Debug-ключ создаётся с ACL «любое
-        // приложение»: шифрование на диске и защита от кражи бэкапа
-        // сохраняются, изоляция от локальных процессов того же пользователя
-        // — нет. Release использует строгий ACL по умолчанию (Developer ID
-        // даёт стабильную подпись, диалог не повторяется).
-        if let access = anyApplicationAccess() {
-            add[kSecAttrAccess as String] = access
-        }
-#endif
         return SecItemAdd(add as CFDictionary, nil)
     }
 
-#if DEBUG
-    /// SecAccess, разрешающий расшифровку любому приложению без диалога.
-    private nonisolated static func anyApplicationAccess() -> SecAccess? {
-        var access: SecAccess?
-        guard SecAccessCreate("Aza clipboard key" as CFString, nil, &access) == errSecSuccess,
-              let access else { return nil }
-        guard let aclList = SecAccessCopyMatchingACLList(
-            access, kSecACLAuthorizationDecrypt
-        ) as? [SecACL] else { return access }
-        for acl in aclList {
-            var appList: CFArray?
-            var description: CFString?
-            var promptSelector = SecKeychainPromptSelector()
-            guard SecACLCopyContents(acl, &appList, &description, &promptSelector) == errSecSuccess
-            else { continue }
-            // applicationList = nil означает «доверять всем приложениям»;
-            // селектор без флагов отключает запрос пароля.
-            SecACLSetContents(acl, nil, description ?? "Aza" as CFString,
-                              SecKeychainPromptSelector())
-        }
-        return access
-    }
-#endif
 
-    /// Однократная миграция владельца ключа. Элемент, созданный неподписанной
-    /// сборкой, требует подтверждения в диалоге Keychain у КАЖДОГО нового
-    /// бинарника (ACL + partition list привязаны к создателю). Пересоздание
-    /// элемента текущим подписанным приложением привязывает доступ к
-    /// сертификату «Aza Development» — будущие пересборки читают бесшумно.
-    /// Ключ уже в памяти, поэтому текущая сессия работает при любом исходе.
-    /// Возврат false — пересоздание не удалось: вызывающий обязан перевести
-    /// сессию в read-only, чтобы не плодить состояния, которые не переживут
-    /// перезапуск.
-    private nonisolated static func reassignKeyOwnership(query: [String: Any], keyData: Data) -> Bool {
-        // Проба записи ДО удаления старого элемента: если Keychain не
-        // принимает новые записи, старый ключ остаётся нетронутым.
-        var probeQuery = query
-        probeQuery[kSecAttrAccount as String] = "history-key.migration-probe"
-        var probeDelete = probeQuery
-        probeDelete[kSecReturnData as String] = nil
-        SecItemDelete(probeDelete as CFDictionary)
-        guard addKeyItem(query: probeQuery, keyData: keyData) == errSecSuccess else {
-            NSLog("Aza: migration probe add failed — keeping the original key item")
-            return false
-        }
-        SecItemDelete(probeDelete as CFDictionary)
-
-        var del = query
-        del[kSecReturnData as String] = nil
-        SecItemDelete(del as CFDictionary)
-        let status = addKeyItem(query: query, keyData: keyData)
-        if status != errSecSuccess {
-            // Только что проверенная запись внезапно упала: пытаемся вернуть
-            // исходный элемент, чтобы история пережила перезапуск.
-            let restore = addKeyItem(query: query, keyData: keyData)
-            NSLog("Aza: key migration add failed (%d), restore=%d", status,
-                  restore == errSecSuccess ? 1 : 0)
-            return restore == errSecSuccess
-        }
-        return true
-    }
 
 }

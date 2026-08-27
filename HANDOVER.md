@@ -26,8 +26,8 @@ Aza («голос» по-чеченски) — нативное macOS-прило
 Aza/                     # Xcode-приложение (системный прототип)
   AzaApp.swift           # @main, MenuBarExtra (.window), старт мониторов
   ContentView.swift      # панель меню: статус, чеченские тумблеры, история буфера
-  GlobalHotKey.swift     # фасад: хоткей ⌘⇧A, self-check ассерты при старте,
-                         # finishWord → движок, undo двойным правым Shift
+  GlobalHotKey.swift     # фасад: хоткей ⌘⇧A, finishWord → движок,
+                         # undo двойным правым Shift (проверки — в AzaTests)
   Core/
     ChechenLexicon.swift     # ленивая загрузка lexicon.tsv, частоты,
                              # oneEditNeighbor / hasOneEditMatch / isFrequent
@@ -149,8 +149,9 @@ FP-веттинг: порог соседа по первой клавише по
   (secure отсечён), буфер обновляется всегда как запасной путь.
 - **Настройки**: тумблер сбора (default ON), воздержание при
   неоднозначности (default ON), опечатки (default OFF).
-- **Self-test при старте Debug**: раундтрип, plaintext не на диске,
-  tamper игнорируется, избранное переживает reload/prune.
+- **Тесты (AzaTests)**: раундтрип, plaintext не на диске, tamper
+  игнорируется, избранное переживает reload/prune, нечитаемое
+  хранилище не перезаписывается.
 
 ## 6. КРИТИЧЕСКИЙ ИНВАРИАНТ: палочка
 
@@ -197,7 +198,7 @@ swift run BuildChechenLexicon coverage --lexicon out_lexicon/lexicon.tsv \
 python3 Tools/palochka_audit.py .
 ```
 
-Смоук-запуск приложения (DEBUG-ассерты выполняются при старте).
+Смоук-запуск приложения (проверки логики живут в `xcodebuild test`).
 ВАЖНО: сначала остановить уже запущенную Aza (второй экземпляр сам выйдет
 из-за single-instance guard, и смоук покажет ложный FAIL), а убивать —
 только pkill по пути бинарника: `kill %1` в неинтерактивной оболочке

@@ -227,7 +227,9 @@ struct ContentView: View {
 
             if clipboardHistoryEnabled, let clipboardStore {
                 if clipboardStore.isReadOnly {
-                    Label("Нет доступа к ключу истории (Keychain) — изменения не сохранятся до перезапуска",
+                    Label(clipboardStore.isUnreadable
+                          ? "История на диске не читается этим ключом — она сохранена нетронутой, новые записи не пишутся"
+                          : "Нет доступа к ключу истории — изменения не сохранятся до перезапуска",
                           systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
