@@ -97,12 +97,16 @@ final class PrayerNotifications {
             }
         }
 
-        // Чистим устаревшее ТОЛЬКО если новое расписание встало целиком.
-        // Иначе неудачная постановка сняла бы старые уведомления, не
-        // поставив новые, и пользователь остался бы вообще без напоминаний.
-        guard !hadFailures else {
-            azaDebugLog("Aza: prayer reschedule incomplete — keeping old requests")
+        // Чистим устаревшее, если встало хоть что-то новое: иначе к
+        // свежим уведомлениям примешивались бы старые — например,
+        // времена прежнего города. А вот полный провал старые запросы
+        // сохраняет: лучше устаревшее расписание, чем никакого.
+        guard !wanted.isEmpty else {
+            azaDebugLog("Aza: prayer reschedule failed — keeping old requests")
             return
+        }
+        if hadFailures {
+            azaDebugLog("Aza: prayer reschedule partial — replacing what was scheduled")
         }
         let pending = await center.pendingNotificationRequests()
         let stale = pending

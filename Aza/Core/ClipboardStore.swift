@@ -567,8 +567,22 @@ final class ClipboardStore: ObservableObject {
         let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &item)
         if readStatus == errSecSuccess,
            let attributes = item as? [String: Any],
-           let data = attributes[kSecValueData as String] as? Data,
-           data.count == 32 {
+           let data = attributes[kSecValueData as String] as? Data {
+            // Элемент неверной длины — не ключ: заменяем его как
+            // отсутствующий, иначе сессия навсегда стала бы read-only.
+            guard data.count == 32 else {
+                NSLog("Aza: keychain item has an unexpected size — replacing it")
+                let replacement = debugFileKey() ?? SymmetricKey(size: .bits256)
+                let raw = replacement.withUnsafeBytes { Data($0) }
+                var update = query
+                update[kSecReturnData as String] = nil
+                let updated = SecItemUpdate(update as CFDictionary,
+                                            [kSecValueData as String: raw] as CFDictionary)
+                if updated == errSecSuccess, debugFileKey() != nil {
+                    try? FileManager.default.removeItem(at: debugKeyURL())
+                }
+                return (replacement, updated == errSecSuccess)
+            }
             let stored = SymmetricKey(data: data)
             // Ключ из связки может оказаться не тем, которым зашифрована
             // лежащая рядом история (например, остался от прежних опытов,
