@@ -133,6 +133,12 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let issue = island.prayer.notificationIssue {
+                    Text(issue)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let caveat = next.source?.caveat {
                     Text(caveat)
                         .font(.caption2)

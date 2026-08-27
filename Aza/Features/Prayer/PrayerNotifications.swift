@@ -65,11 +65,21 @@ final class PrayerNotifications {
     /// снимает устаревшие. Обратный порядок — «снять всё, потом added» —
     /// оставлял бы окно, в котором ближайшее уведомление уже снято, но
     /// ещё не поставлено.
+    /// Итог планирования — чтобы интерфейс мог честно сказать, что
+    /// расписание неполное. На уведомления о намазе полагаются каждый
+    /// день, поэтому молчаливый сбой недопустим.
+    struct Outcome {
+        let scheduled: Int
+        let failed: Int
+        var isComplete: Bool { failed == 0 }
+    }
+
+    @discardableResult
     func reschedule(days: [(date: Date, times: DayPrayerTimes)],
                     city: PrayerCity,
-                    now: Date = .now) async {
+                    now: Date = .now) async -> Outcome {
         var wanted: Set<String> = []
-        var hadFailures = false
+        var failed = 0
 
         for day in days {
             for occurrence in day.times.occurrences {
@@ -91,7 +101,7 @@ final class PrayerNotifications {
                     try await center.add(request)
                     wanted.insert(id)
                 } catch {
-                    hadFailures = true
+                    failed += 1
                     azaDebugLog("Aza: prayer notification add failed")
                 }
             }
@@ -103,9 +113,9 @@ final class PrayerNotifications {
         // сохраняет: лучше устаревшее расписание, чем никакого.
         guard !wanted.isEmpty else {
             azaDebugLog("Aza: prayer reschedule failed — keeping old requests")
-            return
+            return Outcome(scheduled: 0, failed: failed)
         }
-        if hadFailures {
+        if failed > 0 {
             azaDebugLog("Aza: prayer reschedule partial — replacing what was scheduled")
         }
         let pending = await center.pendingNotificationRequests()
@@ -113,6 +123,7 @@ final class PrayerNotifications {
             .map(\.identifier)
             .filter { $0.hasPrefix(Self.identifierPrefix) && !wanted.contains($0) }
         center.removePendingNotificationRequests(withIdentifiers: stale)
+        return Outcome(scheduled: wanted.count, failed: failed)
     }
 
     /// Диагностика Live QA: сколько уведомлений реально стоит в очереди

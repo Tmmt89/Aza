@@ -44,6 +44,9 @@ final class PrayerStore: ObservableObject {
     let notifications = PrayerNotifications()
     @Published private(set) var notificationsEnabled = UserDefaults.standard
         .bool(forKey: "PrayerNotificationsEnabled")
+    /// Непустая строка — расписание уведомлений неполное. Показывается
+    /// пользователю: тихо потерять напоминание о намазе нельзя.
+    @Published private(set) var notificationIssue: String?
 
     /// Одна задача планирования за раз: параллельные пересборки могли
     /// снять только что добавленное уведомление или вернуть устаревший
@@ -149,8 +152,14 @@ final class PrayerStore: ObservableObject {
         schedulingTask = Task { [notifications] in
             // Ждём предыдущую пересборку, а не бежим с ней наперегонки.
             await previous?.value
-            await notifications.reschedule(days: snapshot, city: city, now: now)
+            let outcome = await notifications.reschedule(days: snapshot, city: city, now: now)
             await notifications.logPending()
+            guard !Task.isCancelled else { return }
+            self.notificationIssue = outcome.isComplete
+                ? nil
+                : (outcome.scheduled == 0
+                   ? "Уведомления о намазе не поставлены — проверьте разрешение в Системных настройках"
+                   : "Часть уведомлений не поставлена (\(outcome.failed)) — расписание неполное")
         }
     }
 
