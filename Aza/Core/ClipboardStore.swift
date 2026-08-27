@@ -489,8 +489,7 @@ final class ClipboardStore: ObservableObject {
             // Одна копия на хранилище, а не на каждую попытку загрузки:
             // разблокировки экрана перезапускают load() и наплодили бы
             // бесконечные бэкапы.
-            let backup = storageURL.deletingPathExtension()
-                .appendingPathExtension("unreadable.bin")
+            let backup = Self.unreadableBackupURL(for: storageURL)
             if !FileManager.default.fileExists(atPath: backup.path) {
                 // Лог обязан отражать факт: раньше он рапортовал о копии,
                 // даже когда copyItem падал.
@@ -666,6 +665,20 @@ final class ClipboardStore: ObservableObject {
                       + "dialog may return next launch", error.localizedDescription)
             }
             return nil
+        }
+
+        // Перед перезаписью убираем прежний ключ в сторону, если рядом
+        // лежит копия нечитаемой истории: копия зашифрована ДРУГИМ
+        // ключом, и вполне возможно, что именно тем, который сейчас в
+        // этом файле. Перезапись «поверх» уничтожила бы его молча.
+        if backupExists(), fileState(at: url) != .absent,
+           let current = try? Data(contentsOf: url),
+           current != rescued.withUnsafeBytes({ Data($0) }) {
+            guard quarantineSpoiledKey(at: url) else {
+                NSLog("Aza: a backup exists and the old key could not be set aside — "
+                      + "leaving everything as is, history is read-only this session")
+                return nil
+            }
         }
 
         // Ошибки записи НЕ глотаем: молча вернуть «спасено» значило бы
@@ -992,9 +1005,7 @@ final class ClipboardStore: ObservableObject {
         // Рядом с историей может лежать резервная копия, снятая когда-то с
         // нечитаемого файла. Она зашифрована ТЕМ ЖЕ ключом, поэтому пока
         // копия существует, байты ключа неприкосновенны.
-        let backup = historyURL.deletingPathExtension()
-            .appendingPathExtension("unreadable.bin")
-        let hasBackup = fileState(at: backup) != .absent
+        let hasBackup = fileState(at: unreadableBackupURL(for: historyURL)) != .absent
 
         switch fileState(at: historyURL) {
         case .absent: return hasBackup ? .unverifiable : .hopeless
@@ -1036,9 +1047,28 @@ final class ClipboardStore: ObservableObject {
     /// Одно выражение на все пути намеренно. Раньше проверка была
     /// продублирована, копии разошлись, и одна из них удаляла файл при
     /// НЕЧИТАЕМОЙ истории — ровно то, от чего это различение и заводилось.
+    ///
+    /// Резервная копия перекрывает ВСЁ. «Рабочий ключ открывает историю»
+    /// ничего не говорит про копию: та зашифрована другим ключом, и им
+    /// вполне может быть этот файл. Сценарий не выдуманный — хватает двух
+    /// обычных запусков: на первом создаётся пустая история новым ключом,
+    /// на втором он её открывает, и файл, открывавший копию, удаляется.
     private nonisolated static func disposeRedundantDebugKey(given working: SymmetricKey) {
+        guard !backupExists() else { return }
         guard historyState(for: working) == .opens || isSafeToDiscard(working) else { return }
         discardKeyFile(at: debugKeyURL())
+    }
+
+    /// Лежит ли рядом копия нечитаемой истории. `.unknown` считаем «лежит»:
+    /// не смогли проверить — значит не трогаем.
+    private nonisolated static func backupExists() -> Bool {
+        fileState(at: unreadableBackupURL(for: defaultStorageURL())) != .absent
+    }
+
+    /// Имя копии выводится ОДНИМ способом на весь файл: разъехавшиеся
+    /// формулы дали бы защиту, которая защищает не тот файл.
+    nonisolated static func unreadableBackupURL(for history: URL) -> URL {
+        history.deletingPathExtension().appendingPathExtension("unreadable.bin")
     }
 
     /// Откладывает в сторону файл, который лежит на месте ключа, но
@@ -1121,9 +1151,7 @@ final class ClipboardStore: ObservableObject {
     /// то есть единственный ключ к ней.
     private nonisolated static func isSafeToDiscard(_ key: SymmetricKey) -> Bool {
         guard historyState(for: key) == .absent else { return false }
-        let backup = defaultStorageURL().deletingPathExtension()
-            .appendingPathExtension("unreadable.bin")
-        return fileState(at: backup) == .absent
+        return !backupExists()
     }
 
     private nonisolated static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {

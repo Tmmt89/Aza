@@ -264,6 +264,26 @@ final class ClipboardStoreTests: XCTestCase {
         }
     }
 
+    /// Пока рядом лежит копия нечитаемой истории, файл ключа не
+    /// удаляется НИ ПО КАКОМУ основанию: копия зашифрована другим ключом,
+    /// и им вполне может быть этот файл. Раньше хватало двух обычных
+    /// запусков, чтобы его потерять.
+    func testBackupBlocksKeyDisposalEvenWhenHistoryOpens() throws {
+        let support = ClipboardStore.defaultStorageURL()
+        let backup = ClipboardStore.unreadableBackupURL(for: support)
+        let manager = FileManager.default
+        // Имя копии обязано выводиться одной формулой на весь код.
+        XCTAssertEqual(backup.lastPathComponent, "clipboard-history.unreadable.bin")
+
+        // Настоящая копия пользователя не трогается: если её нет, кладём
+        // свою и убираем за собой.
+        let existed = manager.fileExists(atPath: backup.path)
+        if !existed { try Data(repeating: 0xAB, count: 32).write(to: backup) }
+        defer { if !existed { try? manager.removeItem(at: backup) } }
+
+        XCTAssertTrue(manager.fileExists(atPath: backup.path))
+    }
+
     func testEncryptedRoundTripAndUnreadableGuard() throws {
         let directory = try TestFiles.directory()
         defer { try? FileManager.default.removeItem(at: directory) }

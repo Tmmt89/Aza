@@ -67,6 +67,14 @@ enum PrivacyCleanup {
                                   title: "Импортированные расписания намаза",
                                   bytes: schedules))
             }
+            // Копия нечитаемой истории — это данные пользователя, и
+            // опись обязана о ней говорить: иначе он не знает, что она
+            // существует, и не может решить её судьбу.
+            if let backup = size(of: "clipboard-history.unreadable.bin") {
+                items.append(Item(id: "history-backup",
+                                  title: "Копия нечитаемой истории (зашифрована)",
+                                  bytes: backup))
+            }
             // Обломок ключа появляется редко, но опись обязана показывать
             // то, что реально лежит на диске.
             let spoiledNames = ((try? FileManager.default
