@@ -23,6 +23,14 @@
 		BBBB0000000000000000020C /* Aza/Features/Prayer/PrayerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010C /* Aza/Features/Prayer/PrayerStore.swift */; };
 		BBBB0000000000000000020D /* Aza/Core/PasteboardCategories.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */; };
 		BBBB00000000000000000210 /* Aza/Resources/chechen-lexicon.tsv in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */; };
+		BBBB00000000000000000211 /* Aza/Resources/prayer-schedules-2026.json in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */; };
+		BBBB00000000000000000221 /* Aza/Resources/adhan-1.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000121 /* Aza/Resources/adhan-1.caf */; };
+		BBBB00000000000000000222 /* Aza/Resources/adhan-2.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000122 /* Aza/Resources/adhan-2.caf */; };
+		BBBB00000000000000000223 /* Aza/Resources/adhan-3.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000123 /* Aza/Resources/adhan-3.caf */; };
+		BBBB00000000000000000224 /* Aza/Resources/adhan-4.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000124 /* Aza/Resources/adhan-4.caf */; };
+		BBBB00000000000000000213 /* Aza/Resources/tone-chime.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000113 /* Aza/Resources/tone-chime.caf */; };
+		BBBB00000000000000000214 /* Aza/Resources/tone-twotone.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000114 /* Aza/Resources/tone-twotone.caf */; };
+		BBBB00000000000000000215 /* Aza/Resources/tone-warm.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000115 /* Aza/Resources/tone-warm.caf */; };
 		BBBB00000000000000000302 /* Adhan in Frameworks */ = {isa = PBXBuildFile; productRef = BBBB00000000000000000301 /* Adhan */; };
 /* End PBXBuildFile section */
 
@@ -53,6 +61,14 @@
 		BBBB0000000000000000010C /* Aza/Features/Prayer/PrayerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Prayer/PrayerStore.swift; sourceTree = SOURCE_ROOT; };
 		BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/PasteboardCategories.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Aza/Resources/chechen-lexicon.tsv"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Aza/Resources/prayer-schedules-2026.json"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000121 /* Aza/Resources/adhan-1.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/adhan-1.caf"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000122 /* Aza/Resources/adhan-2.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/adhan-2.caf"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000123 /* Aza/Resources/adhan-3.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/adhan-3.caf"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000124 /* Aza/Resources/adhan-4.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/adhan-4.caf"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000113 /* Aza/Resources/tone-chime.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-chime.caf"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000114 /* Aza/Resources/tone-twotone.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-twotone.caf"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000115 /* Aza/Resources/tone-warm.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-warm.caf"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -125,6 +141,14 @@
 				BBBB0000000000000000010C /* Aza/Features/Prayer/PrayerStore.swift */,
 				BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */,
 				BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */,
+				BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */,
+				BBBB00000000000000000121 /* Aza/Resources/adhan-1.caf */,
+				BBBB00000000000000000122 /* Aza/Resources/adhan-2.caf */,
+				BBBB00000000000000000123 /* Aza/Resources/adhan-3.caf */,
+				BBBB00000000000000000124 /* Aza/Resources/adhan-4.caf */,
+				BBBB00000000000000000113 /* Aza/Resources/tone-chime.caf */,
+				BBBB00000000000000000114 /* Aza/Resources/tone-twotone.caf */,
+				BBBB00000000000000000115 /* Aza/Resources/tone-warm.caf */,
 			);
 			name = "Tested Production Sources";
 			sourceTree = "<group>";
@@ -235,6 +259,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				BBBB00000000000000000210 /* Aza/Resources/chechen-lexicon.tsv in Resources */,
+				BBBB00000000000000000211 /* Aza/Resources/prayer-schedules-2026.json in Resources */,
+				BBBB00000000000000000221 /* Aza/Resources/adhan-1.caf in Resources */,
+				BBBB00000000000000000222 /* Aza/Resources/adhan-2.caf in Resources */,
+				BBBB00000000000000000223 /* Aza/Resources/adhan-3.caf in Resources */,
+				BBBB00000000000000000224 /* Aza/Resources/adhan-4.caf in Resources */,
+				BBBB00000000000000000213 /* Aza/Resources/tone-chime.caf in Resources */,
+				BBBB00000000000000000214 /* Aza/Resources/tone-twotone.caf in Resources */,
+				BBBB00000000000000000215 /* Aza/Resources/tone-warm.caf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

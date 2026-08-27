@@ -1,14 +1,76 @@
+import AVFoundation
+import Combine
 import Foundation
 import UserNotifications
 
 /// Уведомления о намазе (§4.4).
 ///
-/// Полный азан и звуки природы отложены сознательно: спецификация их
-/// перечисляет, но звука со свободной лицензией у проекта пока нет, а
-/// класть в MIT-сборку чужую запись нельзя (§15). Сейчас — системное
-/// уведомление и предварительное напоминание.
+/// Звуки поставляются с приложением: четыре азана и три коротких
+/// синтезированных сигнала (см. docs/PLAN-prayer-schedules.md). Все
+/// укладываются в системный предел уведомления в 30 секунд, поэтому
+/// звучат целиком.
 @MainActor
 final class PrayerNotifications {
+
+    /// Чем звучит уведомление. Отделено от режима: «когда сработает» и
+    /// «что прозвучит» — разные вопросы, и складывать их в один
+    /// перечислитель значит плодить его комбинациями.
+    enum Sound: String, CaseIterable {
+        case system
+        case adhan1
+        case adhan2
+        case adhan3
+        case adhan4
+        case chime
+        case twoTone
+        case warm
+
+        var title: String {
+            switch self {
+            case .system: "Системный"
+            case .adhan1: "Азан 1"
+            case .adhan2: "Азан 2"
+            case .adhan3: "Азан 3"
+            case .adhan4: "Азан 4"
+            case .chime: "Колокольчик"
+            case .twoTone: "Две ноты"
+            case .warm: "Тёплый тон"
+            }
+        }
+
+        /// Имя файла в бандле; nil — играет системный звук.
+        var fileName: String? {
+            switch self {
+            case .system: nil
+            case .adhan1: "adhan-1.caf"
+            case .adhan2: "adhan-2.caf"
+            case .adhan3: "adhan-3.caf"
+            case .adhan4: "adhan-4.caf"
+            case .chime: "tone-chime.caf"
+            case .twoTone: "tone-twotone.caf"
+            case .warm: "tone-warm.caf"
+            }
+        }
+
+        var isAdhan: Bool {
+            switch self {
+            case .adhan1, .adhan2, .adhan3, .adhan4: true
+            default: false
+            }
+        }
+    }
+
+    static let soundStorageKey = "PrayerNotificationSound"
+
+    static var sound: Sound {
+        guard let raw = UserDefaults.standard.string(forKey: soundStorageKey),
+              let value = Sound(rawValue: raw) else { return .system }
+        return value
+    }
+
+    static func setSound(_ value: Sound) {
+        UserDefaults.standard.set(value.rawValue, forKey: soundStorageKey)
+    }
 
     enum Mode: String, CaseIterable {
         case off
@@ -191,7 +253,76 @@ final class PrayerNotifications {
         // Источник — в подзаголовке: расчётное время не должно выглядеть
         // как выверенное расписание (§4.3).
         content.subtitle = source.label
-        content.sound = .default
+        // Звук берём у системы уведомлений, а не проигрываем сами:
+        // только так соблюдаются Focus и «Не беспокоить» (§4.4). Плата за
+        // это — системный предел в 30 секунд.
+        content.sound = sound.fileName
+            .map { UNNotificationSound(named: UNNotificationSoundName($0)) } ?? .default
         return content
+    }
+}
+
+/// Прослушивание звука уведомления в настройках.
+///
+/// Живёт рядом с уведомлениями, а не отдельным файлом: это тот же список
+/// звуков и те же файлы, просто проигранные вручную. Настоящее
+/// уведомление по-прежнему звучит через систему — здесь только
+/// предварительное прослушивание, поэтому Focus и «Не беспокоить»
+/// осознанно не учитываются: пользователь сам нажал.
+@MainActor
+final class PrayerSoundPreview: ObservableObject {
+
+    /// Что звучит прямо сейчас; nil — тишина. Нужно интерфейсу, чтобы
+    /// кнопка показывала «стоп» вместо «играть».
+    @Published private(set) var playing: PrayerNotifications.Sound?
+
+    private var player: AVAudioPlayer?
+    private var finishWatcher: Task<Void, Never>?
+
+    /// Переключатель: тот же звук останавливает, другой — начинает заново.
+    func toggle(_ sound: PrayerNotifications.Sound) {
+        guard playing != sound else { return stop() }
+        play(sound)
+    }
+
+    func play(_ sound: PrayerNotifications.Sound) {
+        stop()
+        // Системный звук проиграть нечем: у него нет файла, и подменять
+        // его чем-то похожим значило бы врать о том, что услышит
+        // пользователь.
+        guard let name = sound.fileName else { return }
+        // Ищем в бандле, где лежит сам класс, а не в Bundle.main: под
+        // тестами main — это раннер, и звук молча не находился бы.
+        let bundle = Bundle(for: Self.self)
+        guard let url = bundle.url(forResource: (name as NSString).deletingPathExtension,
+                                   withExtension: (name as NSString).pathExtension),
+              let player = try? AVAudioPlayer(contentsOf: url) else {
+            NSLog("Aza: preview sound is missing from the bundle (%@)", name)
+            return
+        }
+        self.player = player
+        playing = sound
+        player.play()
+        // Кнопка обязана вернуться в исходное состояние сама, когда запись
+        // доиграет: иначе она навсегда останется «стоп».
+        let seconds = player.duration
+        finishWatcher = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds + 0.1))
+            guard !Task.isCancelled else { return }
+            self?.finish(sound)
+        }
+    }
+
+    func stop() {
+        finishWatcher?.cancel()
+        finishWatcher = nil
+        player?.stop()
+        player = nil
+        playing = nil
+    }
+
+    private func finish(_ sound: PrayerNotifications.Sound) {
+        guard playing == sound else { return }
+        stop()
     }
 }

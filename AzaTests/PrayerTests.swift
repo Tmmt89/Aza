@@ -1,4 +1,5 @@
 import Adhan
+import AVFoundation
 import XCTest
 
 @MainActor
@@ -270,6 +271,71 @@ final class PrayerTests: XCTestCase {
         XCTAssertEqual(PrayerCatalog.normalized("Набережные  Челны"), "набережные челны")
         XCTAssertEqual(PrayerCatalog.normalized("Ростов-на-Дону"),
                        PrayerCatalog.normalized("ростов на дону"))
+    }
+
+    /// Азан звучит ЧЕРЕЗ систему уведомлений — только так соблюдаются
+    /// Focus и «Не беспокоить». Файл обязан быть в бандле, иначе система
+    /// молча подставит стандартный звук.
+    func testAdhanSoundIsBundledAndSelectable() {
+        let bundle = Bundle(for: PrayerNotifications.self)
+        // Каждый звук обязан лежать в бандле: иначе система молча
+        // подставит стандартный, и пользователь не поймёт, почему выбор
+        // ничего не изменил.
+        for option in PrayerNotifications.Sound.allCases {
+            guard let name = option.fileName else { continue }
+            let url = bundle.url(forResource: (name as NSString).deletingPathExtension,
+                                 withExtension: (name as NSString).pathExtension)
+            XCTAssertNotNil(url, "звук не попал в бандл: \(name)")
+        }
+        XCTAssertNil(PrayerNotifications.Sound.system.fileName,
+                     "системный звук не должен ссылаться на файл")
+
+        let defaults = UserDefaults.standard
+        let previous = defaults.string(forKey: PrayerNotifications.soundStorageKey)
+        defer {
+            if let previous { defaults.set(previous, forKey: PrayerNotifications.soundStorageKey) }
+            else { defaults.removeObject(forKey: PrayerNotifications.soundStorageKey) }
+        }
+        defaults.removeObject(forKey: PrayerNotifications.soundStorageKey)
+        XCTAssertEqual(PrayerNotifications.sound, .system, "по умолчанию — системный звук")
+        PrayerNotifications.setSound(.adhan2)
+        XCTAssertEqual(PrayerNotifications.sound, .adhan2)
+
+        // Азаны обязаны укладываться в системный предел уведомления,
+        // иначе запись оборвётся на полуслове.
+        for option in PrayerNotifications.Sound.allCases where option.isAdhan {
+            guard let name = option.fileName,
+                  let url = bundle.url(forResource: (name as NSString).deletingPathExtension,
+                                       withExtension: (name as NSString).pathExtension),
+                  let audio = try? AVAudioFile(forReading: url) else {
+                return XCTFail("не прочитан звук \(option.rawValue)")
+            }
+            let seconds = Double(audio.length) / audio.fileFormat.sampleRate
+            XCTAssertLessThanOrEqual(seconds, 30, "\(option.rawValue) длиннее предела: \(seconds) с")
+            XCTAssertGreaterThan(seconds, 1, "\(option.rawValue) подозрительно короткий")
+        }
+    }
+
+    /// Прослушивание: у системного звука файла нет, играть нечего —
+    /// подменять его похожим значило бы врать о том, что услышит
+    /// пользователь. Остальные обязаны запускаться и смолкать по команде.
+    @MainActor
+    func testSoundPreviewPlaysFilesAndIgnoresSystem() {
+        let preview = PrayerSoundPreview()
+        preview.play(.system)
+        XCTAssertNil(preview.playing, "у системного звука нечего проигрывать")
+
+        preview.play(.chime)
+        XCTAssertEqual(preview.playing, .chime)
+        preview.toggle(.chime)
+        XCTAssertNil(preview.playing, "повторное нажатие обязано останавливать")
+
+        preview.play(.adhan1)
+        XCTAssertEqual(preview.playing, .adhan1)
+        preview.toggle(.warm)
+        XCTAssertEqual(preview.playing, .warm, "другой звук — начинаем заново")
+        preview.stop()
+        XCTAssertNil(preview.playing)
     }
 
     func testNotificationIdentifierIsStableForShiftedTime() throws {

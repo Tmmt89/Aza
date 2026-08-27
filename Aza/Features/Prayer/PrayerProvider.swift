@@ -151,12 +151,18 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
 
     private static let maximumCatalogBytes = 10 * 1024 * 1024
 
-    /// Каталог из папки пользователя; пустой, если таблиц нет.
+    /// Каталог приложения плюс всё, что пользователь положил себе сам.
+    ///
+    /// Свои файлы читаются ПОСЛЕ поставляемого: при совпадении названий
+    /// побеждает тот, чьё покрытие включает нужный день, а если различить
+    /// нельзя — отказ. Проверка происхождения одна и та же для обоих:
+    /// поставляемый каталог не получает поблажек.
     static func userProvided() -> ScheduleTablePrayerProvider? {
         let directory = ClipboardStore.defaultStorageURL()
             .deletingLastPathComponent()
             .appendingPathComponent("prayer-schedules", isDirectory: true)
-        let files = (try? FileManager.default.contentsOfDirectory(
+        var files = bundledCatalogURLs()
+        files += (try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
         )) ?? []
         // Файлов может быть несколько (годовые каталоги живут рядом), и
@@ -166,8 +172,7 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
         // покрытию.
         var cities: [CityPrayerSchedule] = []
         var year = 0
-        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-        where file.pathExtension.lowercased() == "json" {
+        for file in files where file.pathExtension.lowercased() == "json" {
             guard let data = boundedData(from: file),
                   let catalog = try? JSONDecoder().decode(PrayerCatalog.self, from: data),
                   !catalog.cities.isEmpty else { continue }
@@ -191,6 +196,19 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
             partialCityCount: cities.filter { !$0.isComplete }.count,
             cities: cities, sourceLabel: nil
         ))
+    }
+
+    /// Каталоги, поставляемые с приложением. Их несколько не бывает, но
+    /// список — чтобы годовые файлы можно было добавлять, ничего не меняя.
+    private static func bundledCatalogURLs() -> [URL] {
+        #if SWIFT_PACKAGE
+        let bundle = Bundle.module
+        #else
+        let bundle = Bundle.main
+        #endif
+        return (bundle.urls(forResourcesWithExtension: "json", subdirectory: nil) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("prayer-schedules") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     func times(on date: Date, city: PrayerCity) -> DayPrayerTimes? {

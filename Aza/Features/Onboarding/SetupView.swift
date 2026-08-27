@@ -12,6 +12,9 @@ import UserNotifications
 struct SetupView: View {
     @ObservedObject var model: SetupModel
     @AppStorage(PrayerStore.cityStorageKey) private var cityID = ""
+    @AppStorage(PrayerNotifications.soundStorageKey) private var prayerSound =
+        PrayerNotifications.Sound.system.rawValue
+    @StateObject private var soundPreview = PrayerSoundPreview()
     @AppStorage(DictationController.profileStorageKey) private var profile = "balanced"
     @StateObject private var locator = CityLocator()
     @State private var showPermissions = false
@@ -53,6 +56,9 @@ struct SetupView: View {
         .frame(width: 640)
         .fixedSize(horizontal: false, vertical: true)
         .preferredColorScheme(.dark)
+        // Закрыли настройки — прослушивание смолкло. Звук, доигрывающий
+        // за закрытым окном, пользователь остановить уже не может.
+        .onDisappear { soundPreview.stop() }
     }
 
     // MARK: Шапка и подвал
@@ -222,6 +228,55 @@ struct SetupView: View {
             if !cityID.isEmpty {
                 divider
                 sourceStatus
+                divider
+                soundPicker
+            }
+        }
+    }
+
+    /// Чем звучит уведомление о намазе. Полная запись длиннее, чем
+    /// система разрешает для звука уведомления, — говорим об этом прямо,
+    /// а не оставляем пользователя гадать, почему азан обрывается.
+    @ViewBuilder
+    private var soundPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Звук уведомления")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                Spacer(minLength: 8)
+                Picker("", selection: $prayerSound) {
+                    ForEach(PrayerNotifications.Sound.allCases, id: \.rawValue) { option in
+                        Text(option.title).tag(option.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 148)
+                // Выбрал — сразу услышал. Иначе выбор идёт вслепую, а
+                // разница между четырьмя азанами на слух не угадывается.
+                .onChange(of: prayerSound) { _, value in
+                    guard let option = PrayerNotifications.Sound(rawValue: value) else { return }
+                    soundPreview.play(option)
+                }
+                Button {
+                    guard let option = PrayerNotifications.Sound(rawValue: prayerSound) else { return }
+                    soundPreview.toggle(option)
+                } label: {
+                    Image(systemName: soundPreview.playing != nil ? "stop.fill" : "play.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(soundPreview.playing != nil ? AzaStyle.acid : AzaStyle.muted)
+                .background(AzaStyle.control, in: Circle())
+                .overlay(Circle().stroke(AzaStyle.line))
+                .help(soundPreview.playing != nil ? "Остановить" : "Прослушать")
+                // У системного звука файла нет — играть нечего.
+                .disabled(PrayerNotifications.Sound(rawValue: prayerSound)?.fileName == nil)
+            }
+            if PrayerNotifications.Sound(rawValue: prayerSound)?.isAdhan == true {
+                hint("Азан звучит целиком: запись укладывается в системный "
+                     + "предел уведомления в 30 секунд.")
             }
         }
     }
