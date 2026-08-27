@@ -133,6 +133,7 @@ struct AzaApp: App {
         _setupModel = StateObject(wrappedValue: setupModel)
         let setup = SetupWindowController(model: setupModel)
         self.setup = setup
+        islandStore.openSetup = { setup.show() }
         // Первый запуск показывает настройку сам; дальше — только по
         // команде из меню.
         DispatchQueue.main.async { setup.showIfFirstRun() }

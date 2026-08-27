@@ -160,6 +160,9 @@ final class IslandStore: ObservableObject {
     let dictation: DictationController
     /// Времена намаза: таблица, если есть, иначе расчёт (§4.3).
     let prayer: PrayerStore
+    /// Открыть окно настройки (§3.2: кнопка «Настройки» в главной панели).
+    /// Замыкание, а не прямая ссылка: окно создаётся в AzaApp.
+    var openSetup: () -> Void = {}
 
     private var compactVisibleUntil = Date.now.addingTimeInterval(3)
     private var suppressedUntil = Date.distantPast

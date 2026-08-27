@@ -2,29 +2,6 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 
-private enum AzaStyle {
-    // Rise Academy × EL principles, adapted to a native macOS surface.
-    static let stage = Color(red: 14 / 255, green: 14 / 255, blue: 16 / 255)
-    static let panel = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255)
-    static let deep = Color.black
-    static let ink = Color(red: 245 / 255, green: 245 / 255, blue: 247 / 255)
-    static let muted = Color(red: 161 / 255, green: 161 / 255, blue: 166 / 255)
-    static let line = Color(red: 56 / 255, green: 56 / 255, blue: 58 / 255)
-    static let rise = Color(red: 10 / 255, green: 132 / 255, blue: 1)
-    static let acid = Color(red: 70 / 255, green: 215 / 255, blue: 124 / 255)
-    static let acidSoft = Color(red: 114 / 255, green: 232 / 255, blue: 160 / 255)
-    static let danger = Color(red: 1, green: 69 / 255, blue: 58 / 255)
-    static let notchWidth: CGFloat = 160
-}
-
-enum AzaMotion {
-    static let micro = 0.18
-    static let compact = 0.24
-    static let expand = 0.32
-
-    static let reveal = Animation.timingCurve(0.22, 1, 0.36, 1, duration: expand)
-}
-
 struct IslandRootView: View {
     @ObservedObject var store: IslandStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -296,7 +273,10 @@ private struct HomeIslandView: View {
                             ActionButton("Диктовка", symbol: "mic", tint: AzaStyle.rise) { store.mode = .dictation }
                             ActionButton("Буфер", symbol: "clipboard", tint: AzaStyle.acid) { store.mode = .clipboard }
                             ActionButton("Настройки", symbol: "gearshape", tint: AzaStyle.muted) {
-                                NSApplication.shared.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                                // Остров — панель без фокуса, поэтому окно
+                                // настройки открывает и активирует само себя.
+                                store.dismissIsland()
+                                store.openSetup()
                             }
                         }
                     }

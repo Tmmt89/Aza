@@ -40,13 +40,20 @@ final class SetupWindowController {
             return
         }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 470),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Настройка Aza"
         window.isReleasedWhenClosed = false
+        // Тёмная сцена без системной полосы: окно — часть продукта,
+        // а не стандартный диалог настроек.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.backgroundColor = NSColor(red: 14 / 255, green: 14 / 255,
+                                         blue: 16 / 255, alpha: 1)
+        window.appearance = NSAppearance(named: .darkAqua)
         window.center()
         window.contentView = NSHostingView(rootView: SetupView(model: model))
         self.window = window
