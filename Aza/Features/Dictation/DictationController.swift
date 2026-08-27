@@ -46,9 +46,48 @@ final class DictationController: ObservableObject {
         return String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
-    /// Модель MVP: одна, multilingual small — терпимый русский при ~500 МБ.
-    /// Выбор из трёх профилей (§5.4) появится вместе с онбордингом.
-    static let modelVariant = "openai_whisper-small"
+    /// Профили моделей (§5.4). Размеры — фактические у whisperkit-coreml.
+    enum Profile: String, CaseIterable, Identifiable {
+        case fast, balanced, accurate
+
+        var id: String { rawValue }
+
+        var variant: String {
+            switch self {
+            case .fast: "openai_whisper-base"
+            case .balanced: "openai_whisper-small"
+            case .accurate: "openai_whisper-large-v3_turbo"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .fast: "Быстрая"
+            case .balanced: "Сбалансированная"
+            case .accurate: "Точная"
+            }
+        }
+
+        var summary: String {
+            switch self {
+            case .fast: "~150 МБ · быстрая, слабее на именах и длинных фразах"
+            case .balanced: "~500 МБ · баланс скорости и точности"
+            case .accurate: "~1,5 ГБ · самая точная, медленнее и тяжелее"
+            }
+        }
+    }
+
+    static let profileStorageKey = "DictationModelProfile"
+    static var preferredProfile: Profile {
+        guard let raw = UserDefaults.standard.string(forKey: profileStorageKey),
+              let profile = Profile(rawValue: raw) else { return .balanced }
+        return profile
+    }
+
+    /// Вариант, который сейчас загружен в память (может отличаться от
+    /// настройки, пока новая модель не скачана).
+    private(set) var loadedProfile: Profile?
+    private var pendingProfileChange = false
 
     /// Язык диктовки (§5.2): "auto" — довериться детектору, иначе
     /// принудительно "ru"/"en". Автоопределение на коротких фразах
@@ -105,8 +144,11 @@ final class DictationController: ObservableObject {
         // ПЕРВОЕ нажатие уходит в ожидание, а пользователь видит «ничего
         // не происходит». Греем только когда доступ к микрофону уже есть —
         // иначе первым делом нужен диалог TCC, а не 500 МБ модели.
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
-            prepareModel()
+        // Как PrayerStore: UserDefaults надёжно виден только на следующем
+        // витке main loop, иначе сохранённый профиль мог читаться как balanced.
+        DispatchQueue.main.async { [weak self] in
+            guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+            self?.prepareModel()
         }
         let controller = HotKeyController(
             keyCode: UInt32(kVK_ANSI_D),
@@ -122,6 +164,32 @@ final class DictationController: ObservableObject {
             hotKey = nil
         } else {
             azaDebugLog("Aza: dictation hotkey registered (ctrl+shift+D)")
+        }
+    }
+
+    /// Пользователь выбрал другой профиль: выгружаем модель, следующая
+    /// диктовка (или прогрев) поднимет нужную.
+    func profileChanged() {
+        guard loadedProfile != Self.preferredProfile else {
+            pendingProfileChange = false
+            return
+        }
+        pendingProfileChange = true
+        applyPendingProfileChange()
+    }
+
+    private func applyPendingProfileChange() {
+        guard pendingProfileChange, state == .idle else { return }
+        guard loadedProfile != Self.preferredProfile else {
+            pendingProfileChange = false
+            return
+        }
+        pendingProfileChange = false
+        whisper = nil
+        loadedProfile = nil
+        status = "Профиль изменён — модель загрузится при следующей диктовке"
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+            prepareModel()
         }
     }
 
@@ -297,8 +365,9 @@ final class DictationController: ObservableObject {
         status = "Загрузка модели распознавания…"
         Task { [weak self] in
             do {
+                let profile = Self.preferredProfile
                 let folder = try await WhisperKit.download(
-                    variant: Self.modelVariant,
+                    variant: profile.variant,
                     downloadBase: Self.modelStorageDirectory,
                     progressCallback: { progress in
                         Task { @MainActor [weak self] in
@@ -321,13 +390,16 @@ final class DictationController: ObservableObject {
                 )
                 guard let self else { return }
                 self.whisper = whisper
+                self.loadedProfile = profile
                 self.state = .idle
-                self.status = "Модель готова — удерживайте ⌃⇧D и говорите"
+                self.status = "Модель готова (\(profile.title)) — удерживайте ⌃⇧D"
+                self.applyPendingProfileChange()
                 azaDebugLog("Aza: dictation model loaded")
             } catch {
                 guard let self else { return }
                 self.state = .idle
                 self.status = "Модель не загрузилась: \(error.localizedDescription)"
+                self.applyPendingProfileChange()
                 azaDebugLog("Aza: dictation model load failed")
             }
         }
@@ -433,6 +505,7 @@ final class DictationController: ObservableObject {
             state = .idle
             status = "Слишком короткая запись"
             targetElement = nil
+            applyPendingProfileChange()
             return
         }
 
@@ -472,6 +545,7 @@ final class DictationController: ObservableObject {
             } catch {
                 self.state = .idle
                 self.status = "Распознавание не удалось: \(error.localizedDescription)"
+                self.applyPendingProfileChange()
                 azaDebugLog("Aza: dictation transcribe failed")
             }
         }
@@ -481,6 +555,7 @@ final class DictationController: ObservableObject {
         state = .idle
         guard !text.isEmpty else {
             status = "Ничего не распознано"
+            applyPendingProfileChange()
             return
         }
         azaDebugLog("Aza: dictation done lang=\(language) len=\(text.count)")
@@ -506,5 +581,6 @@ final class DictationController: ObservableObject {
         } else {
             status = "Текст в буфере (⌘V): \(text.prefix(60))"
         }
+        applyPendingProfileChange()
     }
 }

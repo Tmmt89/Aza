@@ -20,6 +20,7 @@ struct ContentView: View {
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
     @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
+    @AppStorage(DictationController.profileStorageKey) private var dictationProfile = "balanced"
     @State private var pasteboardStatus = "Типы ещё не проверялись"
     @State private var pasteboardTypes = ""
     @State private var searchText = ""
@@ -157,6 +158,22 @@ struct ContentView: View {
             Text("Авто: при сомнении выбирается русский")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            // Профиль модели (§5.4): размер против точности.
+            Picker("Модель", selection: $dictationProfile) {
+                ForEach(DictationController.Profile.allCases) { profile in
+                    Text(profile.title).tag(profile.rawValue)
+                }
+            }
+            .pickerStyle(.menu)
+            .font(.caption)
+            .onChange(of: dictationProfile) { _, _ in
+                dictation.profileChanged()
+            }
+            Text(DictationController.Profile(rawValue: dictationProfile)?.summary ?? "")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
