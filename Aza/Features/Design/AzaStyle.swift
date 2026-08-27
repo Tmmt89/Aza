@@ -47,6 +47,36 @@ enum AzaMotion {
     static let reveal = Animation.timingCurve(0.22, 1, 0.36, 1, duration: expand)
 }
 
+/// Переключатель в стиле Aza: капсула с бегунком, изумрудная во
+/// включённом состоянии. Системный `.switch` выбивался из тёмной сцены
+/// собственным синим и своей геометрией.
+struct AzaToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                configuration.label
+                Spacer(minLength: 8)
+                ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                    Capsule()
+                        .fill(configuration.isOn ? AzaStyle.acid : AzaStyle.control)
+                        .frame(width: 34, height: 20)
+                        .overlay(Capsule().stroke(
+                            configuration.isOn ? .clear : AzaStyle.line))
+                    Circle()
+                        .fill(configuration.isOn ? Color.black.opacity(0.85) : AzaStyle.muted)
+                        .frame(width: 14, height: 14)
+                        .padding(.horizontal, 3)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: AzaMotion.micro), value: configuration.isOn)
+    }
+}
+
 /// Кнопка-капсула в стиле острова: тёмная подложка, акцент по смыслу.
 struct AzaCapsuleButtonStyle: ButtonStyle {
     var tint: Color = AzaStyle.control

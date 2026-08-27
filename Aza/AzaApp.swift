@@ -120,6 +120,7 @@ struct AzaApp: App {
         let dictation = DictationController(clipboardStore: { [weak startup] in
             startup?.store
         })
+        DictationController.seedDefaultProfileIfNeeded()
         dictation.start()
         _dictation = StateObject(wrappedValue: dictation)
 

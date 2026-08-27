@@ -41,6 +41,12 @@ final class DictationController: ObservableObject {
     /// видит, что качается и сколько осталось.
     func downloadSelectedModel() {
         suppressPrewarm = false
+        // В памяти может лежать ДРУГОЙ профиль — тогда prepareModel
+        // молча выходил по guard whisper == nil, и кнопка не работала.
+        if loadedProfile != Self.preferredProfile {
+            whisper = nil
+            loadedProfile = nil
+        }
         prepareModel()
     }
 
@@ -96,10 +102,35 @@ final class DictationController: ObservableObject {
     }
 
     static let profileStorageKey = "DictationModelProfile"
+
+    /// Явный выбор пользователя, если он был; иначе — разумный по
+    /// умолчанию (см. resolveDefaultProfile).
     static var preferredProfile: Profile {
         guard let raw = UserDefaults.standard.string(forKey: profileStorageKey),
-              let profile = Profile(rawValue: raw) else { return .balanced }
+              let profile = Profile(rawValue: raw) else { return resolveDefaultProfile() }
         return profile
+    }
+
+    /// Пока пользователь ничего не выбирал: уже скачанная модель важнее
+    /// рекомендации — качать второй раз то же самое бессмысленно. Если
+    /// скачанных нет, берём подходящую этому Mac.
+    static func resolveDefaultProfile() -> Profile {
+        let recommended = MacCapabilities.current().recommendedProfile
+        // Рекомендованная и уже скачанная — лучший вариант.
+        if isModelCached(recommended) { return recommended }
+        // Иначе самая точная из скачанных: качать заново то, что уже
+        // лежит на диске, незачем.
+        if let best = [Profile.accurate, .balanced, .fast].first(where: isModelCached) {
+            return best
+        }
+        return recommended
+    }
+
+    /// Записывает вычисленный выбор, если пользователь ещё не выбирал:
+    /// интерфейсу нужно конкретное значение для переключателя.
+    static func seedDefaultProfileIfNeeded() {
+        guard UserDefaults.standard.string(forKey: profileStorageKey) == nil else { return }
+        UserDefaults.standard.set(resolveDefaultProfile().rawValue, forKey: profileStorageKey)
     }
 
     /// Вариант, который сейчас загружен в память (может отличаться от
@@ -261,9 +292,11 @@ final class DictationController: ObservableObject {
         hotKey = controller
         if controller.register() != nil {
             status = "Сочетание \(binding.display) занято другой программой"
+            azaDebugLog("Aza: dictation rebind FAILED \(binding.display)")
             hotKey = nil
         } else {
             status = "Диктовка: удерживайте \(binding.display)"
+            azaDebugLog("Aza: dictation hotkey rebound to \(binding.display)")
         }
     }
 
@@ -452,6 +485,11 @@ final class DictationController: ObservableObject {
                         }
                     }
                 )
+                // Скачивание позади — полоса прогресса уходит сразу, не
+                // дожидаясь загрузки в память: это ещё несколько секунд,
+                // и «100%» всё это время выглядело бы зависшим.
+                self?.downloadProgress = nil
+                self?.status = "Готовлю модель…"
                 // tokenizerFolder — тоже корень кэша: токенизатор качается
                 // отдельно от модели и иначе снова уедет в ~/Documents.
                 let whisper = try await WhisperKit(

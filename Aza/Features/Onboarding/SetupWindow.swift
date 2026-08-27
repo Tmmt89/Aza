@@ -33,6 +33,9 @@ final class SetupWindowController {
     }
 
     func show() {
+        // Профиль по умолчанию считаем ДО показа: переключатель должен
+        // сразу стоять на скачанной или рекомендованной модели.
+        DictationController.seedDefaultProfileIfNeeded()
         model.refresh()
         if let window {
             NSApp.activate(ignoringOtherApps: true)

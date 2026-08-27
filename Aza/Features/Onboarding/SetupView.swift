@@ -34,15 +34,15 @@ struct SetupView: View {
                 header
                 HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 12) {
-                        permissionsCard
-                        dictationCard
+                        prayerCard
+                        correctionCard
                         hotKeysCard
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     VStack(spacing: 12) {
-                        prayerCard
-                        correctionCard
+                        dictationCard
                         generalCard
+                        permissionsCard
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
@@ -245,18 +245,10 @@ struct SetupView: View {
                     .foregroundStyle(AzaStyle.ink)
                 Text(table
                      ? "Времена берутся из добавленного расписания."
-                     : "\(model.prayer.source?.label ?? "Расчёт") по координатам города. Если у вас есть выверенное расписание ДУМ, положите его файлом в папку Aza — оно станет приоритетным.")
+                     : "Сохранённого расписания для этого города нет, поэтому время рассчитано автоматически по координатам (\(model.prayer.source?.label ?? "расчёт")).")
                     .font(AzaStyle.caption)
                     .foregroundStyle(AzaStyle.faint)
                     .fixedSize(horizontal: false, vertical: true)
-                if !table {
-                    Button("Открыть папку для расписаний") {
-                        try? FileManager.default.createDirectory(
-                            at: PrayerStore.scheduleFolder, withIntermediateDirectories: true)
-                        NSWorkspace.shared.open(PrayerStore.scheduleFolder)
-                    }
-                    .buttonStyle(AzaCapsuleButtonStyle())
-                }
                 if let caveat = model.prayer.source?.caveat {
                     warn(caveat)
                 }
@@ -274,7 +266,10 @@ struct SetupView: View {
 
             // Загрузка выбранной модели: кнопка и полоса прогресса —
             // раньше загрузка шла молча при первой диктовке.
-            if let progress = model.dictation.downloadProgress {
+            // Полоса живёт только пока идёт скачивание. Ровно 100% —
+            // это уже подготовка модели, и полосу надо убрать: иначе она
+            // выглядит зависшей всё время прогрева.
+            if let progress = model.dictation.downloadProgress, progress < 0.999 {
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: progress)
                         .tint(AzaStyle.acid)
@@ -282,6 +277,10 @@ struct SetupView: View {
                         .font(AzaStyle.caption)
                         .foregroundStyle(AzaStyle.faint)
                 }
+            } else if case .loadingModel = model.dictation.state {
+                Text("Готовлю модель…")
+                    .font(AzaStyle.caption)
+                    .foregroundStyle(AzaStyle.faint)
             } else if let selected = DictationController.Profile(rawValue: profile),
                       !DictationController.isModelCached(selected) {
                 Button("Скачать модель · \(selected.sizeLabel)") {
@@ -370,9 +369,7 @@ struct SetupView: View {
                 .font(AzaStyle.body)
                 .foregroundStyle(AzaStyle.ink)
         }
-        .toggleStyle(.switch)
-        .controlSize(.small)
-        .tint(AzaStyle.acid)
+        .toggleStyle(AzaToggleStyle())
         .help(help)
     }
 
@@ -403,14 +400,15 @@ struct SetupView: View {
                 .frame(width: 110)
             }
             divider
-            Toggle("Запускать вместе с macOS", isOn: Binding(
+            Toggle(isOn: Binding(
                 get: { model.loginItem == .enabled },
                 set: { model.setLoginItem($0) }
-            ))
-            .toggleStyle(.switch)
-            .tint(AzaStyle.acid)
-            .font(AzaStyle.body)
-            .foregroundStyle(AzaStyle.ink)
+            )) {
+                Text("Запускать вместе с macOS")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+            }
+            .toggleStyle(AzaToggleStyle())
             if let error = model.loginItemError {
                 warn("Не удалось: \(error)")
             }
