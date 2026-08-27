@@ -11,6 +11,8 @@ struct ContentView: View {
     @ObservedObject var commands: ClipboardCommands
     /// Остров держит времена намаза — панель показывает то же самое.
     @ObservedObject var island: IslandStore
+    /// Открыть окно настройки (§9) — оно же страница состояния прав.
+    var openSetup: () -> Void = {}
     @AppStorage(PrayerStore.cityStorageKey) private var prayerCityID = ""
     @StateObject private var locator = CityLocator()
     /// Хранилище появляется после фонового получения ключа Keychain.
@@ -541,6 +543,8 @@ struct ContentView: View {
             }
 
             Divider()
+
+            Button("Настройка и разрешения…") { openSetup() }
 
             Button("Завершить Aza") {
                 NSApp.terminate(nil)

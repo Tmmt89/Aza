@@ -94,6 +94,9 @@ struct AzaApp: App {
     /// Остров у выреза — основной интерфейс (спецификация §3.1).
     /// Меню-бар остаётся постоянной резервной точкой входа.
     private let island: IslandPanelController
+    /// Первичная настройка (§9) и постоянная страница состояния прав.
+    private let setup: SetupWindowController
+    @StateObject private var setupModel: SetupModel
     /// Тот же store, что у острова: панель меню показывает те же данные.
     @StateObject private var islandStore: IslandStore
 
@@ -125,6 +128,14 @@ struct AzaApp: App {
         _islandStore = StateObject(wrappedValue: islandStore)
         island = IslandPanelController(store: islandStore)
         island.show()
+
+        let setupModel = SetupModel(prayer: islandStore.prayer, dictation: dictation)
+        _setupModel = StateObject(wrappedValue: setupModel)
+        let setup = SetupWindowController(model: setupModel)
+        self.setup = setup
+        // Первый запуск показывает настройку сам; дальше — только по
+        // команде из меню.
+        DispatchQueue.main.async { setup.showIfFirstRun() }
     }
 
     var body: some Scene {
@@ -132,7 +143,8 @@ struct AzaApp: App {
             ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup,
                         dictation: dictation,
                         commands: clipboardStartup.commands,
-                        island: islandStore)
+                        island: islandStore,
+                        openSetup: { setup.show() })
         }
         .menuBarExtraStyle(.window)
         .onChange(of: clipboardHistoryEnabled) { _, isEnabled in
