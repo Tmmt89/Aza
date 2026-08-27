@@ -9,6 +9,9 @@ struct ContentView: View {
     /// и без них открытая панель не перерисовывалась бы на изменение
     /// истории или окна «Отменить».
     @ObservedObject var commands: ClipboardCommands
+    /// Остров держит времена намаза — панель показывает то же самое.
+    @ObservedObject var island: IslandStore
+    @AppStorage(PrayerStore.cityStorageKey) private var prayerCityID = ""
     /// Хранилище появляется после фонового получения ключа Keychain.
     private var clipboardStore: ClipboardStore? { clipboardStartup.store }
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrectionEnabled = false
@@ -58,6 +61,39 @@ struct ContentView: View {
                     hotKey.requestInputMonitoring()
                 }
                 Text("Нужно для анализа завершённого слова")
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            // Намаз (§4): город выбирается вручную, источник называется
+            // честно — таблица ДУМ, если она есть, иначе расчёт.
+            Picker("Город", selection: $prayerCityID) {
+                Text("Не выбран").tag("")
+                ForEach(PrayerStore.cities) { city in
+                    Text(city.name).tag(city.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .font(.caption)
+            .onChange(of: prayerCityID) { _, newValue in
+                island.prayer.selectedCityID = newValue.isEmpty ? nil : newValue
+            }
+
+            if let next = island.nextPrayerOccurrence() {
+                Text("\(next.kind.title) в \(next.time) · \(island.prayerSourceLabel(for: next))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let caveat = next.source?.caveat {
+                    Text(caveat)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text("Выберите город, чтобы видеть время намаза")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
@@ -474,8 +510,9 @@ struct ContentView: View {
 
 #Preview {
     let startup = ClipboardStartup()
+    let dictation = DictationController(clipboardStore: { nil })
     return ContentView(hotKey: GlobalHotKey(), clipboardStartup: startup,
-                       dictation: DictationController(clipboardStore: { nil }),
-                       commands: startup.commands)
+                       dictation: dictation, commands: startup.commands,
+                       island: IslandStore(startup: startup, dictation: dictation,
+                                           prayer: PrayerStore()))
 }
-

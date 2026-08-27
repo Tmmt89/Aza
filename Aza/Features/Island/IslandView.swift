@@ -142,7 +142,7 @@ private struct IdleIslandView: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let next = store.prayerCatalog.nextPrayer(cityID: store.selectedPrayerCityID, after: context.date)
+            let next = store.nextPrayerOccurrence(after: context.date)
             let phase = PrayerCountdownPhase.make(
                 secondsRemaining: next?.date.timeIntervalSince(context.date) ?? .infinity
             )
@@ -204,8 +204,8 @@ private struct HomeIslandView: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let next = store.prayerCatalog.nextPrayer(cityID: store.selectedPrayerCityID, after: context.date)
-            let prayers = store.prayerCatalog.prayers(cityID: store.selectedPrayerCityID, on: context.date)
+            let next = store.nextPrayerOccurrence(after: context.date)
+            let prayers = store.todayPrayers()
             VStack(spacing: 0) {
                 NotchRow(reservesNotch: store.hasNotch) {
                     Label(next?.kind.title ?? "Нет данных", systemImage: next?.kind.symbol ?? "clock.badge.questionmark")
@@ -260,14 +260,12 @@ private struct HomeIslandView: View {
                                     .foregroundStyle(AzaStyle.muted)
                                     .textCase(.uppercase)
                                     .tracking(0.7)
-                                Label(store.selectedPrayerCity?.name ?? "Город не выбран", systemImage: "location")
+                                Label(store.prayer.selectedCity?.name ?? "Город не выбран", systemImage: "location")
                                     .font(.system(size: 15, weight: .semibold))
                                     .foregroundStyle(AzaStyle.ink)
                             }
                             Spacer()
-                            Text(store.selectedPrayerCity.map {
-                                $0.isComplete ? $0.source.shortName : "\($0.source.shortName) · частично"
-                            } ?? "Нет источника")
+                            Text(store.prayerSourceLabel(for: next))
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(AzaStyle.acid)
                                 .lineLimit(1)
@@ -275,7 +273,7 @@ private struct HomeIslandView: View {
                                 .padding(.vertical, 5)
                                 .background(AzaStyle.deep, in: Capsule())
                                 .overlay(Capsule().stroke(AzaStyle.line))
-                                .help(store.selectedPrayerCity?.source.name ?? "Нет источника")
+                                .help(next?.source?.caveat ?? store.prayerSourceLabel(for: next))
                         }
                         Spacer(minLength: 4)
                         Button {

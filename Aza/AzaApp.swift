@@ -97,6 +97,8 @@ struct AzaApp: App {
     /// Остров у выреза — основной интерфейс (спецификация §3.1).
     /// Меню-бар остаётся постоянной резервной точкой входа.
     private let island: IslandPanelController
+    /// Тот же store, что у острова: панель меню показывает те же данные.
+    @StateObject private var islandStore: IslandStore
 
     init() {
         // Второй экземпляр смертельно опасен: у каждого свой монитор слов,
@@ -121,7 +123,9 @@ struct AzaApp: App {
         dictation.start()
         _dictation = StateObject(wrappedValue: dictation)
 
-        let islandStore = IslandStore(startup: startup, dictation: dictation)
+        let islandStore = IslandStore(startup: startup, dictation: dictation,
+                                      prayer: PrayerStore())
+        _islandStore = StateObject(wrappedValue: islandStore)
         island = IslandPanelController(store: islandStore)
         island.show()
     }
@@ -130,7 +134,8 @@ struct AzaApp: App {
         MenuBarExtra("Aza", systemImage: "waveform") {
             ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup,
                         dictation: dictation,
-                        commands: clipboardStartup.commands)
+                        commands: clipboardStartup.commands,
+                        island: islandStore)
         }
         .menuBarExtraStyle(.window)
         .onChange(of: clipboardHistoryEnabled) { _, isEnabled in

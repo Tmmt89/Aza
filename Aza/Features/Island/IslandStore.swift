@@ -154,13 +154,12 @@ final class IslandStore: ObservableObject {
     @Published var selectedID: ClipEntry.ID?
     @Published var showsFavorites = false
     @Published var searchQuery = ""
-    @Published var selectedPrayerCityID: String {
-        didSet { UserDefaults.standard.set(selectedPrayerCityID, forKey: "selectedPrayerCityID") }
-    }
 
     let prayerCatalog: PrayerCatalog
     let startup: ClipboardStartup
     let dictation: DictationController
+    /// Времена намаза: таблица, если есть, иначе расчёт (§4.3).
+    let prayer: PrayerStore
 
     private var compactVisibleUntil = Date.now.addingTimeInterval(3)
     private var suppressedUntil = Date.distantPast
@@ -168,22 +167,19 @@ final class IslandStore: ObservableObject {
 
     init(startup: ClipboardStartup,
          dictation: DictationController,
+         prayer: PrayerStore,
          prayerCatalog: PrayerCatalog = .bundled) {
         self.startup = startup
         self.dictation = dictation
+        self.prayer = prayer
         self.prayerCatalog = prayerCatalog
-        let saved = UserDefaults.standard.string(forKey: "selectedPrayerCityID")
-        self.selectedPrayerCityID = prayerCatalog.city(id: saved ?? "")?.id
-            ?? prayerCatalog.cities.first(where: { $0.name == "Казань" })?.id
-            ?? prayerCatalog.cities.first?.id
-            ?? ""
 
         // Остров живёт поверх чужих ObservableObject — пересобираем вид,
         // когда меняется история, окно отмены или состояние диктовки.
         // Хранилище приходит асинхронно, поэтому подписка на него
         // навешивается в момент появления.
         for publisher in [startup.objectWillChange, dictation.objectWillChange,
-                          startup.commands.objectWillChange] {
+                          startup.commands.objectWillChange, prayer.objectWillChange] {
             publisher
                 .sink { [weak self] _ in self?.objectWillChange.send() }
                 .store(in: &cancellables)
@@ -215,13 +211,45 @@ final class IslandStore: ObservableObject {
             .store(in: &cancellables)
     }
 
+    // MARK: Намаз для интерфейса
+
+    /// Время в часовом поясе ГОРОДА: расписание Грозного, открытое в
+    /// поездке, должно оставаться грозненским.
+    private func formatted(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        formatter.timeZone = prayer.selectedCity?.timeZone ?? .current
+        return formatter.string(from: date)
+    }
+
+    func nextPrayerOccurrence(after now: Date = .now) -> PrayerOccurrence? {
+        guard let next = prayer.nextPrayer(after: now) else { return nil }
+        return PrayerOccurrence(kind: next.kind, time: formatted(next.date),
+                                date: next.date, source: next.source)
+    }
+
+    func todayPrayers() -> [PrayerOccurrence] {
+        (prayer.today?.occurrences ?? []).map {
+            PrayerOccurrence(kind: $0.kind, time: formatted($0.date),
+                             date: $0.date, source: $0.source)
+        }
+    }
+
+    /// Подпись источника (§4.3) — «ДУМ ЧР», «Расчёт MWL» или просьба
+    /// выбрать город.
+    var prayerSourceLabel: String {
+        guard prayer.selectedCity != nil else { return "Город не выбран" }
+        return prayer.source?.label ?? "Нет расписания"
+    }
+
+    func prayerSourceLabel(for occurrence: PrayerOccurrence?) -> String {
+        occurrence?.source?.label ?? prayerSourceLabel
+    }
+
     var commands: ClipboardCommands { startup.commands }
     var entries: [ClipEntry] { startup.store?.entries ?? [] }
     var isHistoryPaused: Bool { startup.monitor?.isRunning == false }
 
-    var selectedPrayerCity: CityPrayerSchedule? {
-        prayerCatalog.city(id: selectedPrayerCityID)
-    }
 
     func updateIslandPresence(now: Date = .now) {
         guard mode == .idle else {
@@ -229,7 +257,7 @@ final class IslandStore: ObservableObject {
             isIslandVisible = true
             return
         }
-        let remaining = prayerCatalog.nextPrayer(cityID: selectedPrayerCityID, after: now)
+        let remaining = prayer.nextPrayer(after: now)
             .map { $0.date.timeIntervalSince(now) } ?? .infinity
         prayerCountdownPhase = PrayerCountdownPhase.make(secondsRemaining: remaining)
         isIslandVisible = now < compactVisibleUntil

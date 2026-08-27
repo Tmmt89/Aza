@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		ABCD0001000000000000F001 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCD0003000000000000F003 /* WhisperKit */; };
+		ABCD0004000000000000F004 /* Adhan in Frameworks */ = {isa = PBXBuildFile; productRef = ABCD0006000000000000F006 /* Adhan */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCD0001000000000000F001 /* WhisperKit in Frameworks */,
+				ABCD0004000000000000F004 /* Adhan in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +73,7 @@
 			name = Aza;
 			packageProductDependencies = (
 				ABCD0003000000000000F003 /* WhisperKit */,
+				ABCD0006000000000000F006 /* Adhan */,
 			);
 			productName = Aza;
 			productReference = 2B339112303C94CF00B76555 /* Aza.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				ABCD0002000000000000F002 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,
+				ABCD0005000000000000F005 /* XCRemoteSwiftPackageReference "adhan-swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 2B339113303C94CF00B76555 /* Products */;
@@ -349,6 +353,14 @@
 				minimumVersion = 1.0.0;
 			};
 		};
+		ABCD0005000000000000F005 /* XCRemoteSwiftPackageReference "adhan-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/batoulapps/adhan-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.5.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -356,6 +368,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = ABCD0002000000000000F002 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
 			productName = WhisperKit;
+		};
+		ABCD0006000000000000F006 /* Adhan */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = ABCD0005000000000000F005 /* XCRemoteSwiftPackageReference "adhan-swift" */;
+			productName = Adhan;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

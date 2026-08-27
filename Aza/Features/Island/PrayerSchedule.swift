@@ -1,3 +1,4 @@
+import Adhan
 import Foundation
 
 enum PrayerKind: String, CaseIterable, Decodable, Hashable {
@@ -68,6 +69,14 @@ struct PrayerOccurrence {
     let kind: PrayerKind
     let time: String
     let date: Date
+    let source: PrayerTimesSource?
+
+    init(kind: PrayerKind, time: String, date: Date, source: PrayerTimesSource? = nil) {
+        self.kind = kind
+        self.time = time
+        self.date = date
+        self.source = source
+    }
 
     func countdown(from now: Date) -> String {
         let seconds = max(0, Int(date.timeIntervalSince(now)))
@@ -82,6 +91,9 @@ struct PrayerCatalog: Decodable {
     let completeCityCount: Int
     let partialCityCount: Int
     let cities: [CityPrayerSchedule]
+    /// Кто выпустил таблицу («ДУМ ЧР»): подпись обязана быть в интерфейсе
+    /// (§4.3). Опционально — старые файлы без поля читаются как прежде.
+    let sourceLabel: String?
 
     static let bundled: PrayerCatalog = {
         #if SWIFT_PACKAGE
@@ -94,7 +106,8 @@ struct PrayerCatalog: Decodable {
               let catalog = try? JSONDecoder().decode(PrayerCatalog.self, from: data) else {
             return PrayerCatalog(
                 schemaVersion: 1, year: 2026, cityCount: 0,
-                completeCityCount: 0, partialCityCount: 0, cities: []
+                completeCityCount: 0, partialCityCount: 0, cities: [],
+                sourceLabel: nil
             )
         }
         return catalog
@@ -111,10 +124,12 @@ struct PrayerCatalog: Decodable {
             return []
         }
         return zip(PrayerKind.allCases, day.times).compactMap { kind, time in
-            let parts = time.split(separator: ":").compactMap { Int($0) }
+            let parts = time.split(separator: ":", omittingEmptySubsequences: false)
             guard parts.count == 2,
+                  let hour = Int(parts[0]), (0..<24).contains(hour),
+                  let minute = Int(parts[1]), (0..<60).contains(minute),
                   let occurrenceDate = calendar.date(
-                    bySettingHour: parts[0], minute: parts[1], second: 0, of: date
+                    bySettingHour: hour, minute: minute, second: 0, of: date
                   ) else { return nil }
             return PrayerOccurrence(kind: kind, time: time, date: occurrenceDate)
         }
@@ -146,6 +161,27 @@ struct PrayerCatalog: Decodable {
 
 enum PrayerScheduleChecks {
     static func run() -> Bool {
+        let source = PrayerSource(name: "Тест ДУМ", url: "", sha256: "")
+        let city = CityPrayerSchedule(
+            id: "test", name: "Тест", timeZone: "Europe/Moscow",
+            coverageStatus: "partial", coverageStart: "2026-01-01",
+            coverageEnd: "2026-01-01", releaseStatus: "test", source: source,
+            days: [PrayerDay(date: "2026-01-01",
+                             times: ["06:00", "07:00", "12:x:30", "14:00", "16:00", "18:00"])]
+        )
+        let malformed = PrayerCatalog(
+            schemaVersion: 1, year: 2026, cityCount: 1,
+            completeCityCount: 0, partialCityCount: 1, cities: [city], sourceLabel: nil
+        )
+        let profile = PrayerCity(
+            id: "test", name: "Тест", latitude: 55, longitude: 37,
+            timeZoneID: "Europe/Moscow", madhab: .hanafi, method: .muslimWorldLeague
+        )
+        let testCalendar = profile.calendar
+        guard let testDate = testCalendar.date(from: DateComponents(year: 2026, month: 1, day: 1)),
+              ScheduleTablePrayerProvider(catalog: malformed)
+                .times(on: testDate, city: profile) == nil else { return false }
+
         let catalog = PrayerCatalog.bundled
         if catalog.cityCount == 0 { return catalog.cities.isEmpty }
         guard catalog.cityCount == 63,
