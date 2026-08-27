@@ -338,6 +338,34 @@ final class PrayerTests: XCTestCase {
         XCTAssertNil(preview.playing)
     }
 
+    /// Каталог, который реально поставляется с приложением: города
+    /// Кавказа обязаны разрешаться в ТАБЛИЦУ, а не в расчёт. Тест ходит
+    /// по настоящему файлу ресурсов — подделка фикстурой не показала бы,
+    /// что данные доехали до бандла.
+    func testBundledCatalogResolvesCaucasusCitiesToTables() throws {
+        let provider = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(),
+                                     "каталог не найден в бандле")
+        let expected = [
+            ("Грозный", "ДУМ ЧР"),
+            ("Махачкала", "Муфтият РД"),
+            ("Нальчик", "ДУМ КБР"),
+        ]
+        let date = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 28)))
+        for (name, label) in expected {
+            let city = PrayerCity(id: "test:" + name, name: name,
+                                  latitude: nil, longitude: nil,
+                                  timeZoneID: "Europe/Moscow", madhab: .shafi,
+                                  method: .muslimWorldLeague)
+            let times = try XCTUnwrap(provider.times(on: date, city: city),
+                                      "\(name): таблицы нет")
+            XCTAssertTrue(times.source.isVerifiedTable)
+            XCTAssertEqual(times.source.label, label)
+            XCTAssertNotNil(times.fajr)
+            XCTAssertNotNil(times.isha)
+        }
+    }
+
     func testNotificationIdentifierIsStableForShiftedTime() throws {
         let morning = try XCTUnwrap(grozny.calendar.date(
             from: DateComponents(year: 2026, month: 8, day: 27, hour: 3, minute: 31)

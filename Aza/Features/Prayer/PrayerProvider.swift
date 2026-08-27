@@ -142,10 +142,14 @@ struct CalculatedPrayerProvider: PrayerTimesProvider {
     }
 }
 
+/// Пустой класс, чтобы найти бандл с ресурсами: `Bundle(for:)` требует
+/// класс, а провайдер — структура.
+private final class CatalogBundleMarker {}
+
 /// Готовая таблица (ДУМ ЧР, ДУМ РТ и т.п.) — приоритетный источник.
-/// Данные в публичный MIT-репозиторий не кладутся (спецификация §4.3):
-/// таблицы читаются из Application Support/Aza/prayer-schedules, куда их
-/// кладёт пользователь или установщик с оговорёнными правами.
+/// Каталог поставляется с приложением (Aza/Resources), пользователь может
+/// добавить свои файлы в Application Support/Aza/prayer-schedules.
+/// Источники и условия — docs/PLAN-prayer-schedules.md.
 struct ScheduleTablePrayerProvider: PrayerTimesProvider {
     let catalog: PrayerCatalog
 
@@ -201,11 +205,10 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
     /// Каталоги, поставляемые с приложением. Их несколько не бывает, но
     /// список — чтобы годовые файлы можно было добавлять, ничего не меняя.
     private static func bundledCatalogURLs() -> [URL] {
-        #if SWIFT_PACKAGE
-        let bundle = Bundle.module
-        #else
-        let bundle = Bundle.main
-        #endif
+        // Ищем в бандле, где лежит наш код, а не в Bundle.main: под
+        // тестами main — это раннер, и поставляемый каталог не виден
+        // вовсе. Тест на настоящем каталоге этим и падал.
+        let bundle = Bundle(for: CatalogBundleMarker.self)
         return (bundle.urls(forResourcesWithExtension: "json", subdirectory: nil) ?? [])
             .filter { $0.lastPathComponent.hasPrefix("prayer-schedules") }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }

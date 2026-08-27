@@ -4,7 +4,8 @@
 
 Источники (см. docs/PLAN-prayer-schedules.md):
   Махачкала  — Муфтият Республики Дагестан, годовой JSON;
-  Нальчик    — ДУМ Кабардино-Балкарской Республики, годовой PDF.
+  Нальчик    — ДУМ Кабардино-Балкарской Республики, годовой PDF;
+  Грозный    — расписание ДУМ ЧР, годовой XLSX (путь через --grozny).
 
 Скрипт ничего не выдумывает: если день не разобрался или времена идут не
 по возрастанию, город не добавляется вовсе. Лучше расчёт с честной
@@ -86,6 +87,40 @@ def read_makhachkala(root):
     }, days)
 
 
+def read_grozny(path):
+    """Годовой XLSX: лист «Весь год», колонки Дата, День, Месяц и шесть
+    времён. Данные сверены с публикациями ДУМ ЧР — см. документацию."""
+    import openpyxl
+    sheet = openpyxl.load_workbook(path, data_only=True)["Весь год"]
+    found = {}
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        if not row or not isinstance(row[0], str):
+            continue
+        parts = row[0].split(".")
+        if len(parts) != 3 or not all(p.isdigit() for p in parts):
+            continue
+        day, month, year = (int(p) for p in parts)
+        if year != YEAR:
+            continue
+        times = [str(value)[:5] for value in row[3:9] if value is not None]
+        if not valid_day(times):
+            raise ValueError(f"Грозный: день {row[0]} не прошёл проверку: {times}")
+        found[(month, day)] = times
+
+    days = []
+    for month_index, count in enumerate(DAYS_IN_MONTH, start=1):
+        for day in range(1, count + 1):
+            times = found.get((month_index, day))
+            if times is None:
+                raise ValueError(f"Грозный: нет дня {month_index:02d}-{day:02d}, разобрано {len(found)}")
+            days.append({"date": f"{YEAR}-{month_index:02d}-{day:02d}", "times": times})
+    return city_entry("грозный", "Грозный", {
+        "name": "ДУМ ЧР",
+        "url": "https://govzalla.com/ламазан-хенаш-время-молитв",
+        "sha256": sha256(path),
+    }, days)
+
+
 def read_nalchik(root):
     path = os.path.join(root, "work/prayer-research/official/kbr-2026.txt")
     pdf = os.path.join(root, "work/prayer-research/official/kbr-2026.pdf")
@@ -135,8 +170,16 @@ def main():
     catalog = json.load(io.open(catalog_path, encoding="utf-8"))
     known = {c["name"] for c in catalog["cities"]}
 
+    grozny_path = None
+    if "--grozny" in sys.argv:
+        grozny_path = sys.argv[sys.argv.index("--grozny") + 1]
+
+    readers = [read_makhachkala, read_nalchik]
+    if grozny_path:
+        readers.append(lambda _root: read_grozny(grozny_path))
+
     added = []
-    for reader in (read_makhachkala, read_nalchik):
+    for reader in readers:
         try:
             entry = reader(root)
         except (OSError, ValueError, KeyError) as error:
