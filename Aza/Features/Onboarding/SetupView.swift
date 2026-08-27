@@ -19,20 +19,26 @@ struct SetupView: View {
         ZStack {
             AzaStyle.stage.ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    header
+            // Две колонки вместо длинной ленты: всё умещается на экран
+            // без прокрутки — настройки должны быть видны целиком.
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                HStack(alignment: .top, spacing: 12) {
                     permissionsCard
-                    prayerCard
-                    dictationCard
-                    generalCard
-                    footer
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    VStack(spacing: 12) {
+                        prayerCard
+                        dictationCard
+                        generalCard
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(18)
+                footer
             }
-            .scrollIndicators(.never)
+            .padding(18)
         }
-        .frame(minWidth: 440, minHeight: 440)
+        .frame(width: 640)
+        .fixedSize(horizontal: false, vertical: true)
         .preferredColorScheme(.dark)
     }
 

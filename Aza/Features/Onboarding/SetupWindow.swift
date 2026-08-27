@@ -39,9 +39,13 @@ final class SetupWindowController {
             window.makeKeyAndOrderFront(nil)
             return
         }
+        // Размер окна подгоняется под содержимое: настройки должны
+        // помещаться целиком, без прокрутки.
+        let content = NSHostingView(rootView: SetupView(model: model))
+        let size = content.fittingSize
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 470),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
@@ -55,7 +59,8 @@ final class SetupWindowController {
                                          blue: 16 / 255, alpha: 1)
         window.appearance = NSAppearance(named: .darkAqua)
         window.center()
-        window.contentView = NSHostingView(rootView: SetupView(model: model))
+        window.contentView = content
+        window.setContentSize(size)
         self.window = window
         // Приложение живёт в меню-баре: без явной активации окно
         // откроется без фокуса, и кнопки будут «не нажиматься».
