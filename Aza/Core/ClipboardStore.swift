@@ -224,7 +224,10 @@ final class ClipboardStore: ObservableObject {
         // нечитаемым, а до следующего успешного запуска копились бы сироты.
         // То же при нечитаемой истории: метаданные не сохранятся, и blob
         // останется сиротой, которого sweep не подберёт.
-        guard keyIsPersistent, !isUnreadable else { return }
+        //
+        // И то же при заблокированном экране: §8.9 запрещает трогать диск,
+        // а save() всё равно откажется — blob лёг бы сиротой.
+        guard keyIsPersistent, !isUnreadable, !screenLocked else { return }
         guard png.count <= Self.maxObjectBytes else { return }
         let hash = Self.sha256(png)
         if dedup(where: { $0.resolvedKind == .image && $0.contentHash == hash }) { return }
@@ -452,9 +455,18 @@ final class ClipboardStore: ObservableObject {
         // Файла нет — обычный первый запуск, писать можно. А вот ошибка
         // ЧТЕНИЯ существующего файла (права, том отвалился) — не то же
         // самое: данные на месте, перезаписывать их нельзя.
-        guard FileManager.default.fileExists(atPath: storageURL.path) else {
+        switch Self.fileState(at: storageURL) {
+        case .absent:
             isUnreadable = false
             return
+        case .unknown:
+            // Проверить не удалось — считать это «первым запуском» нельзя:
+            // следующая же запись затёрла бы существующую историю.
+            isUnreadable = true
+            NSLog("Aza: could not check whether the history exists; staying read-only")
+            return
+        case .present:
+            break
         }
         guard let sealedData = try? Data(contentsOf: storageURL) else {
             isUnreadable = true
@@ -480,9 +492,16 @@ final class ClipboardStore: ObservableObject {
             let backup = storageURL.deletingPathExtension()
                 .appendingPathExtension("unreadable.bin")
             if !FileManager.default.fileExists(atPath: backup.path) {
-                try? FileManager.default.copyItem(at: storageURL, to: backup)
-                NSLog("Aza: clipboard history could not be decrypted; kept intact, backup at %@",
-                      backup.lastPathComponent)
+                // Лог обязан отражать факт: раньше он рапортовал о копии,
+                // даже когда copyItem падал.
+                do {
+                    try FileManager.default.copyItem(at: storageURL, to: backup)
+                    NSLog("Aza: clipboard history could not be decrypted; kept intact, backup at %@",
+                          backup.lastPathComponent)
+                } catch {
+                    NSLog("Aza: clipboard history could not be decrypted; kept intact, "
+                          + "but the backup copy failed (%@)", error.localizedDescription)
+                }
             }
             return
         }
@@ -491,9 +510,12 @@ final class ClipboardStore: ObservableObject {
         entries = decoded.entries
         // Записи-изображения без blob-а бесполезны (например, ручное
         // удаление файлов) — выбрасываем, чтобы не показывать пустышки.
+        // Выбрасываем запись, только если blob ТОЧНО отсутствует:
+        // недоступный каталог не повод считать изображение потерянным и
+        // вычёркивать его из истории насовсем.
         entries.removeAll {
             $0.resolvedKind == .image &&
-            !FileManager.default.fileExists(atPath: blobURL(for: $0.id).path)
+            Self.fileState(at: blobURL(for: $0.id)) == .absent
         }
         sweepOrphanBlobs()
     }
@@ -534,9 +556,47 @@ final class ClipboardStore: ObservableObject {
         let url = defaultStorageURL()
             .deletingLastPathComponent()
             .appendingPathComponent("debug-history.key")
-        if let data = try? Data(contentsOf: url), data.count == 32 {
-            return (SymmetricKey(data: data), true)
+        // «Файл не прочитался» и «файла нет» — РАЗНЫЕ вещи. Раньше обе
+        // давали одну ветку, и временный сбой чтения приводил к записи
+        // нового ключа поверх существующего: история становилась
+        // нечитаемой навсегда. Отличаем по факту существования.
+        let existingKey: SymmetricKey?
+        do {
+            let data = try Data(contentsOf: url)
+            existingKey = data.count == 32 ? SymmetricKey(data: data) : nil
+            if existingKey == nil {
+                // Файл прочитался, но ключом не является. Ключа мы из него
+                // не получим, однако и стирать его нельзя: это может быть
+                // повреждённый настоящий ключ, единственная зацепка к
+                // истории. Отодвигаем в сторону, а не переписываем — и
+                // если отложить НЕ удалось, ничего не пишем вовсе.
+                guard quarantineSpoiledKey(at: url) else {
+                    return (SymmetricKey(size: .bits256), false)
+                }
+            }
+        } catch {
+            guard fileState(at: url) == .absent else {
+                // Файл есть либо проверить не удалось. В обоих случаях
+                // ничего не пишем: эфемерный ключ и запрет на запись
+                // сохранят и историю, и ключ.
+                NSLog("Aza: the debug key could not be read (%@) — "
+                      + "history is read-only this session", error.localizedDescription)
+                return (SymmetricKey(size: .bits256), false)
+            }
+            existingKey = nil
         }
+
+        if let key = existingKey {
+            guard historyState(for: key) != .opens else { return (key, true) }
+            if let rescued = rescueKeyFromKeychain(into: url) { return (rescued, true) }
+            return (key, true)
+        }
+
+        // Файла ключа нет. Прежде чем заводить новый (и обречь историю на
+        // нечитаемость), пробуем спасти ключ из связки: сюда попадаем и
+        // после релизной сборки, которая файл забрала себе и удалила.
+        if let rescued = rescueKeyFromKeychain(into: url) { return (rescued, true) }
+
         let key = SymmetricKey(size: .bits256)
         let data = key.withUnsafeBytes { Data($0) }
         do {
@@ -546,11 +606,143 @@ final class ClipboardStore: ObservableObject {
             NSLog("Aza: DEBUG build uses a file-based history key (no keychain prompts)")
             return (key, true)
         } catch {
+            // Запись могла пройти, а права — нет: тогда на диске остался бы
+            // открытый ключ с неизвестными правами.
+            discardKeyFile(at: url)
             NSLog("Aza: could not create the debug key (%@)", error.localizedDescription)
             return (key, false)
         }
     }
+
+    /// История, накопленная ДО перехода отладки на файловый ключ,
+    /// зашифрована ключом из связки: без этой ветки файл цел, но для
+    /// пользователя пуст.
+    ///
+    /// Связку трогаем не чаще одного раза на КОНКРЕТНУЮ историю: отпечаток
+    /// файла, который спасти не удалось, запоминается, и следующий запуск
+    /// в связку уже не лезет. Иначе отказ в доступе возвращал бы диалог
+    /// «Разрешить всегда» при каждом старте — ровно то, от чего отладка и
+    /// ушла на файловый ключ.
+    private nonisolated static func rescueKeyFromKeychain(into url: URL) -> SymmetricKey? {
+        let marker = url.deletingLastPathComponent()
+            .appendingPathComponent("debug-history.rescue-failed")
+        guard let fingerprint = historyFingerprint(),
+              shouldAskKeychain(fingerprint: fingerprint, marker: marker) else { return nil }
+        // Историю читаем ОДИН раз: между снятием отпечатка и проверкой
+        // ключа файл мог стать нечитаемым, и тогда отметка «не подошёл»
+        // была бы поставлена по несуществующему ответу.
+        let stateBefore = historyState(for: SymmetricKey(size: .bits256))
+        guard stateBefore == .doesNotOpen else {
+            NSLog("Aza: the history changed while checking it — skipping the rescue")
+            return nil
+        }
+
+        // Отметку «не спрашивать» ставим ТОЛЬКО по определённому ответу:
+        // ключа в связке нет, или он есть и историю не открывает. Отказ в
+        // доступе, отмена пользователем, временный сбой — не повод
+        // запрещать спасение навсегда: правильный ключ никуда не делся.
+        let lookup = keychainKeyLookup()
+        guard case let .found(rescued) = lookup, historyState(for: rescued) == .opens else {
+            guard lookup.isDefinitive else {
+                NSLog("Aza: the keychain could not be read this time — will try again later")
+                return nil
+            }
+            // Обращение к связке блокирующее: пока оно шло, история могла
+            // измениться или стать нечитаемой. Отметка привязана к
+            // ОТПЕЧАТКУ, поэтому ставим её только если отпечаток всё ещё
+            // тот же — иначе запретили бы спасение для данных, которых
+            // никто не проверял.
+            guard historyFingerprint() == fingerprint else {
+                NSLog("Aza: the history changed during the keychain call — no marker written")
+                return nil
+            }
+            do {
+                try fingerprint.write(to: marker, atomically: true, encoding: .utf8)
+                NSLog("Aza: the keychain key does not open this history — not asking again")
+            } catch {
+                // Обещание «больше не спросим» держится на этом файле.
+                // Если он не записался — так и говорим, а не молчим.
+                NSLog("Aza: could not remember the failed rescue (%@) — the keychain "
+                      + "dialog may return next launch", error.localizedDescription)
+            }
+            return nil
+        }
+
+        // Ошибки записи НЕ глотаем: молча вернуть «спасено» значило бы
+        // обещать, что связки больше не будет, и не выполнить обещание.
+        do {
+            try rescued.withUnsafeBytes { Data($0) }
+                .write(to: url, options: [.atomic, .completeFileProtection])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                  ofItemAtPath: url.path)
+            neutralizeMarker(marker)
+            NSLog("Aza: recovered the clipboard history key from the keychain")
+        } catch {
+            discardKeyFile(at: url)
+            NSLog("Aza: history key recovered but not stored (%@) — the keychain "
+                  + "will be asked again next launch", error.localizedDescription)
+        }
+        return rescued
+    }
+
+
+    /// Спрашивать ли связку про эту историю. Нет — если про НЕЁ ЖЕ уже
+    /// известно, что связка не помогает: повторный диалог при каждом
+    /// запуске недопустим. Новая история (другой отпечаток) получает
+    /// новую попытку.
+    nonisolated static func shouldAskKeychain(fingerprint: String, marker: URL) -> Bool {
+        guard let recorded = try? String(contentsOf: marker, encoding: .utf8) else { return true }
+        return recorded.trimmingCharacters(in: .whitespacesAndNewlines) != fingerprint
+    }
+
+    /// Отпечаток файла истории: спасение относится именно к нему, а новая
+    /// история должна получить новую попытку.
+    private nonisolated static func historyFingerprint() -> String? {
+        guard let data = try? Data(contentsOf: defaultStorageURL()), !data.isEmpty else {
+            return nil
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 #endif
+
+    /// Убирает файл ключа: он лежит открытым, и оставлять его нельзя.
+    ///
+    /// Если удалить не выходит, затираем СОДЕРЖИМОЕ — ключ перестаёт
+    /// читаться, даже когда сам файл остаётся. Это про логическое
+    /// содержимое файла, а не про физические блоки: copy-on-write APFS,
+    /// снимки и выравнивание износа SSD могут сохранить прежние байты, и
+    /// обещать «стёрто с диска» мы не вправе.
+    nonisolated static func discardKeyFile(at url: URL) {
+        do {
+            try FileManager.default.removeItem(at: url)
+            return
+        } catch let error as CocoaError where Self.meansNoSuchFile(error) {
+            // Убирать нечего — и предупреждать не о чем. Проверять
+            // существование заранее нельзя: fileExists не отличает
+            // «файла нет» от «не удалось проверить».
+            return
+        } catch {
+            NSLog("Aza: could not delete the key file (%@) — wiping its contents",
+                  error.localizedDescription)
+        }
+        // Затираем ЧЕРЕЗ ОТКРЫТЫЙ ФАЙЛ, а не записью «поверх»: и удаление,
+        // и атомарная запись требуют права на КАТАЛОГ (обе создают или
+        // удаляют записи в нём). Если каталог недоступен на запись, оба
+        // пути падают одинаково, а ключ остаётся лежать открытым — это
+        // и показал тест. Усечение существующего файла каталога не
+        // касается.
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.write(contentsOf: Data(repeating: 0, count: 64))
+            try handle.truncate(atOffset: 0)
+            // close() тоже может упасть (сброс на диск) — молчать об этом
+            // нельзя: затирание могло не дойти до файла.
+            try handle.close()
+        } catch {
+            NSLog("Aza: UNPROTECTED key file left at %@ (%@) — delete it by hand",
+                  url.path, error.localizedDescription)
+        }
+    }
 
     private nonisolated static func keychainKey() -> (SymmetricKey, Bool) {
         let service = "com.tmmt.Aza.clipboard"
@@ -571,15 +763,61 @@ final class ClipboardStore: ObservableObject {
             // Элемент неверной длины — не ключ: заменяем его как
             // отсутствующий, иначе сессия навсегда стала бы read-only.
             guard data.count == 32 else {
+                // Прежде чем затирать, пробуем спасти: элемент мог просто
+                // «поехать» — лишний байт по краям или base64. Годность
+                // проверяем по факту, расшифровкой истории, поэтому
+                // случайное совпадение практически исключено. Файл с
+                // повреждённым ключом мы откладываем в сторону, и с
+                // элементом связки поступать иначе было бы непоследовательно.
+                switch salvagedKey(from: data) {
+                case let .recovered(salvaged):
+                    var repair = query
+                    repair[kSecReturnData as String] = nil
+                    let raw = salvaged.withUnsafeBytes { Data($0) }
+                    let fixed = SecItemUpdate(repair as CFDictionary,
+                                              [kSecValueData as String: raw] as CFDictionary)
+                    // Лог по ФАКТУ: ключ восстановлен всегда, а вот
+                    // починили ли мы связку — вопрос отдельный.
+                    NSLog(fixed == errSecSuccess
+                          ? "Aza: recovered the history key and repaired the keychain item"
+                          : "Aza: recovered the history key but could not repair the keychain "
+                            + "item (%d) — history is read-only this session", fixed)
+                    guard fixed == errSecSuccess else { return (salvaged, false) }
+                    // Дальше — та же уборка, что и на обычном пути: открытый
+                    // ключ рядом с историей не нужен, а устаревшая отметка
+                    // не должна запрещать будущее спасение.
+                    disposeRedundantDebugKey(given: salvaged)
+                    neutralizeMarker(debugKeyURL().deletingLastPathComponent()
+                        .appendingPathComponent("debug-history.rescue-failed"))
+                    return (salvaged, true)
+                case .unverifiable:
+                    // История есть, но подтвердить кандидата нечем: файл не
+                    // читается либо не открылся ни один. Заменять байты
+                    // нельзя — среди них может быть правильный ключ к
+                    // повреждённому файлу. Сессия только на чтение.
+                    NSLog("Aza: keychain item looks damaged and no candidate opened the "
+                          + "history — leaving the bytes alone, history is read-only")
+                    return (SymmetricKey(size: .bits256), false)
+                case .hopeless:
+                    break
+                }
                 NSLog("Aza: keychain item has an unexpected size — replacing it")
-                let replacement = debugFileKey() ?? SymmetricKey(size: .bits256)
+                // Файл ключа читаем ОДИН раз и им же оперируем. Раньше
+                // было два чтения: сбой первого выбирал случайный ключ, а
+                // успех второго удалял настоящий отладочный — вместе это
+                // уничтожало единственный ключ к истории.
+                let inherited = debugFileKey()
+                let replacement = inherited ?? SymmetricKey(size: .bits256)
                 let raw = replacement.withUnsafeBytes { Data($0) }
                 var update = query
                 update[kSecReturnData as String] = nil
                 let updated = SecItemUpdate(update as CFDictionary,
                                             [kSecValueData as String: raw] as CFDictionary)
-                if updated == errSecSuccess, debugFileKey() != nil {
-                    try? FileManager.default.removeItem(at: debugKeyURL())
+                if updated == errSecSuccess, inherited != nil {
+                    // Здесь основание другое, чем у disposeRedundantDebugKey:
+                    // те же байты уже лежат в связке, файл избыточен по
+                    // построению, состояние истории ни при чём.
+                    discardKeyFile(at: debugKeyURL())
                 }
                 return (replacement, updated == errSecSuccess)
             }
@@ -589,19 +827,26 @@ final class ClipboardStore: ObservableObject {
             // а история накоплена отладочной сборкой). Проверяем по факту
             // и, если он не подходит, а отладочный ключ подходит — берём
             // тот, что действительно открывает данные.
-            if !opensExistingHistory(stored), let debugKey = debugFileKey(),
-               opensExistingHistory(debugKey) {
+            if historyState(for: stored) == .doesNotOpen, let debugKey = debugFileKey(),
+               historyState(for: debugKey) == .opens {
                 let raw = debugKey.withUnsafeBytes { Data($0) }
                 var replace = query
                 replace[kSecReturnData as String] = nil
                 if SecItemUpdate(replace as CFDictionary,
                                  [kSecValueData as String: raw] as CFDictionary) == errSecSuccess {
-                    try? FileManager.default.removeItem(at: debugKeyURL())
+                    // Ключ перенесён в связку — файл избыточен по построению.
+                    discardKeyFile(at: debugKeyURL())
                     NSLog("Aza: adopted the debug history key (the keychain key did not fit)")
                     return (debugKey, true)
                 }
                 return (debugKey, false)
             }
+            // Отладочный файл рядом с историей — открытый ключ на диске, и
+            // хранить его не нужно. Но удаляем ТОЛЬКО когда точно знаем,
+            // что он ничего не открывает: при нечитаемом файле истории
+            // «подходит ли ключ связки» неизвестно, и удаление отладочного
+            // уничтожило бы единственный годный.
+            disposeRedundantDebugKey(given: stored)
             return (stored, true)
         }
         guard readStatus == errSecItemNotFound else {
@@ -622,10 +867,49 @@ final class ClipboardStore: ObservableObject {
         }
         if inherited != nil {
             // Файл больше не нужен и хранить его рядом с историей опасно.
-            try? FileManager.default.removeItem(at: debugKeyURL())
+            discardKeyFile(at: debugKeyURL())
             NSLog("Aza: migrated the debug history key into the keychain")
         }
         return (key, true)
+    }
+
+    /// Ключ из связки, если он там уже есть. Ничего не создаёт и не
+    /// меняет: это спасательная операция для чтения старой истории.
+    /// Итог обращения к связке. Важно отличать «ответ получен» от «не
+    /// смогли спросить»: на первом можно строить решение «больше не
+    /// спрашивать», на втором — нельзя.
+    enum KeychainLookup {
+        case found(SymmetricKey)
+        /// Элемента нет или он не похож на ключ — ответ определённый.
+        case missing
+        /// Отказ, отмена, временный сбой — ответа нет.
+        case unavailable(OSStatus)
+
+        var isDefinitive: Bool {
+            switch self {
+            case .found, .missing: return true
+            case .unavailable: return false
+            }
+        }
+    }
+
+    private nonisolated static func keychainKeyLookup() -> KeychainLookup {
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.tmmt.Aza.clipboard",
+            kSecAttrAccount as String: "history-key",
+            kSecReturnData as String: true,
+        ] as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data, data.count == 32 else { return .missing }
+            return .found(SymmetricKey(data: data))
+        case errSecItemNotFound:
+            return .missing
+        default:
+            return .unavailable(status)
+        }
     }
 
     private nonisolated static func debugKeyURL() -> URL {
@@ -642,13 +926,204 @@ final class ClipboardStore: ObservableObject {
         return SymmetricKey(data: data)
     }
 
-    /// Открывает ли ключ уже лежащую на диске историю. Пустой или
-    /// отсутствующий файл считается «подходит» — терять нечего.
-    private nonisolated static func opensExistingHistory(_ key: SymmetricKey) -> Bool {
-        let url = defaultStorageURL()
-        guard let sealed = try? Data(contentsOf: url), !sealed.isEmpty,
-              let box = try? AES.GCM.SealedBox(combined: sealed) else { return true }
-        return (try? AES.GCM.open(box, using: key)) != nil
+    /// Что этот ключ может сказать о лежащей на диске истории.
+    ///
+    /// Раньше это был Bool, и «истории нет» было неотличимо от «историю не
+    /// удалось прочитать»: обе давали true. На этом строилось решение
+    /// удалить файловый ключ — то есть временный сбой чтения приводил к
+    /// уничтожению единственного годного ключа.
+    enum HistoryState {
+        /// Истории нет — терять нечего.
+        case absent
+        /// Ключ открывает историю.
+        case opens
+        /// История есть, но этим ключом не открывается.
+        case doesNotOpen
+        /// Файл истории есть, но прочитать его не удалось. Ничего
+        /// разрушительного на этом основании делать нельзя.
+        case unreadable
+    }
+
+    nonisolated static func historyState(for key: SymmetricKey,
+                                        at url: URL? = nil) -> HistoryState {
+        let url = url ?? defaultStorageURL()
+        switch fileState(at: url) {
+        case .absent: return .absent
+        // «Не смогли проверить» — не «нет файла».
+        case .unknown: return .unreadable
+        case .present: break
+        }
+        guard let sealed = try? Data(contentsOf: url) else { return .unreadable }
+        guard !sealed.isEmpty else { return .absent }
+        guard let box = try? AES.GCM.SealedBox(combined: sealed) else { return .unreadable }
+        return (try? AES.GCM.open(box, using: key)) != nil ? .opens : .doesNotOpen
+    }
+
+    /// Итог попытки достать настоящий ключ из испорченных байтов.
+    enum Salvage {
+        /// Ключ найден и подтверждён расшифровкой истории.
+        case recovered(SymmetricKey)
+        /// Истории нет — терять нечего, байты можно заменять.
+        case hopeless
+        /// История есть, но подтвердить кандидата не удалось: файл не
+        /// читается, либо не открылся ни один. Заменять байты нельзя.
+        ///
+        /// Именно «нельзя», а не «жаль»: AES-GCM не отличает неверный
+        /// ключ от повреждённых данных, поэтому «ни один не подошёл» на
+        /// существующей истории может означать испорченный файл при
+        /// ПРАВИЛЬНОМ ключе. Удалить данные пользователь может сам и
+        /// осознанно — в разделе приватности.
+        case unverifiable
+    }
+
+    /// Пытается достать настоящий ключ из испорченных байтов.
+    ///
+    /// Проверяются два правдоподобных повреждения: лишние байты по краям
+    /// (все 32-байтовые окна) и base64. Кандидат принимается ТОЛЬКО если
+    /// он расшифровывает существующую историю — подтверждение даёт
+    /// аутентификация AES-GCM, а не догадка.
+    ///
+    /// История читается ОДИН раз. Так снимаются сразу две беды: гонка
+    /// (файл мог стать нечитаемым посреди перебора, и это выглядело бы
+    /// как «ключ не подошёл») и до 67 обращений к диску на запуск.
+    nonisolated static func salvagedKey(from data: Data,
+                                        historyAt url: URL? = nil) -> Salvage {
+        let historyURL = url ?? defaultStorageURL()
+        // Рядом с историей может лежать резервная копия, снятая когда-то с
+        // нечитаемого файла. Она зашифрована ТЕМ ЖЕ ключом, поэтому пока
+        // копия существует, байты ключа неприкосновенны.
+        let backup = historyURL.deletingPathExtension()
+            .appendingPathExtension("unreadable.bin")
+        let hasBackup = fileState(at: backup) != .absent
+
+        switch fileState(at: historyURL) {
+        case .absent: return hasBackup ? .unverifiable : .hopeless
+        case .unknown: return .unverifiable
+        case .present: break
+        }
+        guard let sealed = try? Data(contentsOf: historyURL) else { return .unverifiable }
+        // Пустой файл — тоже файл. Он мог остаться от неудачной записи,
+        // и настоящие данные лежат в резервной копии. «Ничего не видно»
+        // не равно «терять нечего».
+        guard !sealed.isEmpty else { return hasBackup ? .unverifiable : .hopeless }
+        guard let box = try? AES.GCM.SealedBox(combined: sealed) else { return .unverifiable }
+
+        // Ограничение по объёму — до любых преобразований: элемент связки
+        // приходит извне, и разбирать мегабайты мы не обязаны.
+        guard data.count <= 4096 else { return .unverifiable }
+
+        var candidates: [Data] = []
+        if data.count > 32, data.count <= 96 {
+            for start in 0...(data.count - 32) {
+                candidates.append(data.subdata(in: start..<(start + 32)))
+            }
+        }
+        if let text = String(data: data, encoding: .utf8),
+           let decoded = Data(base64Encoded: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+           decoded.count == 32 {
+            candidates.append(decoded)
+        }
+        for candidate in candidates {
+            let key = SymmetricKey(data: candidate)
+            if (try? AES.GCM.open(box, using: key)) != nil { return .recovered(key) }
+        }
+        return .unverifiable
+    }
+
+    /// Убирает открытый файл ключа, когда он заведомо не нужен: рабочий
+    /// ключ уже открывает историю, либо истории нет вовсе.
+    ///
+    /// Одно выражение на все пути намеренно. Раньше проверка была
+    /// продублирована, копии разошлись, и одна из них удаляла файл при
+    /// НЕЧИТАЕМОЙ истории — ровно то, от чего это различение и заводилось.
+    private nonisolated static func disposeRedundantDebugKey(given working: SymmetricKey) {
+        guard historyState(for: working) == .opens || isSafeToDiscard(working) else { return }
+        discardKeyFile(at: debugKeyURL())
+    }
+
+    /// Откладывает в сторону файл, который лежит на месте ключа, но
+    /// ключом не является. Возвращает false, если отложить не удалось —
+    /// тогда вызывающий обязан НИЧЕГО не писать: возможно, это
+    /// повреждённый настоящий ключ, единственная зацепка к истории.
+    ///
+    /// Второй обломок не затирает первый: к имени добавляется номер.
+    private nonisolated static func quarantineSpoiledKey(at url: URL) -> Bool {
+        for suffix in ["corrupt"] + (2...20).map({ "corrupt.\($0)" }) {
+            let spoiled = url.appendingPathExtension(suffix)
+            guard fileState(at: spoiled) == .absent else { continue }
+            do {
+                try FileManager.default.moveItem(at: url, to: spoiled)
+                NSLog("Aza: the key file is not a key — kept aside as %@",
+                      spoiled.lastPathComponent)
+                return true
+            } catch {
+                NSLog("Aza: could not set the damaged key aside (%@) — "
+                      + "leaving it untouched", error.localizedDescription)
+                return false
+            }
+        }
+        NSLog("Aza: too many damaged key files kept aside — leaving this one untouched")
+        return false
+    }
+
+    /// Обезвреживает отметку «не спрашивать связку» после удачного
+    /// спасения. Если удалить файл не вышло, затираем содержимое: пустая
+    /// отметка не совпадёт ни с одним отпечатком и не запретит будущее
+    /// спасение, если нынешний ключ когда-нибудь потеряется.
+    private nonisolated static func neutralizeMarker(_ marker: URL) {
+        if (try? FileManager.default.removeItem(at: marker)) != nil { return }
+        guard fileState(at: marker) != .absent else { return }
+        do {
+            let handle = try FileHandle(forWritingTo: marker)
+            try handle.truncate(atOffset: 0)
+            try handle.close()
+        } catch {
+            NSLog("Aza: stale rescue marker left at %@ (%@) — it may block a future "
+                  + "recovery", marker.lastPathComponent, error.localizedDescription)
+        }
+    }
+
+    /// Есть ли файл. Именно ТРИ состояния: `fileExists` возвращает false и
+    /// когда файла нет, и когда проверить не удалось, а решения об
+    /// удалении ключей на такой ответ опирать нельзя.
+    enum FileState { case absent, present, unknown }
+
+    /// «Файла нет» приходит ДВУМЯ разными кодами: fileNoSuchFile (4) и
+    /// fileReadNoSuchFile (260). Принимаем оба для ЛЮБОЙ операции: какой
+    /// код придёт откуда — не гарантировано, а ошибка в сторону «не смог
+    /// проверить» делает историю доступной только для чтения на пустом
+    /// месте (проверял только код 4 — на чистой установке буфер переставал
+    /// сохранять).
+    private nonisolated static func meansNoSuchFile(_ error: CocoaError) -> Bool {
+        error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile
+    }
+
+    nonisolated static func fileState(at url: URL) -> FileState {
+        do {
+            _ = try FileManager.default.attributesOfItem(atPath: url.path)
+            return .present
+        } catch let error as CocoaError where Self.meansNoSuchFile(error) {
+            return .absent
+        } catch {
+            return .unknown
+        }
+    }
+
+    /// Можно ли безопасно расстаться с этим ключом.
+    ///
+    /// Только когда терять нечего: истории нет И нет резервной копии
+    /// нечитаемой истории. `doesNotOpen` сюда НЕ входит: AES-GCM не
+    /// отличает «не тот ключ» от «данные повреждены», и на испорченном
+    /// файле правильный ключ выглядел бы неподходящим.
+    ///
+    /// Проверка копии обязательна: без неё отсутствие основного файла
+    /// разрешало удалить ключ, которым зашифрована лежащая рядом копия, —
+    /// то есть единственный ключ к ней.
+    private nonisolated static func isSafeToDiscard(_ key: SymmetricKey) -> Bool {
+        guard historyState(for: key) == .absent else { return false }
+        let backup = defaultStorageURL().deletingPathExtension()
+            .appendingPathExtension("unreadable.bin")
+        return fileState(at: backup) == .absent
     }
 
     private nonisolated static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {

@@ -67,6 +67,19 @@ enum PrivacyCleanup {
                                   title: "Импортированные расписания намаза",
                                   bytes: schedules))
             }
+            // Обломок ключа появляется редко, но опись обязана показывать
+            // то, что реально лежит на диске.
+            let spoiledNames = ((try? FileManager.default
+                .contentsOfDirectory(atPath: root.path)) ?? [])
+                .filter { $0.hasPrefix("debug-history.key.corrupt") }
+            if !spoiledNames.isEmpty {
+                let total = spoiledNames.compactMap { size(of: $0) }.reduce(0, +)
+                items.append(Item(id: "spoiled-key",
+                                  title: spoiledNames.count == 1
+                                      ? "Повреждённый ключ истории (отложен)"
+                                      : "Повреждённые ключи истории (\(spoiledNames.count))",
+                                  bytes: total))
+            }
             items.append(Item(id: "defaults", title: "Настройки", bytes: nil))
             return items
         }.value
@@ -86,6 +99,17 @@ enum PrivacyCleanup {
         набранные слова и координаты не отправляются никуда.
         """
 
+    /// Всё, что оставляет после себя работа с ключом истории: сам ключ,
+    /// отложенный повреждённый ключ и отпечаток истории, по которому
+    /// решается, спрашивать ли связку. Два последних завела логика
+    /// спасения ключа, и «удалить всё» обязано убирать и их.
+    /// Имена начинаются с этих префиксов; точный список невозможен, потому
+    /// что отложенные повреждённые ключи нумеруются.
+    static let keyArtifactPrefixes = [
+        "debug-history.key",
+        "debug-history.rescue-failed",
+    ]
+
     // MARK: Удаление
 
     /// История буфера и её ключ. Возвращает описание ошибки или nil.
@@ -98,7 +122,7 @@ enum PrivacyCleanup {
         ]) {
             return failure
         }
-        if let failure = remove("debug-history.key") { return failure }
+        if let failure = removeMatching(prefixes: keyArtifactPrefixes) { return failure }
         if let failure = deleteKeychainKey() { return failure }
         quit()
     }
@@ -119,7 +143,7 @@ enum PrivacyCleanup {
         ]) {
             return failure
         }
-        if let failure = remove("debug-history.key") { return failure }
+        if let failure = removeMatching(prefixes: keyArtifactPrefixes) { return failure }
         if let failure = deleteKeychainKey() { return failure }
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
         // Настройки удаляем последними и сразу выходим: обычное завершение
@@ -130,11 +154,17 @@ enum PrivacyCleanup {
         quit()
     }
 
-    /// Возвращает описание первой ошибки; отсутствующий файл ошибкой не
-    /// считается.
+    /// Возвращает описание первой ошибки. Отсутствующий файл ошибкой не
+    /// считается, а вот «не удалось проверить, есть ли он» — считается:
+    /// иначе приложение отчиталось бы об удалении данных, о судьбе
+    /// которых ничего не знает.
     private static func remove(_ relative: String) -> String? {
         let url = directory.appendingPathComponent(relative)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        switch ClipboardStore.fileState(at: url) {
+        case .absent: return nil
+        case .unknown: return "\(relative): не удалось проверить, остался ли файл"
+        case .present: break
+        }
         do {
             try FileManager.default.removeItem(at: url)
             return nil
@@ -145,6 +175,21 @@ enum PrivacyCleanup {
 
     private static func removeAll(_ names: [String]) -> String? {
         for name in names {
+            if let failure = remove(name) { return failure }
+        }
+        return nil
+    }
+
+    /// Удаляет ВСЁ, что начинается с указанных имён. Карантин повреждённых
+    /// ключей нумерует файлы (…key.corrupt, …key.corrupt.2), и список
+    /// точных имён неизбежно отстал бы от того, что реально на диске.
+    private static func removeMatching(prefixes: [String]) -> String? {
+        let manager = FileManager.default
+        guard let names = try? manager.contentsOfDirectory(atPath: directory.path) else {
+            return "не удалось прочитать папку данных"
+        }
+        for name in names.sorted()
+        where prefixes.contains(where: { name.hasPrefix($0) }) {
             if let failure = remove(name) { return failure }
         }
         return nil
