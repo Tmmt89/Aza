@@ -196,6 +196,10 @@ swift run BuildChechenLexicon coverage --lexicon out_lexicon/lexicon.tsv \
 
 # Аудит палочки по всему репо
 python3 Tools/palochka_audit.py .
+
+# Всё разом — локальная замена CI (Actions заблокирован биллингом,
+# владелец работает без него): Tools/check.sh перед каждым push.
+Tools/check.sh
 ```
 
 Смоук-запуск приложения (проверки логики живут в `xcodebuild test`).
