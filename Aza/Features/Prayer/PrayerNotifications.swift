@@ -141,6 +141,9 @@ final class PrayerNotifications {
                     city: PrayerCity,
                     now: Date = .now) async -> Outcome {
         var wanted: Set<String> = []
+        /// Id, которые ХОТЕЛИ поставить, но add упал: их прежние версии в
+        /// очереди трогать нельзя — старое уведомление лучше пропавшего.
+        var failedIDs: Set<String> = []
         var failed = 0
 
         for day in days {
@@ -164,6 +167,7 @@ final class PrayerNotifications {
                     wanted.insert(id)
                 } catch {
                     failed += 1
+                    failedIDs.insert(id)
                     azaDebugLog("Aza: prayer notification add failed")
                 }
             }
@@ -188,7 +192,8 @@ final class PrayerNotifications {
         let pending = await center.pendingNotificationRequests()
         let stale = pending
             .map(\.identifier)
-            .filter { $0.hasPrefix(Self.identifierPrefix) && !wanted.contains($0) }
+            .filter { $0.hasPrefix(Self.identifierPrefix) && !wanted.contains($0)
+                && !failedIDs.contains($0) }
         center.removePendingNotificationRequests(withIdentifiers: stale)
         return Outcome(scheduled: wanted.count, failed: failed)
     }

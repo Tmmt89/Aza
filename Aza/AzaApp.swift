@@ -87,8 +87,13 @@ final class ClipboardStartup: ObservableObject {
 
 @main
 struct AzaApp: App {
+    /// Видимость иконки в строке меню (тумблер — в SetupView). Остров и
+    /// хоткеи работают и без неё, поэтому иконку можно убрать совсем.
+    static let menuBarIconKey = "MenuBarIconVisible"
+
     @StateObject private var hotKey = GlobalHotKey()
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
+    @AppStorage(Self.menuBarIconKey) private var menuBarIconVisible = true
     @StateObject private var clipboardStartup: ClipboardStartup
     @StateObject private var dictation: DictationController
     /// Остров у выреза — основной интерфейс (спецификация §3.1).
@@ -131,6 +136,12 @@ struct AzaApp: App {
         island.show()
 
         let setupModel = SetupModel(prayer: islandStore.prayer, dictation: dictation)
+        setupModel.rebindClipboardHotKey = { [weak islandStore] in
+            islandStore?.rebindClipboardHotKey()
+        }
+        setupModel.rebindPhrasesHotKey = { [weak islandStore] in
+            islandStore?.rebindPhrasesHotKey()
+        }
         _setupModel = StateObject(wrappedValue: setupModel)
         let setup = SetupWindowController(model: setupModel)
         self.setup = setup
@@ -141,10 +152,9 @@ struct AzaApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Aza", systemImage: "waveform") {
+        MenuBarExtra("Aza", systemImage: "waveform", isInserted: $menuBarIconVisible) {
             ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup,
                         dictation: dictation,
-                        commands: clipboardStartup.commands,
                         island: islandStore,
                         openSetup: { setup.show() })
         }

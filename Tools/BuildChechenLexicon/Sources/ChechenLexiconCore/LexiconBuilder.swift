@@ -121,13 +121,45 @@ public final class LexiconBuilder {
         }
         let grandTotal = totals.values.reduce(0, +)
 
-        // 2. Масштабирование источников до потолка доли.
+        // 2. Масштабирование источников до потолка доли. Доля меряется от
+        // ИТОГА ПОСЛЕ ужатия: однопроходное ужатие мерило от старого, и
+        // ужатый источник всё равно превышал maxShare (90/10 при потолке
+        // 0.2 давало 66/33). Water-filling: ужатые источники занимают
+        // ровно maxShare нового итога T, неужатые входят целиком —
+        // T = R_неужатых / (1 − Σ maxShare ужатых). Множество ужатых
+        // растёт монотонно, цикл конечен; неразрешимое ограничение
+        // (все источники под потолком, суммарно < 1) оставляет factor 1 —
+        // абсолютные счётчики важнее недостижимой доли.
         var factors: [String: Double] = [:]
-        for (sid, cfg) in sourcesById {
-            let raw = Double(rawTotals[sid] ?? 0)
-            guard raw > 0, grandTotal > 0 else { continue }
-            let share = raw / grandTotal
-            factors[sid] = share <= cfg.maxShare ? 1.0 : (cfg.maxShare * grandTotal) / raw
+        var capped: Set<String> = []
+        while grandTotal > 0 {
+            let cappedShareSum = capped
+                .compactMap { sourcesById[$0]?.maxShare }.reduce(0, +)
+            let uncappedRaw = rawTotals
+                .filter { !capped.contains($0.key) }.values.reduce(0, +)
+            guard cappedShareSum < 1, uncappedRaw > 0 else { break }
+            let total = Double(uncappedRaw) / (1 - cappedShareSum)
+            var changed = false
+            for (sid, cfg) in sourcesById where !capped.contains(sid) {
+                let raw = Double(rawTotals[sid] ?? 0)
+                if raw > 0, raw / total > cfg.maxShare + 1e-9 {
+                    capped.insert(sid)
+                    changed = true
+                }
+            }
+            if !changed {
+                for sid in capped {
+                    guard let cfg = sourcesById[sid],
+                          let raw = rawTotals[sid], raw > 0 else { continue }
+                    factors[sid] = (cfg.maxShare * total) / Double(raw)
+                }
+                break
+            }
+        }
+        // Неужатые источники — явная 1.0: манифест обязан перечислять
+        // множители ВСЕХ источников, а не только ужатых.
+        for sid in sourcesById.keys where (rawTotals[sid] ?? 0) > 0 && grandTotal > 0 {
+            factors[sid] = factors[sid] ?? 1.0
         }
 
         // 3. Взвешенное суммирование.

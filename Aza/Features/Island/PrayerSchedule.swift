@@ -40,6 +40,11 @@ struct PrayerDay: Decodable {
 struct PrayerSource: Decodable {
     let name: String
     let url: String
+    /// Хеш ПЕРВОИСТОЧНИКА (PDF/страницы муфтията) — метаданные для
+    /// прослеживаемости, НЕ криптографическая проверка: ни с чем не
+    /// сверяется. «Выверенность» таблицы означает «источник назван и
+    /// прослеживается», а не «подлинность доказана» — файлы кладёт сам
+    /// пользователь в свою папку, аутентификация здесь ничего не защитит.
     let sha256: String
 
     var shortName: String {
@@ -93,6 +98,15 @@ struct CityPrayerSchedule: Identifiable, Decodable {
     let releaseStatus: String
     let source: PrayerSource
     let days: [PrayerDay]
+    /// Город пришёл из файла, добавленного пользователем, а не из
+    /// поставляемого каталога. В JSON не кодируется — проставляется при
+    /// загрузке; интерфейс помечает такие времена честной оговоркой.
+    var userProvided = false
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, timeZone, coverageStatus, coverageStart,
+             coverageEnd, releaseStatus, source, days
+    }
 
     var isComplete: Bool { coverageStatus == "complete" }
 

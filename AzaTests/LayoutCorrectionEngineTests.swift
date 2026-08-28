@@ -27,6 +27,36 @@ final class LayoutCorrectionEngineTests: XCTestCase {
         XCTAssertNil(LayoutCorrectionEngine.remapped("hello!", table: enToRu))
     }
 
+    func testShortWordRemaps() {
+        // Двухбуквенные местоимения и частицы исправляются, однобуквенное —
+        // только «я»; английские и кодовые диграфы не трогаются.
+        XCTAssertEqual(LayoutCorrectionEngine.correction(for: "ns")?.text, "ты")
+        XCTAssertEqual(LayoutCorrectionEngine.correction(for: "yt")?.text, "не")
+        XCTAssertEqual(LayoutCorrectionEngine.correction(for: "z")?.text, "я")
+        XCTAssertNil(LayoutCorrectionEngine.correction(for: "in"))
+        XCTAssertNil(LayoutCorrectionEngine.correction(for: "if"))
+        XCTAssertNil(LayoutCorrectionEngine.correction(for: "js"))
+        XCTAssertNil(LayoutCorrectionEngine.correction(for: "b"))
+        XCTAssertNil(LayoutCorrectionEngine.correction(for: "t"))
+    }
+
+    func testRussianBackwardSpan() {
+        // «e vtyz» → «у меня»: однобуквенное «у» подтягивается ретроактивно.
+        let span = LayoutCorrectionEngine.backwardRussianSpan(previous: [
+            .init(typed: "e", delimiter: " ", chechen: false, corrected: false),
+        ], correctedWord: "меня")
+        XCTAssertEqual(span, .init(original: "e ", corrected: "у ",
+                                   originalWords: ["e"]))
+        // Валидное английское слово обрывает расширение.
+        XCTAssertNil(LayoutCorrectionEngine.backwardRussianSpan(previous: [
+            .init(typed: "in", delimiter: " ", chechen: false, corrected: false),
+        ], correctedWord: "меня"))
+        // Однобуквенное, не являющееся русским словом (t→е), не подтягивается.
+        XCTAssertNil(LayoutCorrectionEngine.backwardRussianSpan(previous: [
+            .init(typed: "t", delimiter: " ", chechen: false, corrected: false),
+        ], correctedWord: "меня"))
+    }
+
     func testPalochkaHypothesisAndAmbiguityAbstention() {
         XCTAssertEqual(LayoutCorrectionEngine.normalizedPalochka("1алам"), "ӏалам")
         XCTAssertTrue(LayoutCorrectionEngine.firstKeyAlternativeIsChechen(
@@ -78,8 +108,8 @@ final class LayoutCorrectionEngineTests: XCTestCase {
     }
 
     func testExcludedAppPolicyAndTextHelpers() {
-        XCTAssertTrue(ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Terminal"))
-        XCTAssertTrue(ExcludedApps.isCorrectionDenied(bundleID: "com.jetbrains.intellij"))
+        XCTAssertFalse(ExcludedApps.isCorrectionDenied(bundleID: "com.apple.Terminal"))
+        XCTAssertFalse(ExcludedApps.isCorrectionDenied(bundleID: "com.jetbrains.intellij"))
         XCTAssertTrue(ExcludedApps.isCorrectionDenied(bundleID: "com.1password.1password"))
         XCTAssertFalse(ExcludedApps.isCorrectionDenied(bundleID: "com.apple.TextEdit"))
         XCTAssertEqual(TextInsertion.matchingCase(of: "Ghbdtn ", applyingTo: "привет "),

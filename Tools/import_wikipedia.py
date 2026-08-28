@@ -24,11 +24,11 @@ def has_cyrillic(text: str) -> bool:
     return any(0x0400 <= ord(ch) <= 0x04FF for ch in text)
 
 
-if len(sys.argv) < 4:
+if len(sys.argv) < 3:
     print(__doc__)
     sys.exit(2)
 
-parquets = sys.argv[2:-1]
+parquets = sys.argv[1:-1]
 out_path = Path(sys.argv[-1])
 
 articles = []

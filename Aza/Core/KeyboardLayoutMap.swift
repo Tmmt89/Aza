@@ -1,4 +1,5 @@
 import Carbon.HIToolbox
+import Foundation
 
 /// Character mappings between the user's installed keyboard layouts, read from
 /// the system with UCKeyTranslate instead of being hardcoded: layouts disagree
@@ -13,6 +14,7 @@ enum KeyboardLayoutMap {
     /// the same physical key in the `target` layout. Nil when either language
     /// has no installed keyboard layout.
     static func table(from source: String, to target: String) -> [Character: Character]? {
+        observeLayoutChangesOnce()
         let cacheKey = "\(source)>\(target)"
         if let cached = tables[cacheKey] { return cached }
 
@@ -54,6 +56,25 @@ enum KeyboardLayoutMap {
     static func invalidate() {
         tables.removeAll()
         punctuation = nil
+    }
+
+    /// Смена набора/выбора раскладок инвалидирует кэш сама: иначе таблицы
+    /// жили до перезапуска, и установленная на лету раскладка (или смена
+    /// «Русская» ↔ «Русская — ПК») отдавала устаревшие ремапы. Пересборка
+    /// ленивая и дешёвая (2×51 UCKeyTranslate).
+    private static var observing = false
+    private static func observeLayoutChangesOnce() {
+        guard !observing else { return }
+        observing = true
+        for case let name? in [kTISNotifyEnabledKeyboardInputSourcesChanged,
+                               kTISNotifySelectedKeyboardInputSourceChanged] {
+            DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name(name as String),
+                object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { invalidate() }
+            }
+        }
     }
 
     private static func layoutData(for language: String) -> CFData? {

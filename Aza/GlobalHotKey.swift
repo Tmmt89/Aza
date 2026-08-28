@@ -43,6 +43,13 @@ final class GlobalHotKey: ObservableObject {
         let corrected: String
         let delimiter: String
         let originalWords: [String]
+        /// Окно и процесс, где исправляли: откат в другом окне (или, при
+        /// недоступных окнах, в другом приложении) с совпавшим текстом
+        /// перед кареткой переписал бы чужое поле. Точнее поле не привязать:
+        /// CFEqual для AX-обёрток полей не работает (§TextInsertion.processID),
+        /// остаточный риск закрывает обязательное совпадение текста замены.
+        let window: AXUIElement?
+        let pid: pid_t?
     }
     private var lastCorrection: LastCorrection?
     private var lastRightShiftPress = Date.distantPast
@@ -74,6 +81,9 @@ final class GlobalHotKey: ObservableObject {
         monitor.onContextBreak = { [weak self] in
             self?.recentWords.removeAll()
             self?.inputGeneration &+= 1
+        }
+        monitor.onWordDecision = { [weak self] word, delimiter in
+            self?.activeDecision(word: word, delimiter: delimiter)
         }
         wordMonitor = monitor
 
@@ -152,16 +162,36 @@ final class GlobalHotKey: ObservableObject {
             correctionStatus = "Поле для отмены недоступно"
             return
         }
+        // pid строго: нечитаемый pid с любой стороны — отказ, не nil == nil.
+        guard Self.sameWindow(last.window, TextInsertion.window(of: element)),
+              let lastPid = last.pid,
+              lastPid == TextInsertion.processID(of: element) else {
+            correctionStatus = "Отменять можно только в окне, где исправляли"
+            return
+        }
 
-        if TextInsertion.replaceTypedText(
+        var undone = TextInsertion.replaceTypedText(
             in: element,
             expecting: last.corrected + last.delimiter,
             with: last.original + last.delimiter
-        ) {
+        )
+        // Поле, где AX-замена не применяется (webview): откат той же
+        // сверенной синтетикой, что и исправление.
+        if !undone,
+           let tail = TextInsertion.typedTail(after: last.corrected + last.delimiter,
+                                              in: element, maxTail: 12) {
+            undone = TextInsertion.retypeWord(typed: last.corrected,
+                                              delimiter: last.delimiter,
+                                              corrected: last.original, tail: tail,
+                                              verifying: element)
+        }
+        if undone {
             // Каждое слово фразы отдельно: исключения работают пословно.
             for word in last.originalWords {
                 UserWordLists.shared.addNeverCorrect(word)
             }
+            // Пользователь передумал — подтверждение снимается.
+            UserWordLists.shared.removeConfirmed(last.corrected)
             recentWords.removeAll()
             correctionStatus = "Отменено: \(last.corrected) → \(last.original); в исключениях"
             lastCorrection = nil
@@ -172,6 +202,9 @@ final class GlobalHotKey: ObservableObject {
         }
     }
 
+    /// ⌘⇧A — принудительный ремап слова перед кареткой: выход для всех
+    /// случаев, где автоматика воздержалась. Результат заносится в
+    /// подтверждённые — дальше это слово исправляется само.
     private func handleActivation() {
         activationCount += 1
 
@@ -182,20 +215,48 @@ final class GlobalHotKey: ObservableObject {
             return
         }
 
-        guard let element = TextInsertion.focusedElement() else {
-            insertionStatus = "Активное поле ввода не найдено"
+        guard let element = TextInsertion.focusedElement(),
+              !SecureFieldDetector.isSecure(element) else {
+            insertionStatus = "Поле для исправления недоступно"
             return
         }
 
-        guard !SecureFieldDetector.isSecure(element) else {
-            insertionStatus = "В защищённые поля Aza не вставляет"
+        guard let token = TextInsertion.tokenBeforeCaret(in: element), !token.isEmpty else {
+            insertionStatus = "Перед курсором нет слова"
             return
         }
 
-        let insertResult = TextInsertion.insert("Тест Aza", into: element)
-        insertionStatus = insertResult == .success
-            ? "«Тест Aza» вставлен"
-            : "Поле не поддерживает прямую вставку (\(insertResult.rawValue))"
+        let isCyrillic = token.unicodeScalars.contains { (0x400...0x4FF).contains($0.value) }
+        let target = isCyrillic ? "en" : "ru"
+        guard let table = KeyboardLayoutMap.table(from: isCyrillic ? "ru" : "en", to: target),
+              let mapped = LayoutCorrectionEngine.remapped(token, table: table) else {
+            insertionStatus = "«\(token)» не ремапится в другую раскладку"
+            return
+        }
+
+        var replaced = TextInsertion.replaceTypedText(in: element, expecting: token, with: mapped)
+        if !replaced,
+           let tail = TextInsertion.typedTail(after: token, in: element, maxTail: 2) {
+            replaced = TextInsertion.retypeWord(typed: token, delimiter: "",
+                                                corrected: mapped, tail: tail,
+                                                verifying: element)
+        }
+        guard replaced else {
+            insertionStatus = "Не удалось заменить «\(token)»"
+            return
+        }
+
+        correctionCount += 1
+        UserWordLists.shared.addConfirmed(mapped)
+        lastCorrection = LastCorrection(original: token, corrected: mapped,
+                                        delimiter: "", originalWords: [token],
+                                        window: TextInsertion.window(of: element),
+                                        pid: TextInsertion.processID(of: element))
+        let switched = InputSourceSwitcher.select(language: target) == nil
+        let status = "\(token) → \(mapped)" + (switched ? "; раскладка: \(target.uppercased())" : "")
+        insertionStatus = status
+        correctionStatus = status
+        azaDebugLog("Aza: manual remap len=\(token.count) -> \(target)")
     }
 
     private static func sameWindow(_ a: AXUIElement?, _ b: AXUIElement?) -> Bool {
@@ -214,12 +275,15 @@ final class GlobalHotKey: ObservableObject {
         }
     }
 
-    private func finishWord(_ word: String, delimiter: String) {
+    /// Общая часть пассивного и активного путей: контекст фразы, движок,
+    /// защита от системной автозамены и запоминание неисправленных слов.
+    /// nil — исправлять нечего (вся сопутствующая работа уже сделана).
+    private func evaluate(word: String, delimiter: String) -> (text: String, inputLanguage: String?)? {
         // Выключенная коррекция не должна ни исправлять, ни копить контекст:
         // иначе двухбуквенный контекстный ремап всё равно менял бы текст.
         guard ChechenAutocorrect.isLayoutCorrectionEnabled else {
             recentWords.removeAll()
-            return
+            return nil
         }
         inputGeneration &+= 1
         // Смена фокусного окна внутри приложения (другой документ, диалог
@@ -245,7 +309,7 @@ final class GlobalHotKey: ObservableObject {
         }
 
         azaDebugLog("Aza: finishWord len=\(word.count) correction=\(correction == nil ? 0 : 1)")
-        guard let correction else {
+        guard correction != nil else {
             let isChechen = LayoutCorrectionEngine.looksChechen(word)
             // Защита от системной автозамены macOS: она не знает чеченского
             // и «чинит» словарные слова в русские соседи («лар» → «лор»).
@@ -282,22 +346,29 @@ final class GlobalHotKey: ObservableObject {
             }
             remember(FinishedWord(typed: word, delimiter: delimiter,
                                   chechen: isChechen, corrected: false))
-            return
+            return nil
         }
+        return correction
+    }
 
-        // Бэквард-контекст: исправление оказалось чеченским словом — вся
-        // фраза, скорее всего, чеченская. Непрерывный хвост предыдущих
-        // НЕисправленных слов с частотным чеченским ремапом включается в ту
-        // же атомарную замену: "[e le wbuf[m" → «ху ду цигахь» (пока «ху»
-        // нет в корпусе — «[e ду цигахь»). Слово без такого ремапа (бренд,
-        // английское, русское) обрывает расширение и остаётся как есть.
-        let span = LayoutCorrectionEngine.backwardContextSpan(
-            previous: recentWords.map {
-                .init(typed: $0.typed, delimiter: $0.delimiter,
-                      chechen: $0.chechen, corrected: $0.corrected)
-            },
-            correctedWord: correction.text
-        )
+    private func finishWord(_ word: String, delimiter: String) {
+        guard let correction = evaluate(word: word, delimiter: delimiter) else { return }
+
+        // Бэквард-контекст: исправление оказалось чеченским (или русским)
+        // словом — непрерывный хвост предыдущих НЕисправленных слов с
+        // подходящим ремапом включается в ту же атомарную замену:
+        // "[e le wbuf[m" → «[e ду цигахь», "e vtyz" → «у меня».
+        let previous = recentWords.map {
+            LayoutCorrectionEngine.PhraseWord(
+                typed: $0.typed, delimiter: $0.delimiter,
+                chechen: $0.chechen, corrected: $0.corrected)
+        }
+        var span = LayoutCorrectionEngine.backwardContextSpan(
+            previous: previous, correctedWord: correction.text)
+        if span == nil, correction.inputLanguage == "ru" {
+            span = LayoutCorrectionEngine.backwardRussianSpan(
+                previous: previous, correctedWord: correction.text)
+        }
         let spanOriginal = span?.original ?? ""
         let spanCorrected = span?.corrected ?? ""
         let spanWords = span?.originalWords ?? []
@@ -312,6 +383,22 @@ final class GlobalHotKey: ObservableObject {
             azaDebugLog("Aza: focused element missing or secure")
             correctionStatus = "Поле нельзя исправлять"
             recentWords.removeAll()
+            // Electron, разбуженный этим же вызовом focusedElement: дерево
+            // доступности строится асинхронно, и первое слово раньше
+            // пропадало. Одна повторная попытка; сверки внутри
+            // applyCorrection не дадут переписать чужой текст.
+            let generation = inputGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in
+                guard let self, self.inputGeneration == generation,
+                      let element = TextInsertion.focusedElement(),
+                      !SecureFieldDetector.isSecure(element) else { return }
+                azaDebugLog("Aza: retry after accessibility wake")
+                self.applyCorrection(word: word, delimiter: delimiter,
+                                     correction: correction,
+                                     spanOriginal: spanOriginal,
+                                     spanCorrected: spanCorrected,
+                                     spanWords: spanWords, element: element)
+            }
             return
         }
 
@@ -319,7 +406,18 @@ final class GlobalHotKey: ObservableObject {
         // verifies the text before the caret still matches, so a moved caret
         // aborts the replacement instead of corrupting the field.
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
-            guard let self else { return }
+            self?.applyCorrection(word: word, delimiter: delimiter,
+                                  correction: correction,
+                                  spanOriginal: spanOriginal,
+                                  spanCorrected: spanCorrected,
+                                  spanWords: spanWords, element: element)
+        }
+    }
+
+    private func applyCorrection(word: String, delimiter: String,
+                                 correction: (text: String, inputLanguage: String?),
+                                 spanOriginal: String, spanCorrected: String,
+                                 spanWords: [String], element: AXUIElement) {
             var usedSpan = !spanOriginal.isEmpty
             var replaced = TextInsertion.replaceTypedText(
                 in: element,
@@ -339,7 +437,55 @@ final class GlobalHotKey: ObservableObject {
             }
             azaDebugLog("Aza: replaceTypedText ok=\(replaced ? 1 : 0) span=\(usedSpan ? spanWords.count : 0)")
             guard replaced else {
-                self.correctionStatus = "Не удалось заменить слово"
+                // AX-картинка поля ложная (webview: Claude-чат VS Code) —
+                // текст правится только синтетическими клавишами. В обычном
+                // поле, где слово читается, так делать нельзя: провал выше
+                // означал сдвиг каретки, слепое стирание попало бы не туда.
+                // Синтетика разрешена, когда стираемое сверено чтением по
+                // диапазону (typedTail заодно возвращает буквы, напечатанные
+                // за задержку, — они стираются и перепечатываются), ЛИБО
+                // поле заведомо «врёт» через AX и сверить нечем (webview
+                // с aria-подсказкой вместо содержимого).
+                let tail = TextInsertion.typedTail(after: word + delimiter,
+                                                   in: element, maxTail: 12)
+                let fakeView = tail == nil
+                    && TextInsertion.valueHidesTypedWord(in: element, typed: word)
+                let retyped = (tail != nil || fakeView) && TextInsertion.retypeWord(
+                    typed: word, delimiter: delimiter, corrected: correction.text,
+                    tail: tail ?? "", verifying: element)
+                azaDebugLog("Aza: synthetic retype verified=\(tail != nil ? 1 : 0) tail=\(tail?.count ?? -1) fake=\(fakeView ? 1 : 0) ok=\(retyped ? 1 : 0)")
+                if retyped {
+                    self.correctionCount += 1
+                    self.recentWords.removeAll()
+                    self.remember(FinishedWord(
+                        typed: correction.text, delimiter: delimiter,
+                        chechen: LayoutCorrectionEngine.looksChechen(correction.text),
+                        corrected: true))
+                    // Undo двойным Shift работает и здесь: откат идёт той же
+                    // сверенной синтетикой.
+                    self.lastCorrection = LastCorrection(
+                        original: word, corrected: correction.text,
+                        delimiter: delimiter, originalWords: [word],
+                        window: TextInsertion.window(of: element),
+                                        pid: TextInsertion.processID(of: element))
+                    if let language = correction.inputLanguage,
+                       InputSourceSwitcher.select(language: language) == nil {
+                        self.correctionStatus =
+                            "\(word) → \(correction.text); раскладка: \(language.uppercased())"
+                    } else {
+                        self.correctionStatus = "\(word) → \(correction.text)"
+                    }
+                    return
+                }
+                // Заменить не вышло — раскладку всё равно переключаем:
+                // намерение распознано, дальше печать уже на нужном языке.
+                if let language = correction.inputLanguage,
+                   InputSourceSwitcher.select(language: language) == nil {
+                    self.correctionStatus =
+                        "Поле не даёт заменить слово; раскладка: \(language.uppercased())"
+                } else {
+                    self.correctionStatus = "Не удалось заменить слово"
+                }
                 self.remember(FinishedWord(typed: word, delimiter: delimiter,
                                            chechen: false, corrected: false))
                 return
@@ -353,7 +499,9 @@ final class GlobalHotKey: ObservableObject {
                 original: usedSpan ? spanOriginal + word : word,
                 corrected: usedSpan ? spanCorrected + correction.text : correction.text,
                 delimiter: delimiter,
-                originalWords: usedSpan ? spanWords + [word] : [word]
+                originalWords: usedSpan ? spanWords + [word] : [word],
+                window: TextInsertion.window(of: element),
+                pid: TextInsertion.processID(of: element)
             )
             guard let language = correction.inputLanguage else {
                 self.correctionStatus = "\(word) → \(correction.text)"
@@ -364,6 +512,41 @@ final class GlobalHotKey: ObservableObject {
             } else {
                 self.correctionStatus = "\(word) → \(correction.text); раскладка: \(language.uppercased())"
             }
+    }
+
+    /// Активный режим: решение прямо в tap-колбэке. Вернуть исправление —
+    /// WordMonitor проглотит разделитель и перепечатает слово ДО его
+    /// вставки; nil — событие проходит.
+    /// ponytail: фразовый бэквард-контекст здесь не расширяется — активная
+    /// замена всегда пословная; добавить, если режим приживётся.
+    private func activeDecision(word: String, delimiter: String) -> String? {
+        guard let correction = evaluate(word: word, delimiter: delimiter) else { return nil }
+        // Secure-поле: пропустить событие без замены. Элемент не нашёлся —
+        // тоже пропуск: без него не проверить secure, а слепая замена в
+        // возможном поле пароля хуже пропущенного исправления. Цена —
+        // первое слово в Electron до пробуждения AX-дерева (как в пассиве).
+        guard let element = TextInsertion.focusedElement(),
+              !SecureFieldDetector.isSecure(element) else {
+            remember(FinishedWord(typed: word, delimiter: delimiter,
+                                  chechen: false, corrected: false))
+            return nil
         }
+        correctionCount += 1
+        recentWords.removeAll()
+        remember(FinishedWord(typed: correction.text, delimiter: delimiter,
+                              chechen: LayoutCorrectionEngine.looksChechen(correction.text),
+                              corrected: true))
+        lastCorrection = LastCorrection(original: word, corrected: correction.text,
+                                        delimiter: delimiter, originalWords: [word],
+                                        window: TextInsertion.window(of: element),
+                                        pid: TextInsertion.processID(of: element))
+        if let language = correction.inputLanguage,
+           InputSourceSwitcher.select(language: language) == nil {
+            correctionStatus = "\(word) → \(correction.text); раскладка: \(language.uppercased())"
+        } else {
+            correctionStatus = "\(word) → \(correction.text)"
+        }
+        azaDebugLog("Aza: active replace len=\(word.count)")
+        return correction.text
     }
 }

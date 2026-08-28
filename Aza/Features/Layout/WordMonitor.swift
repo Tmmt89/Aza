@@ -4,12 +4,25 @@ import Carbon.HIToolbox
 /// Global keyDown monitor that accumulates the word being typed and reports it
 /// once a delimiter is pressed. Owner must call stop() explicitly; there is no
 /// deinit cleanup because NSEvent.removeMonitor requires the main thread.
+///
+/// Два режима (ChechenAutocorrect.isActiveTapEnabled, читается на старте):
+/// - пассивный (по умолчанию): NSEvent-монитор, слово исправляется ПОСЛЕ
+///   вставки разделителя (AX-замена / синтетика в GlobalHotKey);
+/// - активный: CGEventTap задерживает разделитель, onWordDecision решает,
+///   и слово перепечатывается ДО того, как разделитель дошёл до поля —
+///   ноль гонок с быстрым набором и работа в «глухих» webview.
 @MainActor
 final class WordMonitor {
     private var monitor: Any?
+    private var eventTap: CFMachPort?
+    private var tapSource: CFRunLoopSource?
     private var currentWord = ""
     private var lastBundleID: String?
     private let onWordFinished: (_ word: String, _ delimiter: String) -> Void
+    /// Активный режим: вернуть исправление — разделитель проглатывается,
+    /// монитор стирает слово и печатает исправление с разделителем;
+    /// nil — событие проходит как есть.
+    var onWordDecision: ((_ word: String, _ delimiter: String) -> String?)?
     /// Вызывается при разрыве контекста (переключение приложения):
     /// владелец сбрасывает состояние фразы.
     var onContextBreak: (() -> Void)?
@@ -18,13 +31,14 @@ final class WordMonitor {
         self.onWordFinished = onWordFinished
     }
 
-    var isRunning: Bool { monitor != nil }
+    var isRunning: Bool { monitor != nil || eventTap != nil }
 
     func start() {
-        guard monitor == nil else { return }
+        guard !isRunning else { return }
+        if ChechenAutocorrect.isActiveTapEnabled, startActiveTap() { return }
         monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             MainActor.assumeIsolated {
-                self?.handle(event)
+                self?.handlePassive(event)
             }
         }
     }
@@ -34,23 +48,98 @@ final class WordMonitor {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil
         }
+        if let tapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes)
+            self.tapSource = nil
+        }
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            self.eventTap = nil
+        }
         currentWord = ""
     }
 
-    private func handle(_ event: NSEvent) {
+    // MARK: Пассивный режим
+
+    private func handlePassive(_ event: NSEvent) {
         guard event.cgEvent?.getIntegerValueField(.eventSourceUserData) != TextInsertion.syntheticEventMarker else {
             return
         }
+        for finished in accumulate(event) {
+            onWordFinished(finished.word, finished.delimiter)
+        }
+    }
 
-        // Политика исключений (спецификация §6): терминалы, IDE и менеджеры
-        // паролей не исправляются; остальные приложения — да. Secure-поля
+    // MARK: Активный режим (CGEventTap)
+
+    private func startActiveTap() -> Bool {
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, cgEvent, refcon in
+                guard let refcon else { return Unmanaged.passUnretained(cgEvent) }
+                let monitor = Unmanaged<WordMonitor>.fromOpaque(refcon).takeUnretainedValue()
+                // Источник тапа стоит на главном runloop — колбэк главный.
+                return MainActor.assumeIsolated {
+                    monitor.handleTap(type: type, event: cgEvent)
+                }
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            azaDebugLog("Aza: active event tap creation failed, falling back to passive")
+            return false
+        }
+        eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        tapSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        azaDebugLog("Aza: active event tap started")
+        return true
+    }
+
+    private func handleTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Систему нельзя оставлять без клавиатуры: отключённый по таймауту
+        // тап молча убивает ввод — включаем обратно и пропускаем событие.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard event.getIntegerValueField(.eventSourceUserData) != TextInsertion.syntheticEventMarker,
+              let nsEvent = NSEvent(cgEvent: event) else {
+            return Unmanaged.passUnretained(event)
+        }
+        let finished = accumulate(nsEvent)
+        // ponytail: одно завершённое слово на нажатие; редкий мульти-ввод
+        // (IME) проходит без замены.
+        guard finished.count == 1, let single = finished.first,
+              let corrected = onWordDecision?(single.word, single.delimiter) else {
+            return Unmanaged.passUnretained(event)
+        }
+        // Разделитель проглочен — поле содержит ровно набранное слово:
+        // стереть и напечатать исправление вместе с разделителем.
+        // ponytail: автодополнение поля (IDE) может успеть изменить текст
+        // под backspace-ами — режим включается осознанно, не по умолчанию.
+        _ = TextInsertion.retypeWord(typed: single.word, delimiter: "",
+                                     corrected: corrected + single.delimiter, tail: "")
+        return nil
+    }
+
+    // MARK: Общий накопитель слова
+
+    private func accumulate(_ event: NSEvent) -> [(word: String, delimiter: String)] {
+        // Политика исключений: менеджеры паролей и пользовательский список
+        // не исправляются; остальные приложения — да. Secure-поля
         // отсекаются на уровне элемента в момент замены.
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         guard let bundleID, !ExcludedApps.isCorrectionDenied(bundleID: bundleID) else {
             currentWord = ""
             lastBundleID = bundleID
             onContextBreak?()
-            return
+            return []
         }
         // Смена приложения — разрыв слова и контекста фразы: буфер не должен
         // переезжать между окнами.
@@ -65,26 +154,31 @@ final class WordMonitor {
             if !currentWord.isEmpty {
                 currentWord.removeLast()
             }
-            return
+            return []
         }
 
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
               let characters = event.characters,
               !characters.isEmpty else {
             currentWord = ""
-            return
+            return []
         }
 
+        var finished: [(word: String, delimiter: String)] = []
         let wordPunctuation = KeyboardLayoutMap.wordPunctuation()
         for character in characters {
             if character.isLetter || wordPunctuation.contains(character) {
                 currentWord.append(character)
             } else {
-                if !currentWord.isEmpty {
-                    onWordFinished(currentWord, String(character))
+                // Без единой буквы это не слово, а число или пунктуация:
+                // «1» из «1994» иначе засорял бы контекст фразы (сама «1»
+                // — словообразующая только как двойник палочки: «1алам»).
+                if currentWord.contains(where: \.isLetter) {
+                    finished.append((currentWord, String(character)))
                 }
                 currentWord = ""
             }
         }
+        return finished
     }
 }

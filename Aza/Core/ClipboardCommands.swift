@@ -36,21 +36,30 @@ final class ClipboardCommands: ObservableObject {
     func copyToPasteboard(_ entry: ClipEntry) -> Bool {
         guard let store else { return false }
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
+        // clearContents — только после того, как данные добыты: неудача
+        // (нечитаемый blob) не должна стирать прежнее содержимое буфера.
         switch entry.resolvedKind {
         case .files:
             let urls = (entry.filePaths ?? []).map { URL(fileURLWithPath: $0) as NSURL }
+            guard !urls.isEmpty else {
+                status = "Файлы недоступны"
+                return false
+            }
+            pasteboard.clearContents()
             pasteboard.writeObjects(urls)
         case .image:
             guard let data = store.imageData(for: entry) else {
                 status = "Изображение недоступно"
                 return false
             }
+            pasteboard.clearContents()
             pasteboard.setData(data, forType: .png)
         case .rtf:
+            pasteboard.clearContents()
             if let rtf = entry.rtfData { pasteboard.setData(rtf, forType: .rtf) }
             pasteboard.setString(entry.text, forType: .string)
         case .text, .link:
+            pasteboard.clearContents()
             pasteboard.setString(entry.text, forType: .string)
         }
         status = "Скопировано — вставьте ⌘V"
@@ -73,15 +82,35 @@ final class ClipboardCommands: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) { [weak self] in
             guard let self else { return }
             guard let element = TextInsertion.focusedElement(),
-                  TextInsertion.isTextLike(element),
-                  !SecureFieldDetector.isSecure(element) else {
-                self.status = "Поле не найдено — текст в буфере (⌘V)"
+                  TextInsertion.isTextLike(element) else {
+                // AX не видит поле (Electron, webview) — запись уже в
+                // буфере, добиваем синтетическим ⌘V, как вставка фраз.
+                self.status = TextInsertion.postPasteCommand()
+                    ? "Вставлено в активное приложение"
+                    : "Поле не найдено — текст в буфере (⌘V)"
                 return
             }
-            let result = TextInsertion.insert(entry.text, into: element)
-            self.status = result == .success
-                ? "Вставлено в активное приложение"
-                : "Прямая вставка не поддержана — ⌘V"
+            guard !SecureFieldDetector.isSecure(element) else {
+                self.status = "Защищённое поле — вставьте ⌘V"
+                return
+            }
+            let caretBefore = TextInsertion.caretPosition(of: element)
+            guard TextInsertion.insert(entry.text, into: element) == .success else {
+                self.status = TextInsertion.postPasteCommand()
+                    ? "Вставлено в активное приложение"
+                    : "Прямая вставка не поддержана — ⌘V"
+                return
+            }
+            self.status = "Вставлено в активное приложение"
+            // Electron может ответить success, ничего не вставив: каретка
+            // обязана сдвинуться. Добиваем ⌘V только при точно неподвижной
+            // каретке — двойная вставка хуже пропущенной.
+            guard let caretBefore else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
+                if TextInsertion.caretPosition(of: element) == caretBefore {
+                    _ = TextInsertion.postPasteCommand()
+                }
+            }
         }
     }
 

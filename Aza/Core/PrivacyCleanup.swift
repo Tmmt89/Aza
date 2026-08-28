@@ -62,6 +62,24 @@ enum PrivacyCleanup {
                 Item(id: "words", title: "Слова-исключения",
                      bytes: size(of: "user-words.json")),
             ]
+            if let phrases = size(of: "phrases.json") {
+                items.append(Item(id: "phrases",
+                                  title: "Изменённые фразы быстрой вставки",
+                                  bytes: phrases))
+            }
+            // Карантин нечитаемых фраз нумеруется (phrases.unreadable.json,
+            // .2, …) — опись обязана показывать всё, что реально на диске.
+            let unreadablePhrases = ((try? FileManager.default
+                .contentsOfDirectory(atPath: root.path)) ?? [])
+                .filter { $0.hasPrefix("phrases.unreadable") }
+            if !unreadablePhrases.isEmpty {
+                let total = unreadablePhrases.compactMap { size(of: $0) }.reduce(0, +)
+                items.append(Item(id: "phrases-backup",
+                                  title: unreadablePhrases.count == 1
+                                      ? "Копия нечитаемых фраз"
+                                      : "Копии нечитаемых фраз (\(unreadablePhrases.count))",
+                                  bytes: total))
+            }
             if let schedules = size(of: "prayer-schedules") {
                 items.append(Item(id: "schedules",
                                   title: "Импортированные расписания намаза",
@@ -124,6 +142,7 @@ enum PrivacyCleanup {
     /// Приложение завершается только при полном успехе: удалить ключ,
     /// оставив нечитаемую историю, хуже, чем не удалить ничего.
     static func deleteClipboardHistory() -> String? {
+        ClipboardStore.maintenanceSuspended = true
         if let failure = removeAll([
             "clipboard-history.bin", "clipboard-history.blobs",
             "clipboard-history.unreadable.bin",
@@ -142,18 +161,31 @@ enum PrivacyCleanup {
         remove("huggingface")
     }
 
+    /// Одна модель по варианту WhisperKit — остальные остаются на диске.
+    /// Общий токенизатор не трогаем: он мал и нужен другим моделям.
+    static func deleteModel(variant: String) -> String? {
+        remove("huggingface/models/argmaxinc/whisperkit-coreml/\(variant)")
+    }
+
     /// Всё, кроме самой папки и файла блокировки.
     static func deleteEverything() -> String? {
+        ClipboardStore.maintenanceSuspended = true
         if let failure = removeAll([
             "clipboard-history.bin", "clipboard-history.blobs",
             "clipboard-history.unreadable.bin", "user-words.json",
-            "huggingface", "prayer-schedules",
+            "phrases.json", "huggingface", "prayer-schedules",
         ]) {
             return failure
         }
-        if let failure = removeMatching(prefixes: keyArtifactPrefixes) { return failure }
+        // Карантин фраз нумеруется — убираем по префиксу, как ключи.
+        if let failure = removeMatching(prefixes: keyArtifactPrefixes
+            + ["phrases.unreadable"]) { return failure }
         if let failure = deleteKeychainKey() { return failure }
-        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        let center = UNUserNotificationCenter.current()
+        center.removeAllPendingNotificationRequests()
+        // Уже показанные уведомления — тоже данные Aza (город, времена):
+        // «удалить всё» убирает их из Центра уведомлений.
+        center.removeAllDeliveredNotifications()
         // Настройки удаляем последними и сразу выходим: обычное завершение
         // успело бы записать @AppStorage обратно.
         UserDefaults.standard.removePersistentDomain(

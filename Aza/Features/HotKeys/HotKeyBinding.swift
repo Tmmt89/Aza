@@ -13,11 +13,14 @@ struct HotKeyBinding: Codable, Equatable {
 
     static let dictationKey = "HotKey.Dictation"
     static let clipboardKey = "HotKey.Clipboard"
+    static let phrasesKey = "HotKey.Phrases"
 
     static let dictationDefault = HotKeyBinding(
         keyCode: UInt32(kVK_ANSI_D), modifiers: UInt32(controlKey | shiftKey))
     static let clipboardDefault = HotKeyBinding(
         keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(controlKey | shiftKey))
+    static let phrasesDefault = HotKeyBinding(
+        keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(controlKey | shiftKey))
 
     static func load(_ key: String, fallback: HotKeyBinding) -> HotKeyBinding {
         guard let data = UserDefaults.standard.data(forKey: key),

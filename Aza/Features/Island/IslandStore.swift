@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import SwiftUI
 
@@ -7,20 +8,20 @@ enum IslandMode: String, CaseIterable {
     case home
     case dictation
     case clipboard
+    case phrases
 
     var shoulder: CGFloat {
         switch self {
         case .home: 42
-        case .clipboard: 30
-        case .idle: 22
-        case .dictation: 20
+        case .clipboard, .phrases: 30
+        case .idle, .dictation: 22
         }
     }
 
     var bottomRadius: CGFloat {
         switch self {
         case .idle, .dictation: 22
-        case .home, .clipboard: 34
+        case .home, .clipboard, .phrases: 34
         }
     }
 
@@ -28,17 +29,22 @@ enum IslandMode: String, CaseIterable {
         switch self {
         case .idle: (0.18, 11, 10)
         case .dictation: (0.16, 10, 10)
-        case .home, .clipboard: (0.18, 14, 14)
+        case .home, .clipboard, .phrases: (0.18, 14, 14)
         }
     }
 
     func size(hasNotch: Bool) -> NSSize {
         let base: NSSize = switch (self, hasNotch) {
-        case (.idle, _): NSSize(width: 430, height: 59)
+        // Компактный режим оставляет вырез свободным, но не растягивает
+        // боковые «крылья» дальше ширины их содержимого.
+        // Высота с вырезом переопределяется в IslandPanelController на
+        // точную высоту выреза этого экрана; 40 — запасной вариант.
+        case (.idle, true), (.dictation, true): NSSize(width: 490, height: 40)
+        case (.idle, false), (.dictation, false): NSSize(width: 360, height: 40)
         case (.home, true): NSSize(width: 780, height: 230)
         case (.home, false): NSSize(width: 700, height: 230)
-        case (.dictation, _): NSSize(width: 484, height: 54)
         case (.clipboard, _): NSSize(width: 928, height: 228)
+        case (.phrases, _): NSSize(width: 820, height: 286)
         }
         return NSSize(width: base.width + shoulder * 2, height: base.height)
     }
@@ -116,7 +122,8 @@ extension ClipEntry {
 enum ElapsedTime {
     static func short(since date: Date, now: Date = .now) -> String {
         let seconds = max(0, Int(now.timeIntervalSince(date)))
-        if seconds < 60 { return "\(seconds)с" }
+        if seconds < 10 { return "сейчас" }
+        if seconds < 60 { return "меньше минуты" }
         if seconds < 3_600 { return "\(seconds / 60)м" }
         if seconds < 86_400 { return "\(seconds / 3_600)ч" }
         return "\(seconds / 86_400)д"
@@ -146,14 +153,48 @@ final class IslandStore: ObservableObject {
             guard oldValue != mode else { return }
             compactVisibleUntil = mode == .idle ? .now.addingTimeInterval(3) : .distantPast
             updateIslandPresence()
+            syncPhraseDigitHotKeys()
         }
     }
     @Published private(set) var isIslandVisible = true
     @Published private(set) var prayerCountdownPhase: PrayerCountdownPhase = .hidden
     @Published var hasNotch = false
+    /// Реальные размеры выреза этого экрана: у моделей они разные, а
+    /// зашитые константы оставляли текст вплотную к вырезу и делали
+    /// плашку толще самого выреза.
+    @Published var notchWidth: CGFloat = AzaStyle.notchWidth
+    @Published var notchHeight: CGFloat = 32
     @Published var selectedID: ClipEntry.ID?
     @Published var showsFavorites = false
     @Published var searchQuery = ""
+    /// Свежескопированная запись: компактный остров пару секунд
+    /// показывает «Скопировано · тип», затем возвращается к намазу.
+    @Published private(set) var recentCopy: ClipEntry?
+
+    /// Настройки реакции на копирование (SetupView, карточка «Общее»).
+    static let copyFlashKey = "Island.CopyFlash"
+    /// Имя своего звука (Resources/copy-*.caf) или пустая строка — без
+    /// звука. Раньше здесь лежали имена системных NSSound — они резкие,
+    /// поэтому заменены на синтезированные (Tools/make-copy-sounds.py).
+    static let copySoundKey = "Island.CopySound"
+
+    /// Старые сохранённые значения: имена системных звуков и первая
+    /// версия своих (drop/chime заменены на pop/ding).
+    private static let legacyCopySounds = [
+        "Tink": "tick", "Pop": "pop", "Purr": "ding", "Bottle": "marimba",
+        "drop": "pop", "chime": "ding",
+    ]
+
+    static func playCopySound(_ name: String) {
+        guard !name.isEmpty,
+              let url = Bundle.main.url(forResource: "copy-\(name)",
+                                        withExtension: "caf") else { return }
+        NSSound(contentsOf: url, byReference: true)?.play()
+    }
+    /// Поведение компактного острова: "auto" — показывается на несколько
+    /// секунд по событиям, "pinned" — виден всегда, "hidden" — не
+    /// появляется вовсе.
+    static let compactModeKey = "Island.CompactMode"
 
     let startup: ClipboardStartup
     let dictation: DictationController
@@ -166,6 +207,38 @@ final class IslandStore: ObservableObject {
     private var compactVisibleUntil = Date.now.addingTimeInterval(3)
     private var suppressedUntil = Date.distantPast
     private var cancellables: Set<AnyCancellable> = []
+    private var recentCopyTask: Task<Void, Never>?
+    /// Верхняя запись истории на прошлом снимке: id и createdAt порознь,
+    /// потому что дедуп-повтор меняет только время, а вспышки заслуживают
+    /// оба случая.
+    private var lastTopID: ClipEntry.ID?
+    private var lastTopStamp: Date?
+    /// Последнее залогированное состояние видимости — чтобы лог не
+    /// строчил каждую секунду.
+    private var lastLoggedPresence: Bool?
+    /// Глобальное сочетание «открыть/закрыть буфер» (§8): остров — его
+    /// единственный интерфейс, поэтому хоткей живёт здесь.
+    private var clipboardHotKey: HotKeyController?
+    /// Сочетание фраз (hold-режим: держишь — панель видна, отпустил — ушла).
+    private var phrasesHotKey: HotKeyController?
+    /// Цифры 1…0 регистрируются Carbon-хоткеями ТОЛЬКО пока открыта панель
+    /// фраз: панель не забирает фокус, и обычный монитор событий не смог бы
+    /// проглотить цифру — она допечаталась бы в поле пользователя.
+    private var phraseDigitHotKeys: [HotKeyController] = []
+    /// Упрощённый вызов фраз: удержание ПРАВОЙ ⌥ без сочетания.
+    /// Мониторы flagsChanged — тот же механизм, что у двойного правого
+    /// Shift в GlobalHotKey.
+    private var phraseOptionMonitors: [Any] = []
+    private var phraseHoldTask: Task<Void, Never>?
+    /// Панель открыта удержанием ⌥, а не сочетанием: отпускание правой ⌥
+    /// закрывает только «свою» панель.
+    private var phrasesHeldByOption = false
+    /// ⇧ удерживается при открытой панели фраз: цифры вставят вторые
+    /// варианты, и панель подсвечивает их таблетки.
+    @Published private(set) var phraseShiftHeld = false
+    /// Выдержка перед показом: быстрые ⌥-комбинации (спецсимволы,
+    /// ⌥-стрелки) не должны дёргать остров.
+    private static let phraseHoldDelay: Duration = .milliseconds(300)
 
     init(startup: ClipboardStartup,
          dictation: DictationController,
@@ -173,6 +246,12 @@ final class IslandStore: ObservableObject {
         self.startup = startup
         self.dictation = dictation
         self.prayer = prayer
+
+        // Разовая миграция: системный звук → свой аналог.
+        if let old = UserDefaults.standard.string(forKey: Self.copySoundKey),
+           let new = Self.legacyCopySounds[old] {
+            UserDefaults.standard.set(new, forKey: Self.copySoundKey)
+        }
 
         // Остров живёт поверх чужих ObservableObject — пересобираем вид,
         // когда меняется история, окно отмены или состояние диктовки.
@@ -190,6 +269,10 @@ final class IslandStore: ObservableObject {
                 guard let self else { return }
                 store.objectWillChange
                     .sink { [weak self] _ in self?.objectWillChange.send() }
+                    .store(in: &self.cancellables)
+                store.$entries
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] entries in self?.noteHistoryChange(top: entries.first) }
                     .store(in: &self.cancellables)
             }
             .store(in: &cancellables)
@@ -209,6 +292,227 @@ final class IslandStore: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        rebindClipboardHotKey()
+        rebindPhrasesHotKey()
+        installPhraseOptionMonitor()
+    }
+
+    /// (Пере)регистрация сочетания буфера — при старте и после смены в
+    /// настройках. Нажатие переключает остров в режим буфера и обратно.
+    func rebindClipboardHotKey() {
+        clipboardHotKey?.stop()
+        clipboardHotKey = nil
+        let binding = HotKeyBinding.load(HotKeyBinding.clipboardKey,
+                                         fallback: .clipboardDefault)
+        let controller = HotKeyController(
+            keyCode: binding.keyCode, modifiers: binding.modifiers, id: 3,
+            onPress: { [weak self] in
+                guard let self else { return }
+                if self.mode == .clipboard {
+                    self.dismissIsland()
+                } else {
+                    self.mode = .clipboard
+                }
+            }
+        )
+        clipboardHotKey = controller
+        if let status = controller.register() {
+            azaDebugLog("Aza: clipboard hotkey registration FAILED status=\(status)")
+            clipboardHotKey = nil
+        } else {
+            azaDebugLog("Aza: clipboard hotkey registered \(binding.display)")
+        }
+    }
+
+    /// (Пере)регистрация сочетания фраз. Hold-режим, как у диктовки:
+    /// нажатие показывает панель, отпускание прячет.
+    func rebindPhrasesHotKey() {
+        phrasesHotKey?.stop()
+        phrasesHotKey = nil
+        let binding = HotKeyBinding.load(HotKeyBinding.phrasesKey,
+                                         fallback: .phrasesDefault)
+        let controller = HotKeyController(
+            keyCode: binding.keyCode, modifiers: binding.modifiers, id: 4,
+            onPress: { [weak self] in
+                guard let self, self.mode != .phrases else { return }
+                self.phrasesHeldByOption = false
+                self.mode = .phrases
+            },
+            onRelease: { [weak self] in
+                guard let self, self.mode == .phrases else { return }
+                self.dismissIsland()
+            }
+        )
+        phrasesHotKey = controller
+        if let status = controller.register() {
+            azaDebugLog("Aza: phrases hotkey registration FAILED status=\(status)")
+            phrasesHotKey = nil
+        } else {
+            azaDebugLog("Aza: phrases hotkey registered \(binding.display)")
+        }
+    }
+
+    /// Цифры ловятся с ТЕМИ ЖЕ модификаторами, что удерживает пользователь:
+    /// при вызове правой ⌥ жмётся ⌥1, при сочетании ⌃⇧F — ⌃⇧1.
+    private func syncPhraseDigitHotKeys() {
+        guard mode == .phrases else {
+            phraseDigitHotKeys.forEach { $0.stop() }
+            phraseDigitHotKeys = []
+            return
+        }
+        guard phraseDigitHotKeys.isEmpty else { return }
+        let binding = HotKeyBinding.load(HotKeyBinding.phrasesKey,
+                                         fallback: .phrasesDefault)
+        var modifierSets: [UInt32] = [UInt32(optionKey)]
+        if binding.modifiers != UInt32(optionKey) {
+            modifierSets.append(binding.modifiers)
+        }
+        // Каждый набор дублируется с ⇧: вторая форма слота (женский род,
+        // полное приветствие) — той же цифрой, без отдельного слота.
+        var combos: [(modifiers: UInt32, alternate: Bool)] = []
+        for modifiers in modifierSets {
+            combos.append((modifiers, false))
+            let shifted = modifiers | UInt32(shiftKey)
+            if shifted != modifiers { combos.append((shifted, true)) }
+        }
+        let digitKeys = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4,
+                         kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8,
+                         kVK_ANSI_9, kVK_ANSI_0]
+        for (comboIndex, combo) in combos.enumerated() {
+            for (index, key) in digitKeys.enumerated() {
+                let controller = HotKeyController(
+                    keyCode: UInt32(key), modifiers: combo.modifiers,
+                    id: UInt32(40 + comboIndex * 10 + index),
+                    onPress: { [weak self] in
+                        self?.insertPhrase(at: index, alternate: combo.alternate)
+                    }
+                )
+                if let status = controller.register() {
+                    azaDebugLog("Aza: phrase digit \(index) mods=\(combo.modifiers) FAILED status=\(status)")
+                    continue
+                }
+                phraseDigitHotKeys.append(controller)
+            }
+        }
+    }
+
+    /// Удержание правой ⌥ (kVK_RightOption) показывает панель фраз,
+    /// отпускание прячет. Глобальный монитор молчит без Accessibility —
+    /// тогда остаётся сочетание.
+    private func installPhraseOptionMonitor() {
+        let handle: (NSEvent) -> Void = { [weak self] event in
+            MainActor.assumeIsolated { self?.handlePhraseFlagsChanged(event) }
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(
+            matching: .flagsChanged, handler: handle) {
+            phraseOptionMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(
+            matching: .flagsChanged, handler: { handle($0); return $0 }) {
+            phraseOptionMonitors.append(local)
+        }
+        azaDebugLog("Aza: phrase option monitors installed count=\(phraseOptionMonitors.count)")
+    }
+
+    private func handlePhraseFlagsChanged(_ event: NSEvent) {
+        let shift = event.modifierFlags.contains(.shift)
+        if phraseShiftHeld != shift { phraseShiftHeld = shift }
+        guard event.keyCode == UInt16(kVK_RightOption) else { return }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        azaDebugLog("Aza: right-option flagsChanged option=\(flags == .option ? 1 : 0) mode=\(mode.rawValue)")
+        if flags == .option {
+            // Нажата правая ⌥ без других модификаторов. Из активных
+            // режимов (диктовка, буфер) панель не выдёргивается.
+            guard mode == .idle || mode == .home else { return }
+            phraseHoldTask?.cancel()
+            phraseHoldTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.phraseHoldDelay)
+                guard !Task.isCancelled, let self,
+                      self.mode == .idle || self.mode == .home else { return }
+                // ponytail: ⌥-комбинация, начатая ПОСЛЕ выдержки, всё же
+                // покажет панель; отсекать её мониторингом keyDown — если
+                // будет раздражать.
+                self.phrasesHeldByOption = true
+                self.mode = .phrases
+            }
+        } else if !flags.contains(.option) {
+            phraseHoldTask?.cancel()
+            phraseHoldTask = nil
+            guard phrasesHeldByOption else { return }
+            phrasesHeldByOption = false
+            if mode == .phrases { dismissIsland() }
+        }
+    }
+
+    /// Вставка фразы в поле, где осталась каретка: панель фраз никогда не
+    /// забирает фокус, поэтому вставляем напрямую, без системного буфера.
+    /// Поля нет — фраза остаётся в буфере обмена, как в режиме буфера.
+    func insertPhrase(at index: Int, alternate: Bool = false) {
+        let phrases = PhraseStore.shared.phrases
+        guard phrases.indices.contains(index) else { return }
+        let text = PhraseStore.variant(phrases[index], alternate: alternate)
+        guard !text.isEmpty else { return }
+        dismissIsland()
+        // Наше окно могло быть активным (например, открыты настройки):
+        // прячем приложение, чтобы фокус вернулся в поле пользователя, —
+        // и даём системе время на переключение, как делает буфер.
+        let appWasActive = NSApp.isActive
+        if appWasActive { NSApp.hide(nil) }
+        azaDebugLog("Aza: insertPhrase index=\(index) appWasActive=\(appWasActive ? 1 : 0)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(140)) {
+            Self.attemptPhraseInsertion(text, retriesLeft: 2)
+        }
+    }
+
+    /// AX-вставка с повторами: Electron (VS Code, Slack…) строит дерево
+    /// доступности асинхронно после пробуждения, и первая попытка часто
+    /// не находит поле. Не вышло — фраза кладётся в буфер и вставляется
+    /// синтетическим ⌘V: это работает там, где AX бессилен.
+    private static func attemptPhraseInsertion(_ text: String, retriesLeft: Int) {
+        if let element = TextInsertion.focusedElement() {
+            guard !SecureFieldDetector.isSecure(element) else {
+                azaDebugLog("Aza: insertPhrase secure field, aborting")
+                return
+            }
+            if TextInsertion.isTextLike(element) {
+                let caretBefore = TextInsertion.caretPosition(of: element)
+                let result = TextInsertion.insert(text, into: element)
+                azaDebugLog("Aza: insertPhrase result=\(result.rawValue)")
+                if result == .success {
+                    // Electron может ответить success, ничего не вставив.
+                    // Каретка обязана сдвинуться; проверяем с задержкой,
+                    // чтобы успел и синтетический юникод-путь insert().
+                    guard let caretBefore else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
+                        let caretAfter = TextInsertion.caretPosition(of: element)
+                        // nil или сдвиг — считаем вставленным: двойная
+                        // вставка хуже пропущенной.
+                        guard caretAfter == caretBefore else { return }
+                        azaDebugLog("Aza: insertPhrase caret unmoved, paste fallback")
+                        pastePhrase(text)
+                    }
+                    return
+                }
+            }
+        }
+        guard retriesLeft == 0 else {
+            azaDebugLog("Aza: insertPhrase field not ready, retries left \(retriesLeft)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(220)) {
+                attemptPhraseInsertion(text, retriesLeft: retriesLeft - 1)
+            }
+            return
+        }
+        pastePhrase(text)
+    }
+
+    /// Последний рубеж: фраза в системный буфер + синтетический ⌘V.
+    private static func pastePhrase(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        let pasted = TextInsertion.postPasteCommand()
+        azaDebugLog("Aza: insertPhrase paste fallback posted=\(pasted ? 1 : 0)")
     }
 
     // MARK: Намаз для интерфейса
@@ -274,8 +578,45 @@ final class IslandStore: ObservableObject {
         let remaining = prayer.nextPrayer(after: now)
             .map { $0.date.timeIntervalSince(now) } ?? .infinity
         prayerCountdownPhase = PrayerCountdownPhase.make(secondsRemaining: remaining)
-        isIslandVisible = now < compactVisibleUntil
-            || (now >= suppressedUntil && prayerCountdownPhase != .hidden)
+        let compactMode = UserDefaults.standard.string(forKey: Self.compactModeKey)
+        switch compactMode {
+        case "pinned": isIslandVisible = true
+        case "hidden": isIslandVisible = false
+        default:
+            isIslandVisible = now < compactVisibleUntil
+                || (now >= suppressedUntil && prayerCountdownPhase != .hidden)
+        }
+        if lastLoggedPresence != isIslandVisible {
+            lastLoggedPresence = isIslandVisible
+            azaDebugLog("Aza: island presence mode=\(compactMode ?? "nil") visible=\(isIslandVisible)")
+        }
+    }
+
+    /// Вспышка «Скопировано» в компактном острове. Первый снимок после
+    /// запуска — загрузка истории, не копирование; удаление верхней записи
+    /// поднимает СТАРУЮ — отсекается проверкой свежести createdAt.
+    private func noteHistoryChange(top: ClipEntry?) {
+        guard let top else { return }
+        let seenBefore = lastTopID != nil
+        let changed = top.id != lastTopID || top.createdAt != lastTopStamp
+        lastTopID = top.id
+        lastTopStamp = top.createdAt
+        guard seenBefore, changed,
+              Date.now.timeIntervalSince(top.createdAt) < 5 else { return }
+        let defaults = UserDefaults.standard
+        if let sound = defaults.string(forKey: Self.copySoundKey), !sound.isEmpty {
+            Self.playCopySound(sound)
+        }
+        guard mode == .idle,
+              defaults.object(forKey: Self.copyFlashKey) as? Bool ?? true else { return }
+        recentCopy = top
+        revealCompactIsland()
+        recentCopyTask?.cancel()
+        recentCopyTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            self?.recentCopy = nil
+        }
     }
 
     func revealCompactIsland() {

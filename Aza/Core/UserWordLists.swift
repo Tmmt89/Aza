@@ -66,6 +66,24 @@ final class UserWordLists {
         save()
     }
 
+    /// Подтверждённые слова: пользователь принудительно исправил слово
+    /// хоткеем — результат одобрен, дальше движок исправляет его сам,
+    /// минуя спелчекеры и воздержания.
+    func isConfirmed(_ word: String) -> Bool {
+        !suspendedForTests && confirmed.contains(Self.storageForm(word))
+    }
+
+    func addConfirmed(_ word: String) {
+        confirmed.insert(Self.storageForm(word))
+        save()
+    }
+
+    /// Отмена исправления снимает и подтверждение — пользователь передумал.
+    func removeConfirmed(_ word: String) {
+        confirmed.remove(Self.storageForm(word))
+        save()
+    }
+
     func clearNeverCorrect() {
         neverCorrect.removeAll()
         save()

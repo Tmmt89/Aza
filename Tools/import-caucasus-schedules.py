@@ -207,6 +207,8 @@ def main():
     extra = []
     for i, arg in enumerate(sys.argv):
         if arg == "--xlsx":
+            if i + 2 >= len(sys.argv):
+                sys.exit("--xlsx требует два аргумента: ПУТЬ ПОДПИСЬ")
             extra.append((sys.argv[i + 1], sys.argv[i + 2]))
     replace = "--replace" in sys.argv
 

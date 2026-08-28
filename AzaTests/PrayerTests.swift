@@ -379,6 +379,28 @@ final class PrayerTests: XCTestCase {
         }
     }
 
+    /// ДУМ ЧР публикует одно расписание на республику: города Чечни
+    /// обязаны показывать таблицу Грозного, с честной оговоркой об этом.
+    func testChechenCitiesUseGroznySchedule() throws {
+        let provider = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(),
+                                     "каталог не найден в бандле")
+        let date = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 28)))
+        let reference = try XCTUnwrap(provider.times(on: date, city: grozny))
+        for name in ["Гудермес", "Урус-Мартан", "Шали", "Аргун"] {
+            let city = try XCTUnwrap(PrayerStore.cities.first { $0.name == name },
+                                     "\(name): нет в списке городов")
+            let times = try XCTUnwrap(provider.times(on: date, city: city),
+                                      "\(name): таблицы нет")
+            XCTAssertEqual(times.fajr, reference.fajr, name)
+            XCTAssertEqual(times.isha, reference.isha, name)
+            XCTAssertEqual(times.source.label, "ДУМ ЧР")
+            XCTAssertNotNil(times.source.caveat, name)
+        }
+        // У самого Грозного оговорки нет — это его собственная таблица.
+        XCTAssertNil(reference.source.caveat)
+    }
+
     func testNotificationIdentifierIsStableForShiftedTime() throws {
         let morning = try XCTUnwrap(grozny.calendar.date(
             from: DateComponents(year: 2026, month: 8, day: 27, hour: 3, minute: 31)

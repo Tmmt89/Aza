@@ -132,6 +132,32 @@ final class ClipboardStore: ObservableObject {
         (key, keyIsPersistent) = preparedKey
         load()
         commit(removingBlobsOf: pruneExpired())
+        // Сокращение срока хранения действует сразу, а не при следующей
+        // записи в буфер: пользователь ждёт, что старое исчезло.
+        // Слушаем все изменения defaults: фильтр по ≤200 записям дёшев,
+        // диск трогается только когда что-то реально истекло.
+        retentionObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !Self.maintenanceSuspended else { return }
+                let removed = self.pruneExpired()
+                if !removed.isEmpty { self.commit(removingBlobsOf: removed) }
+            }
+        }
+    }
+
+    private var retentionObserver: (any NSObjectProtocol)?
+
+    /// PrivacyCleanup поднимает флаг перед удалением данных: сброс defaults
+    /// (removePersistentDomain) синхронно будит наблюдателя выше, и commit
+    /// записал бы историю ЗАНОВО — уже после удаления файла и ключа.
+    static var maintenanceSuspended = false
+
+    deinit {
+        if let retentionObserver {
+            NotificationCenter.default.removeObserver(retentionObserver)
+        }
     }
 
     /// Каталог blob-файлов (зашифрованные изображения): сосед файла
@@ -156,33 +182,47 @@ final class ClipboardStore: ObservableObject {
 
     /// Дедупликация: совпадение по виду и ключу поднимает запись наверх.
     /// Возврат true — дубликат обработан, добавлять не нужно.
-    private func dedup(where match: (ClipEntry) -> Bool) -> Bool {
+    private func dedup(where match: (ClipEntry) -> Bool,
+                       at copiedAt: Date = Date(),
+                       update: (inout ClipEntry) -> Void = { _ in }) -> Bool {
         guard let index = entries.firstIndex(where: match) else { return false }
         var moved = entries.remove(at: index)
-        moved.createdAt = Date()
-        entries.insert(moved, at: 0)
+        moved.createdAt = copiedAt
+        update(&moved)
+        insert(moved)
         commit(removingBlobsOf: pruneExpired())
         return true
     }
 
-    /// Общий финал добавления: вставка сверху, очистки, запись, blob-ы
-    /// удалённых записей стираются ПОСЛЕ сохранения метаданных.
+    /// Вставка по месту в хронологии (список — от новых к старым): картинка
+    /// добавляется ПОСЛЕ фонового декодирования и с меткой момента копии
+    /// обязана встать под текст, скопированный позже неё.
+    private func insert(_ entry: ClipEntry) {
+        let index = entries.firstIndex { $0.createdAt <= entry.createdAt } ?? entries.count
+        entries.insert(entry, at: index)
+    }
+
+    /// Общий финал добавления: вставка по хронологии, очистки, запись,
+    /// blob-ы удалённых записей стираются ПОСЛЕ сохранения метаданных.
     private func insertNew(_ entry: ClipEntry) {
-        entries.insert(entry, at: 0)
+        insert(entry)
         var removed = pruneExpired()
         removed += pruneExcess()
         commit(removingBlobsOf: removed)
     }
 
     /// Добавляет текстовую запись (повторное копирование поднимает наверх).
+    /// Текст хранится КАК СКОПИРОВАН: обрезка пробелов/переводов строки
+    /// меняла бы вставляемое (отступы кода). Трим — только для проверки
+    /// «не пусто».
     func add(text: String, sourceAppBundleID: String?, sourceAppName: String?) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= Self.maxItemCharacters else { return }
-        if dedup(where: { $0.resolvedKind == .text && $0.text == trimmed }) { return }
+        guard !trimmed.isEmpty, text.count <= Self.maxItemCharacters else { return }
+        if dedup(where: { $0.resolvedKind == .text && $0.text == text }) { return }
         insertNew(ClipEntry(
-            id: UUID(), text: trimmed, createdAt: Date(),
+            id: UUID(), text: text, createdAt: Date(),
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
-            byteSize: trimmed.utf8.count
+            byteSize: text.utf8.count
         ))
     }
 
@@ -218,8 +258,12 @@ final class ClipboardStore: ObservableObject {
     /// Изображение (нормализованный PNG). Данные — в отдельном
     /// зашифрованном blob-файле; в метаданных только подпись и хеш.
     /// Blob пишется ДО метаданных: неудача записи не создаёт запись.
+    /// `copiedAt` — момент копирования: декодирование идёт в фоне, и без
+    /// метки картинка вставала бы в историю ПОЗЖЕ текста, скопированного
+    /// после неё (список сортируется по createdAt).
     func addImage(png: Data, label: String, thumbnail: Data?,
-                  sourceAppBundleID: String?, sourceAppName: String?) {
+                  sourceAppBundleID: String?, sourceAppName: String?,
+                  copiedAt: Date = Date()) {
         // Read-only-сессия не пишет blob-ы: эфемерный ключ сделает файл
         // нечитаемым, а до следующего успешного запуска копились бы сироты.
         // То же при нечитаемой истории: метаданные не сохранятся, и blob
@@ -230,11 +274,15 @@ final class ClipboardStore: ObservableObject {
         guard keyIsPersistent, !isUnreadable, !screenLocked else { return }
         guard png.count <= Self.maxObjectBytes else { return }
         let hash = Self.sha256(png)
-        if dedup(where: { $0.resolvedKind == .image && $0.contentHash == hash }) { return }
+        // Повтор того же изображения освежает миниатюру: у старых записей
+        // она могла быть сгенерирована в прежнем маленьком размере.
+        if dedup(where: { $0.resolvedKind == .image && $0.contentHash == hash },
+                 at: copiedAt,
+                 update: { if let thumbnail { $0.thumbnailData = thumbnail } }) { return }
         let id = UUID()
         guard let sealedSize = writeBlob(png, for: id) else { return }
         insertNew(ClipEntry(
-            id: id, text: label, createdAt: Date(),
+            id: id, text: label, createdAt: copiedAt,
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
             kind: .image, byteSize: sealedSize + (thumbnail?.count ?? 0),
             contentHash: hash, thumbnailData: thumbnail
@@ -399,6 +447,8 @@ final class ClipboardStore: ObservableObject {
 
     /// Пишет зашифрованный blob; возвращает размер на диске или nil.
     private func writeBlob(_ data: Data, for id: UUID) -> Int? {
+        // См. save(): во время удаления данных диск не трогаем.
+        guard !Self.maintenanceSuspended else { return nil }
         do {
             try FileManager.default.createDirectory(at: blobsDirectory,
                                                     withIntermediateDirectories: true)
@@ -439,7 +489,10 @@ final class ClipboardStore: ObservableObject {
 
     @discardableResult
     private func save() -> Bool {
-        guard keyIsPersistent, !screenLocked, !isUnreadable else { return false }
+        // maintenanceSuspended: PrivacyCleanup начал удаление данных —
+        // ЛЮБАЯ запись воскресила бы историю ключом, которого больше нет.
+        guard keyIsPersistent, !screenLocked, !isUnreadable,
+              !Self.maintenanceSuspended else { return false }
         do {
             let payload = try JSONEncoder().encode(Payload(entries: entries))
             let sealed = try AES.GCM.seal(payload, using: key).combined!

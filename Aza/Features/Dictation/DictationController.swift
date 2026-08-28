@@ -22,7 +22,12 @@ final class DictationController: ObservableObject {
         case transcribing
     }
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle {
+        didSet {
+            rescheduleIdleUnload()
+            updateLatchStopKeys()
+        }
+    }
     @Published private(set) var status = "Диктовка: удерживайте сочетание"
     /// Начало текущей записи — для таймера в острове.
     @Published private(set) var recordingStartedAt: Date?
@@ -171,10 +176,39 @@ final class DictationController: ObservableObject {
     private var suppressPrewarm = false
     /// Режим фиксации (спецификация §5.1, «двойное нажатие»): запись
     /// продолжается после отпускания клавиши до повторного нажатия.
-    private var isLatched = false
+    /// Публикуется для острова: кнопка стоп видна только здесь — при
+    /// удержании она бесполезна, запись останавливает отпускание клавиши.
+    @Published private(set) var isLatched = false {
+        didSet { updateLatchStopKeys() }
+    }
     private var lastPressAt = Date.distantPast
     /// Второе нажатие в пределах этого окна включает фиксацию.
     private static let doubleTapWindow: TimeInterval = 0.5
+    /// Пробел/Enter как стоп зафиксированной записи (§5.1): тап живёт
+    /// только пока идёт такая запись.
+    private lazy var latchStopKeys = LatchStopKeys { [weak self] in
+        self?.stopFromUI()
+    }
+
+    private func updateLatchStopKeys() {
+        if isLatched, state == .recording, !isPermissionProbe {
+            latchStopKeys.start()
+        } else {
+            latchStopKeys.stop()
+        }
+    }
+
+    /// Старт из меню или острова: без удерживаемой клавиши запись всегда
+    /// фиксированная — её остановит повторное нажатие сочетания, Пробел,
+    /// Enter или кнопка стоп.
+    func startLatchedFromUI() {
+        guard state == .idle else { return }
+        isLatched = true
+        keyDown()
+        // Запись не началась (нет модели, нет доступа) — фиксация не должна
+        // тихо доживать до следующего обычного удержания клавиши.
+        if state != .recording { isLatched = false }
+    }
     /// История буфера для транскриптов (§5.6); появляется асинхронно.
     private let clipboardStore: () -> ClipboardStore?
 
@@ -264,6 +298,29 @@ final class DictationController: ObservableObject {
         status = "Модель удалена — загрузится при следующей диктовке"
     }
 
+    /// Выгрузка после простоя: модель держит сотни мегабайт — гигабайты
+    /// unified memory, а диктовка — редкое действие. Кэш на диске остаётся,
+    /// следующее нажатие поднимет модель заново (статус это объяснит).
+    // ponytail: после выгрузки первое нажатие лишь греет модель; писать
+    // звук параллельно с загрузкой — апгрейд, если жалобы будут.
+    private static let idleUnloadSeconds: TimeInterval = 5 * 60
+    private var idleUnloadTimer: Timer?
+
+    private func rescheduleIdleUnload() {
+        idleUnloadTimer?.invalidate()
+        idleUnloadTimer = nil
+        guard state == .idle, whisper != nil else { return }
+        idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: Self.idleUnloadSeconds,
+                                               repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.state == .idle, self.whisper != nil else { return }
+                self.whisper = nil
+                self.loadedProfile = nil
+                azaDebugLog("Aza: dictation model unloaded after idle")
+            }
+        }
+    }
+
     func stop() {
         hotKey?.stop()
         hotKey = nil
@@ -298,8 +355,8 @@ final class DictationController: ObservableObject {
         azaDebugLog("Aza: dictation keyDown state=\(state) latched=\(isLatched ? 1 : 0)")
 
         // Нажатие во время зафиксированной записи останавливает её
-        // (спецификация §5.1). Space/Enter как альтернативные стопы
-        // отложены: их подавление требует перехвата ввода.
+        // (спецификация §5.1); Пробел и Enter делают то же через
+        // LatchStopKeys.
         if isLatched, state == .recording {
             isLatched = false
             finishRecording()
@@ -325,7 +382,7 @@ final class DictationController: ObservableObject {
             isLatched = true
             azaDebugLog("Aza: dictation latched")
             if state == .recording {
-                status = "Запись зафиксирована — нажмите сочетание, чтобы остановить"
+                status = "Запись зафиксирована — остановят сочетание, Пробел или Enter"
                 return
             }
             // Запись успела остановиться — начинаем новую, уже фиксированную.
@@ -383,11 +440,36 @@ final class DictationController: ObservableObject {
         beginRecording()
     }
 
-    private static func options(for language: String) -> DecodingOptions {
+    private static func options(for language: String, prompt: [Int]?) -> DecodingOptions {
         // Без таймстемпов: диктовке нужны слова, а не разметка по секундам,
         // и декодер тратит меньше токенов на сегмент.
         DecodingOptions(task: .transcribe, language: language,
-                        usePrefillPrompt: true, withoutTimestamps: true)
+                        usePrefillPrompt: true, withoutTimestamps: true,
+                        promptTokens: prompt)
+    }
+
+    /// Свои слова: имена и термины, которые Whisper обычно коверкает.
+    /// Хранятся строкой через запятую, подмешиваются в prompt декодера —
+    /// модель видит их как «предыдущий текст» и склоняется к такому
+    /// написанию. Обрезку длинного prompt и фильтр спец-токенов WhisperKit
+    /// делает сам.
+    static let customWordsStorageKey = "DictationCustomWords"
+
+    static var customWords: [String] {
+        DictationFilters.words(
+            fromCustomList: UserDefaults.standard.string(forKey: customWordsStorageKey) ?? "")
+    }
+
+    private static func promptTokens(for whisper: WhisperKit) -> [Int]? {
+        let words = customWords
+        guard !words.isEmpty, let tokenizer = whisper.tokenizer else { return nil }
+        return tokenizer.encode(text: " " + words.joined(separator: ", "))
+    }
+
+    /// Фильтр галлюцинаций (см. DictationFilters.reliableText).
+    private static func reliableText(of results: [TranscriptionResult]) -> String {
+        DictationFilters.reliableText(segments: results.flatMap(\.segments)
+            .map { ($0.text, $0.avgLogprob, $0.noSpeechProb) })
     }
 
     /// Средняя уверенность распознавания: по ней сравниваем две гипотезы.
@@ -414,18 +496,18 @@ final class DictationController: ObservableObject {
     private static let confidentRussianScore: Float = -0.35
 
     private static func autoTranscribe(
-        whisper: WhisperKit, samples: [Float]
+        whisper: WhisperKit, samples: [Float], prompt: [Int]?
     ) async throws -> (String, [TranscriptionResult]) {
         // Упавший прогон не должен обнулять удачный: берём то, что есть.
         let russian = try? await whisper.transcribe(
-            audioArray: samples, decodeOptions: options(for: "ru"))
+            audioArray: samples, decodeOptions: options(for: "ru", prompt: prompt))
         if let russian {
             let score = confidence(of: russian)
             azaDebugLog("Aza: dictation ru score=\(score)")
             if score >= Self.confidentRussianScore { return ("ru", russian) }
         }
         let english = try? await whisper.transcribe(
-            audioArray: samples, decodeOptions: options(for: "en"))
+            audioArray: samples, decodeOptions: options(for: "en", prompt: prompt))
         switch (russian, english) {
         case let (russian?, english?):
             let russianScore = confidence(of: russian)
@@ -511,6 +593,47 @@ final class DictationController: ObservableObject {
         }
     }
 
+    /// Громкость сигналов диктовки, 0…1. Ноль — без звука.
+    static let toneVolumeStorageKey = "DictationToneVolume"
+    static let toneVolumeDefault = 0.5
+
+    static var toneVolume: Double {
+        UserDefaults.standard.object(forKey: toneVolumeStorageKey) as? Double
+            ?? toneVolumeDefault
+    }
+
+    /// Набор сигналов: у каждого — зеркальная пара (вверх — «слушаю»,
+    /// вниз — «закончил», как в системной диктовке).
+    enum ToneSet: String, CaseIterable {
+        case classic, marimba, drop, pulse
+
+        var title: String {
+            switch self {
+            case .classic: "Классика"
+            case .marimba: "Маримба"
+            case .drop: "Капля"
+            case .pulse: "Тук"
+            }
+        }
+    }
+
+    static let toneSetStorageKey = "DictationToneSet"
+
+    static var toneSet: ToneSet {
+        ToneSet(rawValue: UserDefaults.standard.string(forKey: toneSetStorageKey) ?? "")
+            ?? .marimba
+    }
+
+    static func playTone(start: Bool) {
+        let volume = toneVolume
+        let name = "dictation-\(toneSet.rawValue)-\(start ? "start" : "stop")"
+        guard volume > 0,
+              let url = Bundle.main.url(forResource: name, withExtension: "caf"),
+              let sound = NSSound(contentsOf: url, byReference: true) else { return }
+        sound.volume = Float(volume)
+        sound.play()
+    }
+
     private func beginRecording() {
         // В пробной записи фокус уже уехал на наше активированное окно —
         // запоминать его нельзя, вставлять всё равно нечего.
@@ -527,11 +650,11 @@ final class DictationController: ObservableObject {
         state = .recording
         recordingStartedAt = Date()
         status = isLatched
-            ? "Запись зафиксирована — нажмите сочетание, чтобы остановить"
+            ? "Запись зафиксирована — остановят сочетание, Пробел или Enter"
             : "Запись… отпустите клавишу, чтобы вставить текст"
         // Пока острова нет, звук — единственный сигнал «пишу»: панель
         // меню пользователь в этот момент не открывает.
-        if !isPermissionProbe { NSSound(named: "Tink")?.play() }
+        if !isPermissionProbe { Self.playTone(start: true) }
         failsafeTimer = Timer.scheduledTimer(withTimeInterval: Self.maxRecordingSeconds,
                                              repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -615,10 +738,19 @@ final class DictationController: ObservableObject {
             return
         }
 
+        guard DictationFilters.hasSpeech(samples) else {
+            state = .idle
+            status = "Тишина — ничего не распознано"
+            targetElement = nil
+            applyPendingProfileChange()
+            azaDebugLog("Aza: dictation skipped, no speech energy")
+            return
+        }
+
         state = .transcribing
         recordingStartedAt = nil
         status = "Распознаю…"
-        NSSound(named: "Pop")?.play()
+        Self.playTone(start: false)
         let element = targetElement
         targetElement = nil
 
@@ -632,21 +764,20 @@ final class DictationController: ObservableObject {
                 // §5.2: русский, английский или автоопределение между ними.
                 let language: String
                 var results: [TranscriptionResult]
+                let prompt = Self.promptTokens(for: whisper)
 
                 if Self.preferredLanguage == "auto" {
                     (language, results) = try await Self.autoTranscribe(
-                        whisper: whisper, samples: samples)
+                        whisper: whisper, samples: samples, prompt: prompt)
                 } else {
                     language = Self.preferredLanguage
                     results = try await whisper.transcribe(
                         audioArray: samples,
-                        decodeOptions: Self.options(for: language))
+                        decodeOptions: Self.options(for: language, prompt: prompt))
                 }
                 azaDebugLog("Aza: dictation language=\(language) results=\(results.count)")
                 self.activeLanguage = language
-                let text = results.map(\.text)
-                    .joined(separator: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = Self.reliableText(of: results)
                 self.finish(text: text, language: language, element: element)
             } catch {
                 self.state = .idle

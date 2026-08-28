@@ -62,7 +62,7 @@ final class IslandPanelController {
                 } else if self?.panel.isKeyWindow == true {
                     self?.panel.resignKey()
                 }
-                self?.resize(for: mode, animated: true)
+                self?.transition(to: mode)
             }
 
         visibilityObservation = store.$isIslandVisible
@@ -82,34 +82,30 @@ final class IslandPanelController {
 
     func show() {
         store.updateIslandPresence()
-        resize(for: store.mode, animated: false)
+        resize(for: store.mode)
         setVisible(store.isIslandVisible, animated: false)
     }
 
     private func setVisible(_ visible: Bool, animated: Bool) {
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if visible {
-            guard !panel.isVisible else {
-                panel.alphaValue = 1
+            // Прерванный уход разрешится сам: его completion видит, что
+            // остров снова нужен, пропускает orderOut и возвращает кадр.
+            guard !panel.isVisible else { return }
+            // Финальная геометрия считается ДО анимации: остров выезжает
+            // из-за кромки экрана на своё место, а не из старого кадра.
+            resize(for: store.mode)
+            guard animated else {
+                panel.orderFrontRegardless()
                 return
             }
-            panel.alphaValue = animated ? 0 : 1
-            panel.orderFrontRegardless()
-            guard animated else { return }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = reduceMotion ? AzaMotion.micro : AzaMotion.compact
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().alphaValue = 1
-            }
+            panel.slideIn()
         } else {
-            let duration = animated ? (reduceMotion ? AzaMotion.micro : AzaMotion.compact) : 0
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = duration
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().alphaValue = 0
+            guard panel.isVisible else { return }
+            guard animated else {
+                panel.orderOut(nil)
+                return
             }
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(duration + 0.04))
+            panel.slideOut { [weak self] in
                 guard let self, !self.store.isIslandVisible else { return }
                 self.panel.orderOut(nil)
             }
@@ -125,26 +121,40 @@ final class IslandPanelController {
             ?? NSScreen.main ?? NSScreen.screens.first
     }
 
-    private func resize(for mode: IslandMode, animated: Bool) {
+    /// Смена режима — один жест, без промежуточных фаз: кадр панели
+    /// сразу ставится финальным за кромкой (контент к этому моменту уже
+    /// в новом облике — морф в IslandRootView отключён), и новая панель
+    /// целиком опускается из выреза поверх прежней. Подъём старой и
+    /// морф старого кадра давали кашу из трёх дерущихся анимаций.
+    private func transition(to mode: IslandMode) {
+        resize(for: mode)
+        guard panel.isVisible,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        else { return }
+        panel.slideIn()
+    }
+
+    /// Кадр всегда ставится мгновенно: единственная анимация панели —
+    /// спуск из-за кромки и уход за неё (slideIn/slideOut).
+    private func resize(for mode: IslandMode) {
         guard let screen = activeScreen else { return }
         let hasNotch = screen.auxiliaryTopLeftArea != nil && screen.auxiliaryTopRightArea != nil
         store.hasNotch = hasNotch
-        let size = mode.size(hasNotch: hasNotch)
-        let frame = NSRect(
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+            store.notchWidth = right.minX - left.maxX
+            store.notchHeight = screen.safeAreaInsets.top
+        }
+        var size = mode.size(hasNotch: hasNotch)
+        // Компактная плашка и диктовка — ровно высота выреза, ни пикселем толще.
+        if mode == .idle || mode == .dictation, hasNotch {
+            size.height = screen.safeAreaInsets.top
+        }
+        panel.setFrame(NSRect(
             x: screen.frame.midX - size.width / 2,
             y: screen.frame.maxY - size.height,
             width: size.width,
             height: size.height
-        )
-        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            panel.setFrame(frame, display: true)
-            return
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = AzaMotion.expand
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
-            panel.animator().setFrame(frame, display: true)
-        }
+        ), display: true)
     }
 
     private func installEventMonitors() {
@@ -173,10 +183,7 @@ final class IslandPanelController {
 
     private func handleMouseMoved(at mouse: NSPoint) {
         guard let screen = activeScreen else { return }
-        let isInActivationArea = IslandHitTesting.hoverRect(
-            in: screen.frame,
-            hasNotch: hasNotch(on: screen)
-        ).contains(mouse)
+        let isInActivationArea = IslandHitTesting.hoverRect(on: screen).contains(mouse)
         let isInCompactIsland = store.mode == .idle
             && store.isIslandVisible
             && isInsideIsland(mouse)
@@ -227,9 +234,23 @@ final class IslandPanelController {
 }
 
 enum IslandHitTesting {
-    static func hoverRect(in screen: NSRect, hasNotch: Bool) -> NSRect {
-        let width: CGFloat = hasNotch ? 240 : 180
-        return NSRect(x: screen.midX - width / 2, y: screen.maxY - 42, width: width, height: 42)
+    /// Зона наведения — сам вырез, а не полоса «где-то рядом»: его
+    /// границы система отдаёт через «плечевые» области экрана, высота —
+    /// safe-area сверху. Чуть левее или правее выреза остров не выпадает.
+    /// Лишний 1 пт сверху — курсор у кромки экрана репортится ровно на
+    /// границе, а NSRect.contains верхнюю грань исключает.
+    static func hoverRect(on screen: NSScreen) -> NSRect {
+        guard let left = screen.auxiliaryTopLeftArea,
+              let right = screen.auxiliaryTopRightArea else {
+            // Экран без выреза: физической границы нет, остаётся полоса
+            // по центру меню-бара.
+            let width: CGFloat = 180
+            return NSRect(x: screen.frame.midX - width / 2,
+                          y: screen.frame.maxY - 42, width: width, height: 43)
+        }
+        let height = max(screen.safeAreaInsets.top, 24)
+        return NSRect(x: left.maxX, y: screen.frame.maxY - height,
+                      width: right.minX - left.maxX, height: height + 1)
     }
 }
 

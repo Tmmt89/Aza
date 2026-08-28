@@ -175,8 +175,13 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
         // вторым. Собираем города из ВСЕХ пригодных файлов — какой
         // конкретно подходит запрошенному дню, решает уже поиск по
         // покрытию.
-        var cities: [CityPrayerSchedule] = []
-        var userCityNames: Set<String> = []
+        // Поставляемые и пользовательские города копятся раздельно:
+        // свой файл перекрывает ТОЛЬКО поставляемый каталог (копия
+        // каталога рядом давала неразличимые дубли), но не другие свои —
+        // годовые файлы одного города различаются покрытием, и какой
+        // подходит запрошенному дню, решает поиск по покрытию.
+        var bundledCities: [CityPrayerSchedule] = []
+        var userCities: [CityPrayerSchedule] = []
         var year = 0
         for file in files where file.pathExtension.lowercased() == "json" {
             guard let data = boundedData(from: file),
@@ -190,22 +195,29 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
                             + "reasons=\(reasons.sorted().joined(separator: ","))")
                 continue
             }
-            // Свой файл ПЕРЕКРЫВАЕТ поставляемый для тех же городов.
-            // Иначе один и тот же город приходил дважды, различить их по
-            // покрытию было нельзя, и он молча уходил в расчёт — ровно
-            // это и случалось, когда рядом лежала копия каталога.
             if !bundled.contains(file) {
                 let names = Set(catalog.cities.map { PrayerCatalog.normalized($0.name) })
-                userCityNames.formUnion(names)
-                cities.removeAll { names.contains(PrayerCatalog.normalized($0.name)) }
-            } else if !userCityNames.isEmpty {
-                // Поставляемый читается первым, так что сюда не попадём;
-                // проверка оставлена на случай смены порядка.
-                cities.removeAll { userCityNames.contains(PrayerCatalog.normalized($0.name)) }
+                bundledCities.removeAll { names.contains(PrayerCatalog.normalized($0.name)) }
+                // Точный дубль (то же имя И то же покрытие — копия файла)
+                // заменяется; другой год того же города остаётся жить.
+                for city in catalog.cities {
+                    userCities.removeAll {
+                        PrayerCatalog.normalized($0.name) == PrayerCatalog.normalized(city.name)
+                            && $0.coverageStart == city.coverageStart
+                            && $0.coverageEnd == city.coverageEnd
+                    }
+                }
+                userCities.append(contentsOf: catalog.cities.map {
+                    var city = $0
+                    city.userProvided = true
+                    return city
+                })
+            } else {
+                bundledCities.append(contentsOf: catalog.cities)
             }
-            cities.append(contentsOf: catalog.cities)
             year = max(year, catalog.year)
         }
+        let cities = bundledCities + userCities
         guard !cities.isEmpty else { return nil }
         // Общая подпись намеренно nil: файлы бывают сводными, и подпись
         // берётся у КАЖДОГО города своя.
@@ -229,11 +241,21 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
+    /// ДУМ ЧР выпускает ОДНО расписание на всю республику, поэтому города
+    /// Чечни показывают таблицу Грозного — это не подмена, а факт источника.
+    private static let tableAliases: [String: String] = [
+        "гудермес": "Грозный",
+        "урус мартан": "Грозный",
+        "шали": "Грозный",
+        "аргун": "Грозный",
+    ]
+
     func times(on date: Date, city: PrayerCity) -> DayPrayerTimes? {
         // Ищем по НАЗВАНИЮ: идентификаторы каталога приходят из чужого
         // конвейера (кириллица «казань») и с нашими не совпадают.
         // Часовой пояс обязан совпасть — иначе это другой город.
-        guard let tableCity = catalog.city(named: city.name, on: date),
+        let lookupName = Self.tableAliases[PrayerCatalog.normalized(city.name)] ?? city.name
+        guard let tableCity = catalog.city(named: lookupName, on: date),
               tableCity.timeZone == city.timeZoneID else { return nil }
         let occurrences = catalog.prayers(tableCity, on: date)
         guard occurrences.count == PrayerKind.allCases.count,
@@ -246,8 +268,19 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
             ?? nonEmpty(catalog.sourceLabel ?? "")
             ?? ""
         guard !label.isEmpty else { return nil }
+        // §4.3: подпись честная — пользователь видит и что расписание
+        // республиканское (по Грозному), и что файл добавлен вручную:
+        // «выверенность» такого файла — на совести добавившего, проверка
+        // источника здесь — прослеживаемость, не подлинность.
+        let caveats = [
+            tableCity.userProvided ? "Расписание из файла, добавленного вручную" : nil,
+            lookupName == city.name ? nil : "Единое расписание \(label) по времени Грозного",
+        ].compactMap { $0 }
         var result = DayPrayerTimes(
-            source: PrayerTimesSource(label: label, isVerifiedTable: true)
+            source: PrayerTimesSource(
+                label: label, isVerifiedTable: true,
+                caveat: caveats.isEmpty ? nil : caveats.joined(separator: "; ")
+            )
         )
         for occurrence in occurrences {
             switch occurrence.kind {

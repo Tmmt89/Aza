@@ -14,7 +14,7 @@ import UserNotifications
 /// мастер неудобно; открытая заново, эта же страница честно показывает,
 /// что уже выдано.
 @MainActor
-final class SetupWindowController {
+final class SetupWindowController: NSObject, NSWindowDelegate {
 
     static let completedKey = "OnboardingCompleted"
 
@@ -23,6 +23,22 @@ final class SetupWindowController {
 
     init(model: SetupModel) {
         self.model = model
+    }
+
+    /// Кнопка закрытия и ⌘W идут сюда: окно сперва уезжает вверх, и
+    /// только потом закрывается по-настоящему (close() делегата не зовёт).
+    /// Флаг гасит повторные ⌘W во время анимации — второй slideOut
+    /// стартовал бы с полдороги и сдвинул сохранённый кадр окна.
+    private var isSlidingOut = false
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !isSlidingOut else { return false }
+        isSlidingOut = true
+        sender.slideOut { [weak self] in
+            self?.isSlidingOut = false
+            sender.close()
+        }
+        return false
     }
 
     /// Показывается сама только при первом запуске; дальше — по команде
@@ -39,7 +55,12 @@ final class SetupWindowController {
         model.refresh()
         if let window {
             NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
+            if window.isVisible {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                window.slideIn()
+                window.makeKey()
+            }
             return
         }
         // Размер окна подгоняется под содержимое: настройки должны
@@ -52,7 +73,9 @@ final class SetupWindowController {
         let fitting = content.fittingSize
         let size = CGSize(width: min(fitting.width, visible.width - 40),
                           height: min(fitting.height, visible.height - 40))
-        let window = NSWindow(
+        // AzaSlidingWindow: обычный NSWindow прижимался бы constrain'ом
+        // к экрану и не смог бы улететь за верхнюю кромку при закрытии.
+        let window = AzaSlidingWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable],
             backing: .buffered,
@@ -70,11 +93,13 @@ final class SetupWindowController {
         window.center()
         window.contentView = content
         window.setContentSize(size)
+        window.delegate = self
         self.window = window
         // Приложение живёт в меню-баре: без явной активации окно
         // откроется без фокуса, и кнопки будут «не нажиматься».
         NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        window.slideIn()
+        window.makeKey()
     }
 }
 
@@ -92,6 +117,10 @@ final class SetupModel: ObservableObject {
 
     let prayer: PrayerStore
     let dictation: DictationController
+    /// Перерегистрация сочетаний буфера и фраз: хоткеями владеет
+    /// IslandStore, замыкания подставляются в AzaApp.
+    var rebindClipboardHotKey: () -> Void = {}
+    var rebindPhrasesHotKey: () -> Void = {}
     private var cancellables: Set<AnyCancellable> = []
 
     init(prayer: PrayerStore, dictation: DictationController) {

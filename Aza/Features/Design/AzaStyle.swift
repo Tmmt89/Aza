@@ -29,6 +29,15 @@ enum AzaStyle {
     static let danger = Color(red: 1, green: 69 / 255, blue: 58 / 255)
     static let warning = Color(red: 1, green: 179 / 255, blue: 64 / 255)
 
+    // Стекло: карточка — лёгкий вертикальный градиент поверхности, кромка
+    // освещена сверху. Родилось в карточке управления большого острова —
+    // равномерная серая рамка выглядела плоской.
+    static let glass = LinearGradient(
+        colors: [panel, card], startPoint: .top, endPoint: .bottom)
+    static let glassEdge = LinearGradient(
+        colors: [Color.white.opacity(0.16), Color.white.opacity(0.04)],
+        startPoint: .top, endPoint: .bottom)
+
     static let notchWidth: CGFloat = 160
 
     // Типографика (стили Aza/* из дизайн-системы)
@@ -45,6 +54,63 @@ enum AzaMotion {
     static let expand = 0.32
 
     static let reveal = Animation.timingCurve(0.22, 1, 0.36, 1, duration: expand)
+}
+
+/// Окно настроек с отключённым прижатием к экрану: для анимации ухода
+/// кадр честно ставится ВЫШЕ экрана, а стандартный constrain вернул бы
+/// титулованное окно в видимую область и сломал бы полёт.
+final class AzaSlidingWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
+/// Появление и уход окон в одном жесте продукта: окно опускается из-за
+/// верхней кромки экрана на место, уходит — поднимается обратно за
+/// кромку. Без растворения: движение чисто физическое. При включённом
+/// «уменьшении движения» окно появляется и прячется мгновенно.
+extension NSWindow {
+    /// Насколько поднять окно, чтобы оно целиком (с тенью) ушло за
+    /// верхнюю кромку своего экрана.
+    private var offscreenLift: CGFloat {
+        let top = (screen ?? NSScreen.main)?.frame.maxY ?? frame.maxY
+        return max(0, top - frame.minY) + 60
+    }
+
+    func slideIn() {
+        let target = frame
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            orderFrontRegardless()
+            return
+        }
+        setFrame(target.offsetBy(dx: 0, dy: offscreenLift), display: false)
+        orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = AzaMotion.expand
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
+            animator().setFrame(target, display: true)
+        }
+    }
+
+    func slideOut(completion: @escaping @MainActor () -> Void) {
+        let target = frame
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            completion()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = AzaMotion.compact
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.9, 0.4)
+            animator().setFrame(target.offsetBy(dx: 0, dy: offscreenLift), display: true)
+        } completionHandler: {
+            MainActor.assumeIsolated {
+                completion()
+                // Спрятанным окно возвращается на место: следующий показ
+                // стартует с правильной геометрии.
+                self.setFrame(target, display: false)
+            }
+        }
+    }
 }
 
 /// Переключатель в стиле Aza: капсула с бегунком, изумрудная во

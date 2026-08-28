@@ -60,15 +60,14 @@ struct HotKeyRecorder: View {
             keyCode: UInt32(event.keyCode),
             modifiers: HotKeyBinding.carbonModifiers(from: event.modifierFlags)
         )
-        // Без модификатора глобальный хоткей съедал бы обычный набор.
-        guard candidate.hasModifier else {
-            problem = "Добавьте ⌘, ⌃, ⌥ или ⇧"
-            return
-        }
         binding = candidate
         onChange(candidate)
         isRecording = false
-        problem = nil
+        // Одиночная клавиша разрешена (удобно для F-клавиш), но у
+        // буквенных это отнимает символ у всех приложений — предупреждаем.
+        problem = candidate.hasModifier
+            ? nil
+            : "Без модификатора клавиша перестанет печатать свой символ во всех приложениях"
     }
 }
 

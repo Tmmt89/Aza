@@ -37,6 +37,13 @@ final class PasteboardMonitor: ObservableObject {
 
     private var timer: Timer?
     private var lastChangeCount = NSPasteboard.general.changeCount
+    /// Все приложения, побывавшие активными с прошлого тика: копия
+    /// случилась где-то между тиками, и источником могло быть ЛЮБОЕ из
+    /// них — даже «заскочить в менеджер паролей и обратно» между двумя
+    /// опросами не обходит исключения (ложный пропуск лучше утечки).
+    /// Наполняется уведомлениями NSWorkspace, не сэмплами на тиках.
+    private var activeSinceLastPoll: Set<String> = []
+    private var activationObserver: (any NSObjectProtocol)?
     private let store: ClipboardStore
 
     init(store: ClipboardStore) {
@@ -48,6 +55,21 @@ final class PasteboardMonitor: ObservableObject {
     func start() {
         guard timer == nil else { return }
         lastChangeCount = NSPasteboard.general.changeCount
+        if let current = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
+            activeSinceLastPoll = [current]
+        }
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                        as? NSRunningApplication,
+                      let bundleID = app.bundleIdentifier else { return }
+                self.activeSinceLastPoll.insert(bundleID)
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.poll()
@@ -58,10 +80,19 @@ final class PasteboardMonitor: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+            self.activationObserver = nil
+        }
     }
 
     func poll() {
         let pasteboard = NSPasteboard.general
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        var candidates = activeSinceLastPoll
+        if let current = frontmost?.bundleIdentifier { candidates.insert(current) }
+        // Новый интервал начинается с текущего фронтмоста.
+        activeSinceLastPoll = frontmost?.bundleIdentifier.map { [$0] } ?? []
         guard pasteboard.changeCount != lastChangeCount else { return }
         lastChangeCount = pasteboard.changeCount
 
@@ -71,13 +102,15 @@ final class PasteboardMonitor: ObservableObject {
         guard !types.isEmpty else { return }
         if types.contains(where: { Self.excludedTypes.contains($0) }) { return }
 
-        let frontmost = NSWorkspace.shared.frontmostApplication
-        if let bundleID = frontmost?.bundleIdentifier,
-           Self.excludedBundleIDs.contains(bundleID) { return }
+        // Кандидаты в источники — все активные с прошлого тика. Исключён
+        // любой — запись пропускается; их больше одного — атрибуция
+        // неизвестна (nil), а не догадка.
+        if candidates.contains(where: { Self.excludedBundleIDs.contains($0) }) { return }
+        let ambiguous = candidates.count > 1
 
         classify(pasteboard,
-                 sourceAppBundleID: frontmost?.bundleIdentifier,
-                 sourceAppName: frontmost?.localizedName)
+                 sourceAppBundleID: ambiguous ? nil : frontmost?.bundleIdentifier,
+                 sourceAppName: ambiguous ? nil : frontmost?.localizedName)
     }
 
     /// Приоритет классификации (стиль Maccy): файлы → изображение →
@@ -102,6 +135,9 @@ final class PasteboardMonitor: ObservableObject {
             // на таймере главного потока большое изображение подвешивало
             // бы UI и сам опрос. В main возвращаемся только для записи.
             let store = self.store
+            // Время — момент КОПИИ: текст, скопированный позже картинки,
+            // добавляется синхронно и не должен оказаться под ней в истории.
+            let copiedAt = Date()
             Self.imageDecodeQueue.async {
                 guard let rep = NSBitmapImageRep(data: image),
                       let png = rep.representation(using: .png, properties: [:]) else {
@@ -115,7 +151,8 @@ final class PasteboardMonitor: ObservableObject {
                         azaDebugLog("Aza: clip kind=image bytes=\(png.count) thumb=\(thumbnail?.count ?? 0)")
                         store.addImage(png: png, label: label, thumbnail: thumbnail,
                                        sourceAppBundleID: sourceAppBundleID,
-                                       sourceAppName: sourceAppName)
+                                       sourceAppName: sourceAppName,
+                                       copiedAt: copiedAt)
                     }
                 }
             }
@@ -159,12 +196,13 @@ final class PasteboardMonitor: ObservableObject {
     /// нового» невозможна: main тоже последовательный).
     private static let imageDecodeQueue = DispatchQueue(label: "com.tmmt.Aza.image-decode")
 
-    /// PNG-миниатюра ≤48px по длинной стороне через ImageIO —
-    /// потокобезопасно без графического контекста AppKit.
+    /// PNG-миниатюра ≤512px по длинной стороне через ImageIO —
+    /// потокобезопасно без графического контекста AppKit. 512, а не меньше:
+    /// карточка острова рисует превью ~412px на Retina (206pt × 2).
     private nonisolated static func thumbnailPNG(from imageData: Data) -> Data? {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 48,
+            kCGImageSourceThumbnailMaxPixelSize: 512,
             kCGImageSourceCreateThumbnailWithTransform: true,
         ]
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),

@@ -221,7 +221,25 @@ enum LayoutCorrectionEngine {
 
         if let table = KeyboardLayoutMap.table(from: "en", to: "ru"),
            let russian = remapped(word, table: table) {
-            guard word.count >= 3,
+            // Подтверждённое хоткеем слово исправляется без спелчекеров
+            // и воздержаний: пользователь уже одобрил этот ремап.
+            if UserWordLists.shared.isConfirmed(russian) {
+                return (russian, "ru")
+            }
+            // Однобуквенное — только «я»: для одной буквы оба спелчекера
+            // бесполезны (принимают любую букву как слово), а прочие
+            // однобуквенные русские слова сидят на клавишах, слишком
+            // частых в английском и коде (b→и, e→у, t→е).
+            if word.count == 1 {
+                guard russian.lowercased() == "я" else { return nil }
+                return (russian, "ru")
+            }
+            // Порог длины 2 (было 3): двухбуквенные местоимения и частицы
+            // (ты, не, он, на, да…) прошли веттинг — ни один частый
+            // английский или кодовый диграф (in, to, js, id…) не ремапится
+            // в валидное русское слово, а диграфы-слова английского
+            // (vs→мы, ye→ну) отсекает isValidEnglishTyped.
+            guard word.count >= 2,
                   !isValidEnglishTyped(word),
                   isValidWord(russian, language: "ru") || looksChechen(russian) else { return nil }
 
@@ -254,8 +272,12 @@ enum LayoutCorrectionEngine {
         // never be "fixed" into Latin the way Punto-style switchers do.
         guard !looksChechen(word) else { return nil }
 
-        if let table = KeyboardLayoutMap.table(from: "ru", to: "en"),
+        if ChechenAutocorrect.isLatinizationEnabled,
+           let table = KeyboardLayoutMap.table(from: "ru", to: "en"),
            let latin = remapped(word, table: table) {
+            if UserWordLists.shared.isConfirmed(latin) {
+                return (latin, "en")
+            }
             guard word.count >= 3,
                   !isValidWord(word, language: "ru"),
                   isValidWord(latin, language: "en") else { return nil }
@@ -321,13 +343,45 @@ enum LayoutCorrectionEngine {
     /// Непрерывный хвост ещё не исправленных слов перед чеченским словом.
     @MainActor
     static func backwardContextSpan(previous: [PhraseWord], correctedWord: String) -> PhraseSpan? {
+        guard ChechenLexicon.shared.contains(correctedWord) else { return nil }
+        return backwardContextSpan(previous: previous, correctedWord: correctedWord,
+                                   remap: { chechenContextRemap(for: $0) })
+    }
+
+    /// Русское зеркало бэквард-контекста: исправление оказалось русским
+    /// словом — короткие неисправленные слова перед ним («e vtyz» → «у
+    /// меня», «z yt pyf» → «я не...») ретроактивно ремапятся той же
+    /// атомарной заменой.
+    @MainActor
+    static func backwardRussianSpan(previous: [PhraseWord], correctedWord: String) -> PhraseSpan? {
         backwardContextSpan(previous: previous, correctedWord: correctedWord,
-                            remap: { chechenContextRemap(for: $0) })
+                            remap: { russianContextRemap(for: $0) })
+    }
+
+    /// Ремап короткого слова в русском контексте. Однобуквенные разрешены
+    /// только для настоящих однобуквенных слов русского (местоимение,
+    /// союзы, предлоги) — спелчекер для одной буквы принимает всё подряд,
+    /// а это грамматический факт, не лексикон.
+    private static let oneLetterRussianWords: Set<Character> = ["я", "и", "а", "у", "о", "в", "с", "к"]
+
+    @MainActor
+    static func russianContextRemap(for word: String) -> String? {
+        guard !UserWordLists.shared.isNeverCorrect(word),
+              word.dropFirst().allSatisfy({ !$0.isUppercase }),
+              let table = KeyboardLayoutMap.table(from: "en", to: "ru"),
+              let mapped = remapped(word, table: table) else { return nil }
+        if word.count == 1 {
+            guard let letter = mapped.lowercased().first,
+                  oneLetterRussianWords.contains(letter) else { return nil }
+            return mapped
+        }
+        guard !isValidEnglishTyped(word),
+              isValidWord(mapped, language: "ru") else { return nil }
+        return mapped
     }
 
     static func backwardContextSpan(previous: [PhraseWord], correctedWord: String,
                                     remap: (String) -> String?) -> PhraseSpan? {
-        guard ChechenLexicon.shared.contains(correctedWord) else { return nil }
         var original = ""
         var corrected = ""
         var words: [String] = []

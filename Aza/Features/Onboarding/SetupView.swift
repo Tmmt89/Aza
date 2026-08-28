@@ -9,6 +9,15 @@ import UserNotifications
 /// семь крупных блоков; объяснение показывается там, где от пользователя
 /// ещё требуется действие, а выданное разрешение сворачивается в строку
 /// со статусом.
+extension Notification.Name {
+    /// Просьба открыть настройки сразу на разделе «Намаз» (клик по городу
+    /// в острове).
+    static let azaShowPrayerSettings = Notification.Name("aza.showPrayerSettings")
+    /// Просьба открыть настройки на разделе «Фразы» (кнопка «Изменить»
+    /// в панели фраз).
+    static let azaShowPhraseSettings = Notification.Name("aza.showPhraseSettings")
+}
+
 struct SetupView: View {
     @ObservedObject var model: SetupModel
     @AppStorage(PrayerStore.cityStorageKey) private var cityID = ""
@@ -21,84 +30,208 @@ struct SetupView: View {
     @AppStorage(ChechenAutocorrect.layoutStorageKey) private var layoutCorrection = true
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrection = false
     @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstention = true
+    @AppStorage(ChechenAutocorrect.latinizationStorageKey) private var latinization = true
     @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
+    @AppStorage(IslandStore.copyFlashKey) private var copyFlash = true
+    @AppStorage(IslandStore.copySoundKey) private var copySound = ""
+    @AppStorage(IslandStore.compactModeKey) private var islandMode = "auto"
+    @AppStorage(AzaApp.menuBarIconKey) private var menuBarIconVisible = true
     @State private var dictationHotKey = HotKeyBinding.load(
         HotKeyBinding.dictationKey, fallback: .dictationDefault)
+    @State private var clipboardHotKey = HotKeyBinding.load(
+        HotKeyBinding.clipboardKey, fallback: .clipboardDefault)
+    @State private var phrasesHotKey = HotKeyBinding.load(
+        HotKeyBinding.phrasesKey, fallback: .phrasesDefault)
+    @ObservedObject private var phraseStore = PhraseStore.shared
+    /// Сброс фраз требует второго нажатия: молчаливая потеря правок —
+    /// ловушка.
+    @State private var confirmPhraseReset = false
+    /// Ошибка удаления модели; заодно любое изменение перечитывает
+    /// isModelCached с диска при перерисовке.
+    @State private var modelDeleteError: String?
     @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
+    @AppStorage(DictationController.customWordsStorageKey) private var dictationCustomWords = ""
+    @AppStorage(DictationController.toneVolumeStorageKey) private var toneVolume =
+        DictationController.toneVolumeDefault
+    @AppStorage(DictationController.toneSetStorageKey) private var toneSet =
+        DictationController.ToneSet.marimba.rawValue
+    @State private var tonePreviewTask: Task<Void, Never>?
     /// Разделы, переехавшие из меню: там они дублировали настройки и
     /// растягивали список на два экрана. Здесь — за кнопкой, чтобы окно
     /// по-прежнему помещалось целиком.
     @State private var showDataSheet = false
     @State private var showAppsSheet = false
     @State private var showExceptionWords = false
+    @State private var showPrayerNotifSheet = false
     /// Характеристики этого Mac — под них подбирается рекомендация.
     private let capabilities = MacCapabilities.current()
 
-    var body: some View {
-        ZStack {
-            AzaStyle.stage.ignoresSafeArea()
+    /// Разделы окна: сайдбар слева, содержимое справа — вместо ленты из
+    /// шести карточек на одном экране.
+    ///
+    /// Раздел = фича, а не тип контрола: хоткей диктовки лежит в
+    /// «Диктовке», настройки буфера — в «Буфере обмена». Отдельная вкладка
+    /// «Горячие клавиши» из двух строк заставляла искать настройку одной
+    /// фичи в двух местах. «Общее» — только про само приложение.
+    private enum Section: String, CaseIterable {
+        case prayer, dictation, correction, clipboard, phrases, general, permissions
 
-            // Две колонки вместо длинной ленты: всё умещается на экран
-            // без прокрутки — настройки должны быть видны целиком.
-            VStack(alignment: .leading, spacing: 12) {
-                header
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(spacing: 12) {
-                        prayerCard
-                        correctionCard
-                        hotKeysCard
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    VStack(spacing: 12) {
-                        dictationCard
-                        generalCard
-                        permissionsCard
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
-                footer
+        var title: String {
+            switch self {
+            case .prayer: "Намаз"
+            case .dictation: "Диктовка"
+            case .correction: "Автозамена"
+            case .clipboard: "Буфер обмена"
+            case .phrases: "Фразы"
+            case .general: "Общее"
+            case .permissions: "Разрешения"
             }
-            .padding(18)
         }
-        .frame(width: 640)
-        .fixedSize(horizontal: false, vertical: true)
+
+        var symbol: String {
+            switch self {
+            case .prayer: "moon.stars.fill"
+            case .dictation: "mic"
+            case .correction: "keyboard"
+            case .clipboard: "doc.on.clipboard"
+            case .phrases: "text.bubble"
+            case .general: "gearshape"
+            case .permissions: "checkmark.shield"
+            }
+        }
+    }
+
+    @State private var section: Section = .prayer
+
+    var body: some View {
+        HStack(spacing: 0) {
+            sidebar
+            content
+        }
+        // Высота — по самому длинному разделу («Диктовка»): настройки
+        // должны помещаться целиком, скролл остаётся только страховкой
+        // для маленьких экранов.
+        .frame(width: 680, height: 620)
+        .background(AzaStyle.stage)
         .preferredColorScheme(.dark)
         // Закрыли настройки — прослушивание смолкло. Звук, доигрывающий
         // за закрытым окном, пользователь остановить уже не может.
         .onDisappear { soundPreview.stop() }
+        // Клик по городу в острове ведёт именно к выбору города, а не к
+        // разделу, оставшемуся открытым с прошлого раза.
+        .onReceive(NotificationCenter.default.publisher(for: .azaShowPrayerSettings)) { _ in
+            section = .prayer
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .azaShowPhraseSettings)) { _ in
+            section = .phrases
+        }
         .sheet(isPresented: $showDataSheet) { DataSheet(model: model) }
         .sheet(isPresented: $showAppsSheet) { AppExclusionsSheet() }
-    }
-
-    // MARK: Шапка и подвал
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "waveform")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(AzaStyle.acid)
-                .frame(width: 28, height: 28)
-                .background(AzaStyle.acidSurface, in: RoundedRectangle(
-                    cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Aza").font(AzaStyle.title).foregroundStyle(AzaStyle.ink)
-                Text("Всё локально. Любой пункт можно пропустить.")
-                    .font(AzaStyle.caption)
-                    .foregroundStyle(AzaStyle.faint)
-            }
+        .sheet(isPresented: $showPrayerNotifSheet) {
+            PrayerNotificationsSheet(prayer: model.prayer)
         }
     }
 
-    private var footer: some View {
-        HStack {
-            Spacer()
-            Button("Готово") {
-                UserDefaults.standard.set(true, forKey: SetupWindowController.completedKey)
-                NSApp.keyWindow?.close()
+    // MARK: Сайдбар и содержимое
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(AzaStyle.acid)
+                    .frame(width: 28, height: 28)
+                    .background(AzaStyle.acidSurface, in: RoundedRectangle(
+                        cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Aza").font(AzaStyle.sectionTitle).foregroundStyle(AzaStyle.ink)
+                    Text("Всё локально")
+                        .font(AzaStyle.caption)
+                        .foregroundStyle(AzaStyle.faint)
+                }
             }
-            .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
-            .keyboardShortcut(.defaultAction)
+            .padding(.bottom, 14)
+
+            ForEach(Section.allCases, id: \.self) { item in
+                sidebarRow(item)
+            }
+
+            Spacer(minLength: 0)
         }
+        .padding(14)
+        .frame(width: 200, alignment: .topLeading)
+        .background(AzaStyle.deep)
+        .overlay(alignment: .trailing) {
+            AzaStyle.line.frame(width: 1)
+        }
+    }
+
+    private func sidebarRow(_ item: Section) -> some View {
+        Button {
+            section = item
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: item.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 18)
+                    .foregroundStyle(section == item ? Color.black : AzaStyle.muted)
+                Text(item.title)
+                    .font(AzaStyle.body)
+                    .foregroundStyle(section == item ? Color.black : AzaStyle.ink)
+                Spacer(minLength: 0)
+                // Невыданные права видны прямо из сайдбара.
+                if item == .permissions, !missingPermissions.isEmpty {
+                    Circle().fill(section == item ? Color.black : AzaStyle.warning)
+                        .frame(width: 6, height: 6)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(section == item ? AzaStyle.acid : .clear,
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var content: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(section.title)
+                        .font(AzaStyle.title)
+                        .foregroundStyle(AzaStyle.ink)
+                        .padding(.bottom, 2)
+                    switch section {
+                    case .prayer: prayerCard
+                    case .dictation: dictationCard
+                    case .correction: correctionCard
+                    case .clipboard: clipboardCard
+                    case .phrases: phrasesCard
+                    case .general: generalCard
+                    case .permissions: permissionsCard
+                    }
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            // Главное действие окна — в правом нижнем углу, как принято
+            // на macOS, а не в сайдбаре.
+            HStack {
+                Spacer()
+                Button("Готово") {
+                    UserDefaults.standard.set(true, forKey: SetupWindowController.completedKey)
+                    // performClose, а не close: закрытие идёт через делегата
+                    // окна — с анимацией ухода вверх.
+                    NSApp.keyWindow?.performClose(nil)
+                }
+                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 14)
+        }
+        .background(AzaStyle.stage)
     }
 
     // MARK: Разрешения — одной группой
@@ -217,6 +350,7 @@ struct SetupView: View {
                 }
                 .buttonStyle(AzaCapsuleButtonStyle())
                 .disabled(locator.state == .locating)
+                HelpDot(text: "Город, по которому берутся времена намаза. «По геопозиции» подбирает ближайший профиль из списка.")
             }
             switch locator.state {
             case let .found(id, distance):
@@ -234,6 +368,16 @@ struct SetupView: View {
                 sourceStatus
                 divider
                 soundPicker
+                divider
+                HStack(spacing: 6) {
+                    Text("Уведомления")
+                        .font(AzaStyle.body)
+                        .foregroundStyle(AzaStyle.ink)
+                    HelpDot(text: "Режим уведомления по каждому намазу отдельно: выключено, в момент наступления или напоминание заранее.")
+                    Spacer(minLength: 8)
+                    Button("Настроить…") { showPrayerNotifSheet = true }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                }
             }
         }
     }
@@ -250,6 +394,7 @@ struct SetupView: View {
                 Text("Звук")
                     .font(AzaStyle.body)
                     .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Чем звучит уведомление о намазе. Кнопка ▶ — прослушать выбранный азан.")
                 Spacer(minLength: 8)
                 Picker("", selection: $prayerSound) {
                     ForEach(PrayerNotifications.Sound.allCases, id: \.rawValue) { option in
@@ -263,6 +408,9 @@ struct SetupView: View {
                 .onChange(of: prayerSound) { _, value in
                     guard let option = PrayerNotifications.Sound(rawValue: value) else { return }
                     soundPreview.play(option)
+                    // Звук зашит в уже запланированные уведомления —
+                    // без пересборки они прозвучат старым звуком.
+                    model.prayer.rescheduleNotifications()
                 }
                 Button {
                     guard let option = PrayerNotifications.Sound(rawValue: prayerSound) else { return }
@@ -326,12 +474,21 @@ struct SetupView: View {
         }
     }
 
+    // Порядок строк — путь пользователя: как включить (клавиша), что
+    // распознаётся (язык, свои слова, модель), и в конце — чем звучит.
     private var dictationCard: some View {
         card("Диктовка") {
+            HotKeyRecorder(title: "Клавиша", binding: $dictationHotKey) { binding in
+                binding.save(HotKeyBinding.dictationKey)
+                model.dictation.rebindHotKey()
+            }
+            hint("Удерживайте для записи; двойное нажатие фиксирует — фиксацию остановят сочетание, Пробел или Enter.")
+            divider
             HStack {
                 Text("Язык")
                     .font(AzaStyle.body)
                     .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Язык распознавания диктовки. Авто определяет по речи; при сомнении выбирается русский.")
                 Spacer(minLength: 8)
                 Picker("", selection: $dictationLanguage) {
                     Text("Авто").tag("auto")
@@ -342,11 +499,25 @@ struct SetupView: View {
                 .labelsHidden()
                 .frame(width: 200)
             }
-            .help("Авто: при сомнении выбирается русский")
+            divider
+            HStack {
+                Text("Свои слова")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Имена и термины через запятую. Whisper получает их как подсказку и реже коверкает такие слова.")
+                Spacer(minLength: 8)
+                TextField("Ахьмад, Соьлжа-ГӀала", text: $dictationCustomWords)
+                    .textFieldStyle(.roundedBorder)
+                    .font(AzaStyle.body)
+                    .frame(width: 200)
+            }
             divider
             ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in
                 if index > 0 { divider }
                 modelRow(item)
+            }
+            if let modelDeleteError {
+                warn(modelDeleteError)
             }
             hint(capabilities.recommendationReason)
 
@@ -374,6 +545,50 @@ struct SetupView: View {
                 }
                 .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
             }
+            divider
+            HStack {
+                Text("Звук сигналов")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Пара звуков начала и конца диктовки: вверх — запись пошла, вниз — распознаю.")
+                Spacer(minLength: 8)
+                Picker("", selection: $toneSet) {
+                    ForEach(DictationController.ToneSet.allCases, id: \.rawValue) { set in
+                        Text(set.title).tag(set.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 140)
+                .onChange(of: toneSet) { _, _ in
+                    DictationController.playTone(start: false)
+                }
+            }
+            divider
+            HStack {
+                Text("Громкость сигналов")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Звуки начала и конца диктовки. В нуле — без звука.")
+                Spacer(minLength: 8)
+                Image(systemName: toneVolume == 0 ? "speaker.slash" : "speaker.wave.2")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AzaStyle.muted)
+                    .frame(width: 16)
+                Slider(value: $toneVolume, in: 0...1)
+                    .controlSize(.small)
+                    .tint(AzaStyle.acid)
+                    .frame(width: 140)
+                    // Отпустили бегунок — проигрываем сигнал на новой
+                    // громкости, чтобы её можно было подобрать на слух.
+                    .onChange(of: toneVolume) { _, _ in
+                        tonePreviewTask?.cancel()
+                        tonePreviewTask = Task {
+                            try? await Task.sleep(for: .milliseconds(250))
+                            guard !Task.isCancelled else { return }
+                            DictationController.playTone(start: false)
+                        }
+                    }
+            }
         }
     }
 
@@ -383,7 +598,8 @@ struct SetupView: View {
         let isDownloaded = DictationController.isModelCached(item)
         let tooHeavy = !capabilities.canRun(item)
 
-        return Button {
+        return HStack(alignment: .top, spacing: 8) {
+            Button {
             profile = item.rawValue
             model.dictation.profileChanged()
         } label: {
@@ -420,6 +636,27 @@ struct SetupView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+
+            // Удаление одной модели, не трогая остальные: выгружаем из
+            // памяти только её и стираем только её папку в кэше.
+            if isDownloaded {
+                Button {
+                    if model.dictation.loadedProfile == item {
+                        model.dictation.unloadModel()
+                    }
+                    modelDeleteError = PrivacyCleanup.deleteModel(variant: item.variant)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(AzaStyle.faint)
+                }
+                .buttonStyle(.plain)
+                // Во время диктовки unloadModel — no-op (guard state == .idle),
+                // и удаление папки выдернуло бы файлы из-под WhisperKit.
+                .disabled(model.dictation.state != .idle)
+                .help("Удалить скачанную модель «\(item.title)» (\(item.sizeLabel))")
+            }
+        }
     }
 
     private func tag(_ text: String, color: Color, background: Color) -> some View {
@@ -442,83 +679,91 @@ struct SetupView: View {
                               help: "Чеченские слова с опечаткой — только когда в словаре ровно один похожий вариант.")
                 settingToggle("Пропускать спорные", isOn: $ambiguityAbstention,
                               help: "Если слово читается и как русское, и как чеченское — Aza промолчит.")
-                // Список исключений показывается, только когда он не пуст:
-                // пустая строка «Исключений: 0» занимает место и ничего
-                // не сообщает.
-                if !UserWordLists.shared.neverCorrect.isEmpty {
-                    divider
-                    HStack {
-                        // Перед «Очистить» список можно посмотреть: клик
-                        // по счётчику раскрывает слова в поповере.
-                        Button {
-                            showExceptionWords = true
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text("Слова-исключения: \(UserWordLists.shared.neverCorrect.count)")
-                                    .font(AzaStyle.body)
-                                    .foregroundStyle(AzaStyle.ink)
+                settingToggle("Латинизация", isOn: $latinization,
+                              help: "Обратное направление: ыфдфв → salad. Выключите, если Aza мешает при наборе кириллицей.")
+                // Строка видна всегда, даже при пустом списке — иначе
+                // непонятно, куда деваются отменённые исправления.
+                let exceptions = UserWordLists.shared.neverCorrect
+                divider
+                HStack {
+                    // Перед «Очистить» список можно посмотреть: клик
+                    // по счётчику раскрывает слова в поповере.
+                    Button {
+                        showExceptionWords = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Слова-исключения: \(exceptions.count)")
+                                .font(AzaStyle.body)
+                                .foregroundStyle(exceptions.isEmpty ? AzaStyle.faint : AzaStyle.ink)
+                            if !exceptions.isEmpty {
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 8, weight: .semibold))
                                     .foregroundStyle(AzaStyle.faint)
                             }
                         }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $showExceptionWords, arrowEdge: .bottom) {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    ForEach(UserWordLists.shared.neverCorrect.sorted(), id: \.self) { word in
-                                        Text(word)
-                                            .font(AzaStyle.body)
-                                            .foregroundStyle(AzaStyle.ink)
-                                    }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(exceptions.isEmpty)
+                    .popover(isPresented: $showExceptionWords, arrowEdge: .bottom) {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(exceptions.sorted(), id: \.self) { word in
+                                    Text(word)
+                                        .font(AzaStyle.body)
+                                        .foregroundStyle(AzaStyle.ink)
                                 }
-                                .padding(12)
                             }
-                            .frame(minWidth: 160, maxHeight: 240)
+                            .padding(12)
                         }
-                        Spacer(minLength: 8)
+                        .frame(minWidth: 160, maxHeight: 240)
+                    }
+                    HelpDot(text: "Слова, которые Aza больше не исправляет. Попадают сюда, когда вы отменяете исправление двойным правым Shift; клик по счётчику показывает список.")
+                    Spacer(minLength: 8)
+                    if !exceptions.isEmpty {
                         Button("Очистить") {
                             UserWordLists.shared.clearNeverCorrect()
                             showExceptionWords = false
                         }
                         .buttonStyle(AzaCapsuleButtonStyle())
                     }
-                    .help("Двойной правый Shift отменяет исправление и заносит слово сюда")
                 }
+                .help("Двойной правый Shift отменяет исправление и заносит слово сюда")
             }
         }
     }
 
-    /// Компактная строка настройки: подпись, переключатель, объяснение —
-    /// в подсказке, чтобы не растягивать окно.
+    /// Компактная строка настройки: подпись, «?» с пояснением,
+    /// переключатель. Пояснение — по клику, не только по наведению:
+    /// подсказки при наведении никто не находит.
     private func settingToggle(_ title: String, isOn: Binding<Bool>,
                                help: String) -> some View {
-        Toggle(isOn: isOn) {
+        HStack(spacing: 6) {
             Text(title)
                 .font(AzaStyle.body)
                 .foregroundStyle(AzaStyle.ink)
+            HelpDot(text: help)
+            Spacer(minLength: 8)
+            Toggle(isOn: isOn) { EmptyView() }
+                .toggleStyle(AzaToggleStyle())
         }
-        .toggleStyle(AzaToggleStyle())
-        .help(help)
     }
 
-    /// Горячие клавиши (§5.1: клавишу выбирает пользователь).
-    private var hotKeysCard: some View {
-        card("Горячие клавиши") {
-            HotKeyRecorder(title: "Диктовка", binding: $dictationHotKey) { binding in
-                binding.save(HotKeyBinding.dictationKey)
-                model.dictation.rebindHotKey()
+    /// Буфер обмена: всё про историю копирований в одном месте — клавиша,
+    /// срок хранения и обратная связь при копировании. Раньше это было
+    /// размазано между «Общее» и «Горячие клавиши».
+    private var clipboardCard: some View {
+        card("Буфер обмена") {
+            HotKeyRecorder(title: "Клавиша", binding: $clipboardHotKey) { binding in
+                binding.save(HotKeyBinding.clipboardKey)
+                model.rebindClipboardHotKey()
             }
-            hint("Удерживайте для записи, двойное нажатие фиксирует.")
-        }
-    }
-
-    private var generalCard: some View {
-        card("Общее") {
+            hint("Открывает и закрывает историю буфера в острове.")
+            divider
             HStack {
-                Text("Хранить буфер")
+                Text("Хранить историю")
                     .font(AzaStyle.body)
                     .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Сколько живёт история буфера обмена: записи старше срока удаляются. Избранные (со звёздочкой) остаются навсегда.")
                 Spacer(minLength: 8)
                 Picker("", selection: $retentionDays) {
                     Text("Неделю").tag(7)
@@ -529,15 +774,114 @@ struct SetupView: View {
                 .frame(width: 110)
             }
             divider
-            Toggle(isOn: Binding(
-                get: { model.loginItem == .enabled },
-                set: { model.setLoginItem($0) }
-            )) {
+            settingToggle("Показывать «Скопировано»", isOn: $copyFlash,
+                          help: "Остров у выреза на пару секунд подтверждает, что запись попала в историю буфера.")
+            HStack {
+                Text("Звук копирования")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Короткий системный звук при каждой новой записи в истории буфера.")
+                Spacer(minLength: 8)
+                Picker("", selection: $copySound) {
+                    Text("Без звука").tag("")
+                    Text("Тик").tag("tick")
+                    Text("Бум").tag("pop")
+                    Text("Динь").tag("ding")
+                    Text("Маримба").tag("marimba")
+                }
+                .labelsHidden()
+                .frame(width: 130)
+                // Выбор сразу проигрывается — иначе звук не подобрать.
+                .onChange(of: copySound) { _, sound in
+                    IslandStore.playCopySound(sound)
+                }
+            }
+        }
+    }
+
+    /// Фразы быстрой вставки: клавиша, десять слотов и сброс до заводских.
+    private var phrasesCard: some View {
+        card("Фразы") {
+            HotKeyRecorder(title: "Клавиша", binding: $phrasesHotKey) { binding in
+                binding.save(HotKeyBinding.phrasesKey)
+                model.rebindPhrasesHotKey()
+            }
+            hint("Удерживайте правую ⌥ (или сочетание выше) — остров "
+                 + "покажет фразы. Вставляет клик или цифра 1–0, нажатая "
+                 + "не отпуская клавишу. Правое поле — необязательный "
+                 + "вариант фразы (женская форма, полное приветствие): "
+                 + "он вставляется той же цифрой с ⇧.")
+            divider
+            ForEach(0..<PhraseStore.slotCount, id: \.self) { index in
+                HStack(spacing: 8) {
+                    Text("\((index + 1) % 10)")
+                        .font(AzaStyle.caption.monospacedDigit())
+                        .foregroundStyle(AzaStyle.acid)
+                        .frame(width: 16)
+                    TextField("Фраза \(index + 1)",
+                              text: phraseField(index, alternate: false))
+                    TextField("⇧-вариант",
+                              text: phraseField(index, alternate: true))
+                }
+                .textFieldStyle(.roundedBorder)
+                .font(AzaStyle.body)
+            }
+            HStack {
+                if confirmPhraseReset {
+                    Text("Ваши правки будут потеряны")
+                        .font(AzaStyle.caption)
+                        .foregroundStyle(AzaStyle.warning)
+                }
+                Spacer(minLength: 8)
+                Button(confirmPhraseReset ? "Точно сбросить" : "Сбросить до заводских") {
+                    if confirmPhraseReset {
+                        phraseStore.resetToFactory()
+                    }
+                    confirmPhraseReset.toggle()
+                }
+                .buttonStyle(AzaCapsuleButtonStyle())
+                .disabled(!phraseStore.isCustomized)
+            }
+        }
+        .onChange(of: phraseStore.isCustomized) { _, _ in
+            confirmPhraseReset = false
+        }
+    }
+
+    /// Половина слота фразы как отдельное поле; «|» живёт только в
+    /// хранилище, поэтому из набранного текста он вырезается.
+    private func phraseField(_ index: Int, alternate: Bool) -> Binding<String> {
+        Binding(
+            get: {
+                let parts = PhraseStore.parts(phraseStore.phrases[index])
+                return alternate ? parts.alt : parts.main
+            },
+            set: { newValue in
+                let clean = newValue.replacingOccurrences(of: "|", with: "")
+                var parts = PhraseStore.parts(phraseStore.phrases[index])
+                if alternate { parts.alt = clean } else { parts.main = clean }
+                phraseStore.update(index, text: PhraseStore.join(
+                    main: parts.main, alt: parts.alt))
+            }
+        )
+    }
+
+    /// Общее — только про само приложение: запуск, иконка, остров,
+    /// данные. Настройки конкретных фич живут в своих разделах.
+    private var generalCard: some View {
+        card("Общее") {
+            HStack(spacing: 6) {
                 Text("Запускать вместе с macOS")
                     .font(AzaStyle.body)
                     .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Aza стартует в фоне при входе в систему — намаз, автозамена и буфер работают без ручного запуска.")
+                Spacer(minLength: 8)
+                Toggle(isOn: Binding(
+                    get: { model.loginItem == .enabled },
+                    set: { model.setLoginItem($0) }
+                )) { EmptyView() }
+                .toggleStyle(AzaToggleStyle())
             }
-            .toggleStyle(AzaToggleStyle())
             if let error = model.loginItemError {
                 warn("Не удалось: \(error)")
             }
@@ -545,14 +889,44 @@ struct SetupView: View {
                 hint("Подтвердите в Системных настройках → Элементы входа.")
             }
             divider
-            HStack(spacing: 8) {
-                Button("Данные…") { showDataSheet = true }
-                    .buttonStyle(AzaCapsuleButtonStyle())
-                Button("Исключения…") { showAppsSheet = true }
-                    .buttonStyle(AzaCapsuleButtonStyle())
-                Spacer()
+            settingToggle("Иконка в строке меню", isOn: $menuBarIconVisible,
+                          help: "Уберите, если иконка не нужна: остров и горячие клавиши работают без неё, а настройки открываются из панели острова.")
+            HStack {
+                Text("Остров у выреза")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "«По событиям» — появляется на несколько секунд при копировании и перед намазом. «Всегда» — закреплён и не прячется. «Скрыт» — не показывается вовсе; панели буфера и диктовки работают как обычно.")
+                Spacer(minLength: 8)
+                Picker("", selection: $islandMode) {
+                    Text("По событиям").tag("auto")
+                    Text("Всегда").tag("pinned")
+                    Text("Скрыт").tag("hidden")
+                }
+                .labelsHidden()
+                .frame(width: 130)
             }
-            .help("Что хранится на диске и в каких приложениях Aza молчит")
+            divider
+            // Тот же паттерн строки, что и у остальных настроек: подпись
+            // слева, действие справа — а не безымянные кнопки в ряд.
+            HStack(spacing: 6) {
+                Text("Приложения-исключения")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Приложения, в которых Aza не исправляет текст и не записывает историю буфера.")
+                Spacer(minLength: 8)
+                Button("Настроить…") { showAppsSheet = true }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+            }
+            divider
+            HStack(spacing: 6) {
+                Text("Данные на диске")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Что Aza хранит на диске: история буфера, модели диктовки, слова, расписания. Там же — удаление всех данных.")
+                Spacer(minLength: 8)
+                Button("Показать…") { showDataSheet = true }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+            }
         }
     }
 
@@ -648,12 +1022,9 @@ struct SetupView: View {
         _ title: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
+        // Заголовок раздела теперь над панелью (сайдбарная структура) —
+        // внутри карточки он бы дублировался.
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(AzaStyle.caption)
-                .foregroundStyle(AzaStyle.faint)
-                .textCase(.uppercase)
-                .tracking(0.7)
             content()
         }
         .padding(12)
@@ -796,7 +1167,6 @@ private struct AppExclusionsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var apps = UserDefaults.standard
         .stringArray(forKey: ExcludedApps.userDefaultsKey) ?? []
-    @State private var draft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -809,11 +1179,15 @@ private struct AppExclusionsSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             ForEach(apps, id: \.self) { bundleID in
-                HStack {
-                    Text(bundleID)
-                        .font(AzaStyle.caption.monospaced())
+                HStack(spacing: 8) {
+                    Image(nsImage: Self.icon(for: bundleID))
+                        .resizable()
+                        .frame(width: 18, height: 18)
+                    Text(Self.displayName(for: bundleID))
+                        .font(AzaStyle.body)
                         .foregroundStyle(AzaStyle.ink)
                         .lineLimit(1)
+                        .help(bundleID)
                     Spacer(minLength: 8)
                     Button {
                         apps.removeAll { $0 == bundleID }
@@ -827,17 +1201,20 @@ private struct AppExclusionsSheet: View {
             }
 
             HStack(spacing: 8) {
-                TextField("com.example.app", text: $draft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(AzaStyle.caption.monospaced())
-                Button("Добавить") {
-                    let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty, !apps.contains(trimmed) else { return }
-                    apps.append(trimmed)
-                    draft = ""
-                    save()
+                // Запущенные приложения — один клик, без bundle ID.
+                Menu("Из запущенных") {
+                    ForEach(runningApps, id: \.bundleID) { app in
+                        Button {
+                            add(app.bundleID)
+                        } label: {
+                            Text(app.name)
+                        }
+                    }
                 }
-                .buttonStyle(AzaCapsuleButtonStyle())
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                Button("Выбрать из Программ…") { pickFromFinder() }
+                    .buttonStyle(AzaCapsuleButtonStyle())
             }
 
             HStack {
@@ -853,7 +1230,167 @@ private struct AppExclusionsSheet: View {
         .preferredColorScheme(.dark)
     }
 
+    /// Обычные запущенные приложения (не фоновые агенты), кроме самой
+    /// Aza и уже добавленных.
+    private var runningApps: [(bundleID: String, name: String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app in
+                guard let id = app.bundleIdentifier,
+                      id != Bundle.main.bundleIdentifier,
+                      !apps.contains(id) else { return nil }
+                return (id, app.localizedName ?? id)
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func pickFromFinder() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Добавить"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            if let id = Bundle(url: url)?.bundleIdentifier { add(id) }
+        }
+    }
+
+    private func add(_ bundleID: String) {
+        guard !apps.contains(bundleID) else { return }
+        apps.append(bundleID)
+        save()
+    }
+
+    static func displayName(for bundleID: String) -> String {
+        guard let url = NSWorkspace.shared
+            .urlForApplication(withBundleIdentifier: bundleID) else { return bundleID }
+        return FileManager.default.displayName(atPath: url.path)
+    }
+
+    static func icon(for bundleID: String) -> NSImage {
+        guard let url = NSWorkspace.shared
+            .urlForApplication(withBundleIdentifier: bundleID) else {
+            return NSWorkspace.shared.icon(for: .application)
+        }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+
     private func save() {
         UserDefaults.standard.set(apps, forKey: ExcludedApps.userDefaultsKey)
+    }
+}
+
+/// Значок «?» рядом с пунктом настроек: пояснение открывается кликом.
+/// Тексты раньше жили в .help() — подсказку по наведению почти никто
+/// не обнаруживает.
+struct HelpDot: View {
+    let text: String
+    @State private var isOpen = false
+
+    var body: some View {
+        Button { isOpen = true } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(AzaStyle.faint)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            Text(text)
+                .font(AzaStyle.caption)
+                .foregroundStyle(AzaStyle.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .frame(width: 230, alignment: .leading)
+        }
+    }
+}
+
+/// Режим уведомления по каждому намазу и интервал напоминания.
+/// Хранение и планирование уже жили в PrayerNotifications — здесь только
+/// интерфейс к ним.
+private struct PrayerNotificationsSheet: View {
+    let prayer: PrayerStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var modes: [PrayerKind: PrayerNotifications.Mode]
+    @AppStorage(PrayerNotifications.reminderMinutesKey) private var reminderMinutes = 10
+
+    init(prayer: PrayerStore) {
+        self.prayer = prayer
+        _modes = State(initialValue: Dictionary(
+            uniqueKeysWithValues: PrayerKind.allCases.map {
+                ($0, PrayerNotifications.mode(for: $0))
+            }))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Уведомления о намазах")
+                .font(AzaStyle.sectionTitle)
+                .foregroundStyle(AzaStyle.ink)
+
+            ForEach(PrayerKind.allCases, id: \.self) { kind in
+                HStack(spacing: 8) {
+                    Image(systemName: kind.symbol)
+                        .font(.system(size: 11))
+                        .foregroundStyle(AzaStyle.muted)
+                        .frame(width: 16)
+                    Text(kind.title)
+                        .font(AzaStyle.body)
+                        .foregroundStyle(AzaStyle.ink)
+                    Spacer(minLength: 8)
+                    Picker("", selection: binding(for: kind)) {
+                        ForEach(PrayerNotifications.Mode.allCases, id: \.self) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 190)
+                }
+            }
+
+            if modes.values.contains(.reminder) {
+                Divider().overlay(AzaStyle.line)
+                HStack {
+                    Text("Напоминать за")
+                        .font(AzaStyle.body)
+                        .foregroundStyle(AzaStyle.ink)
+                    Spacer(minLength: 8)
+                    Picker("", selection: $reminderMinutes) {
+                        ForEach([5, 10, 15, 20, 30], id: \.self) { minutes in
+                            Text("\(minutes) мин").tag(minutes)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 100)
+                    .onChange(of: reminderMinutes) {
+                        prayer.rescheduleNotifications()
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Закрыть") { dismiss() }
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 400)
+        .background(AzaStyle.stage)
+        .preferredColorScheme(.dark)
+    }
+
+    private func binding(for kind: PrayerKind) -> Binding<PrayerNotifications.Mode> {
+        Binding(
+            get: { modes[kind] ?? .notification },
+            set: { mode in
+                modes[kind] = mode
+                UserDefaults.standard.set(mode.rawValue,
+                                          forKey: PrayerNotifications.modeKey(for: kind))
+                prayer.rescheduleNotifications()
+            }
+        )
     }
 }

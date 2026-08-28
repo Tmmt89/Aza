@@ -112,9 +112,14 @@ final class ChechenLexiconCoreTests: XCTestCase {
         let (entries, stats) = builder.finalize(minCount: 1)
         let scriptureWord = entries.first { $0.word == "дош" }!.count
         let dailyWord = entries.first { $0.word == "басе" }!.count
-        // Без потолка разрыв был бы 10x; после ограничения — заметно меньше.
-        XCTAssertLessThan(scriptureWord / dailyWord, 4)
+        // Инвариант дословно: доля ужатого источника в ИТОГЕ ПОСЛЕ
+        // масштабирования не превышает maxShare (однопроходное ужатие
+        // мерило от старого итога и давало здесь 73%, а не ≤25%).
+        let share = Double(scriptureWord) / Double(scriptureWord + dailyWord)
+        XCTAssertLessThanOrEqual(share, 0.25 + 0.03, "доля после ужатия: \(share)")
         XCTAssertLessThan(stats.scalingFactors["scripture"]!, 1.0)
+        // Неужатый источник присутствует в статистике с множителем 1.0.
+        XCTAssertEqual(stats.scalingFactors["daily"], 1.0)
     }
 
     func testUkrainianICanonicalizedInBothCases() {

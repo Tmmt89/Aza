@@ -14,6 +14,7 @@
 		BBBB00000000000000000203 /* Aza/Core/ChechenAutocorrect.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000103 /* Aza/Core/ChechenAutocorrect.swift */; };
 		BBBB00000000000000000204 /* Aza/Core/KeyboardLayoutMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000104 /* Aza/Core/KeyboardLayoutMap.swift */; };
 		BBBB00000000000000000205 /* Aza/Core/UserWordLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000105 /* Aza/Core/UserWordLists.swift */; };
+		BBBB0000000000000000020F /* Aza/Features/Phrases/PhraseStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010F /* Aza/Features/Phrases/PhraseStore.swift */; };
 		BBBB00000000000000000206 /* Aza/Core/ExcludedApps.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000106 /* Aza/Core/ExcludedApps.swift */; };
 		BBBB00000000000000000207 /* Aza/Core/TextInsertion.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000107 /* Aza/Core/TextInsertion.swift */; };
 		BBBB00000000000000000208 /* Aza/Features/Layout/LayoutCorrectionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000108 /* Aza/Features/Layout/LayoutCorrectionEngine.swift */; };
@@ -22,6 +23,7 @@
 		BBBB0000000000000000020B /* Aza/Features/Prayer/PrayerNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010B /* Aza/Features/Prayer/PrayerNotifications.swift */; };
 		BBBB0000000000000000020C /* Aza/Features/Prayer/PrayerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010C /* Aza/Features/Prayer/PrayerStore.swift */; };
 		BBBB0000000000000000020D /* Aza/Core/PasteboardCategories.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */; };
+		BBBB0000000000000000020E /* Aza/Features/Dictation/DictationFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB0000000000000000010E /* Aza/Features/Dictation/DictationFilters.swift */; };
 		BBBB00000000000000000210 /* Aza/Resources/chechen-lexicon.tsv in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */; };
 		BBBB00000000000000000211 /* Aza/Resources/prayer-schedules-2026.json in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */; };
 		BBBB00000000000000000213 /* Aza/Resources/tone-chime.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000113 /* Aza/Resources/tone-chime.caf */; };
@@ -52,6 +54,7 @@
 		BBBB00000000000000000103 /* Aza/Core/ChechenAutocorrect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ChechenAutocorrect.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000104 /* Aza/Core/KeyboardLayoutMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/KeyboardLayoutMap.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000105 /* Aza/Core/UserWordLists.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/UserWordLists.swift; sourceTree = SOURCE_ROOT; };
+		BBBB0000000000000000010F /* Aza/Features/Phrases/PhraseStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Phrases/PhraseStore.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000106 /* Aza/Core/ExcludedApps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ExcludedApps.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000107 /* Aza/Core/TextInsertion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/TextInsertion.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000108 /* Aza/Features/Layout/LayoutCorrectionEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Layout/LayoutCorrectionEngine.swift; sourceTree = SOURCE_ROOT; };
@@ -60,6 +63,7 @@
 		BBBB0000000000000000010B /* Aza/Features/Prayer/PrayerNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Prayer/PrayerNotifications.swift; sourceTree = SOURCE_ROOT; };
 		BBBB0000000000000000010C /* Aza/Features/Prayer/PrayerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Prayer/PrayerStore.swift; sourceTree = SOURCE_ROOT; };
 		BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/PasteboardCategories.swift; sourceTree = SOURCE_ROOT; };
+		BBBB0000000000000000010E /* Aza/Features/Dictation/DictationFilters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Dictation/DictationFilters.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Aza/Resources/chechen-lexicon.tsv"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Aza/Resources/prayer-schedules-2026.json"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000131 /* Aza/Aza.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Aza/Aza.entitlements"; sourceTree = SOURCE_ROOT; };
@@ -133,6 +137,7 @@
 				BBBB00000000000000000103 /* Aza/Core/ChechenAutocorrect.swift */,
 				BBBB00000000000000000104 /* Aza/Core/KeyboardLayoutMap.swift */,
 				BBBB00000000000000000105 /* Aza/Core/UserWordLists.swift */,
+				BBBB0000000000000000010F /* Aza/Features/Phrases/PhraseStore.swift */,
 				BBBB00000000000000000106 /* Aza/Core/ExcludedApps.swift */,
 				BBBB00000000000000000107 /* Aza/Core/TextInsertion.swift */,
 				BBBB00000000000000000108 /* Aza/Features/Layout/LayoutCorrectionEngine.swift */,
@@ -141,6 +146,7 @@
 				BBBB0000000000000000010B /* Aza/Features/Prayer/PrayerNotifications.swift */,
 				BBBB0000000000000000010C /* Aza/Features/Prayer/PrayerStore.swift */,
 				BBBB0000000000000000010D /* Aza/Core/PasteboardCategories.swift */,
+				BBBB0000000000000000010E /* Aza/Features/Dictation/DictationFilters.swift */,
 				BBBB00000000000000000110 /* Aza/Resources/chechen-lexicon.tsv */,
 				BBBB00000000000000000111 /* Aza/Resources/prayer-schedules-2026.json */,
 				BBBB00000000000000000131 /* Aza/Aza.entitlements */,
@@ -299,6 +305,8 @@
 				BBBB0000000000000000020B /* Aza/Features/Prayer/PrayerNotifications.swift in Sources */,
 				BBBB0000000000000000020C /* Aza/Features/Prayer/PrayerStore.swift in Sources */,
 				BBBB0000000000000000020D /* Aza/Core/PasteboardCategories.swift in Sources */,
+				BBBB0000000000000000020E /* Aza/Features/Dictation/DictationFilters.swift in Sources */,
+				BBBB0000000000000000020F /* Aza/Features/Phrases/PhraseStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
