@@ -685,7 +685,11 @@ private struct DictationIslandView: View {
                     ProgressView()
                         .controlSize(.small)
                         .tint(AzaStyle.acid)
-                    Text("Распознаю…")
+                    // Запись кончилась раньше, чем поднялась модель:
+                    // честно говорим, чего ждём; сообщение уходит само,
+                    // когда модель загрузится и начнётся распознавание.
+                    Text(store.dictation.isAwaitingModel
+                         ? "Загружаю модель распознавания…" : "Распознаю…")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(AzaStyle.ink)
                 } else {

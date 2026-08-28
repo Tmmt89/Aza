@@ -641,10 +641,7 @@ struct SetupView: View {
             // памяти только её и стираем только её папку в кэше.
             if isDownloaded {
                 Button {
-                    if model.dictation.loadedProfile == item {
-                        model.dictation.unloadModel()
-                    }
-                    modelDeleteError = PrivacyCleanup.deleteModel(variant: item.variant)
+                    Task { modelDeleteError = await model.dictation.deleteModelFiles(item) }
                 } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 10, weight: .semibold))
@@ -1094,9 +1091,15 @@ private struct DataSheet: View {
             let busy = model.dictation.state != .idle
             HStack(spacing: 8) {
                 Button("Удалить модели") {
-                    model.dictation.unloadModel()
-                    error = PrivacyCleanup.deleteModels()
-                    refresh()
+                    Task {
+                        model.dictation.unloadModel()
+                        // Дождаться остановки ВСЕХ загрузчиков (включая
+                        // поднятых уборкой отменённого): иначе докачка
+                        // пересоздаст только что стёртые файлы.
+                        await model.dictation.shutdownLoadersForDeletion()
+                        error = PrivacyCleanup.deleteModels()
+                        refresh()
+                    }
                 }
                 .buttonStyle(AzaCapsuleButtonStyle())
                 .disabled(busy)
@@ -1122,8 +1125,14 @@ private struct DataSheet: View {
                             return
                         }
                         Task {
-                            model.dictation.unloadModel()
+                            // Остановка загрузчиков — ПОСЛЕДНЯЯ, впритык к
+                            // удалению: между сбросом её защитного флага и
+                            // deleteEverything не должно быть ни одного
+                            // await, где нажатие клавиши подняло бы новую
+                            // загрузку под сносимую папку.
                             await model.prayer.shutdownForCleanup()
+                            model.dictation.unloadModel()
+                            await model.dictation.shutdownLoadersForDeletion()
                             error = PrivacyCleanup.deleteEverything()
                         }
                     }

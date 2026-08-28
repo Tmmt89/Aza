@@ -168,6 +168,35 @@ final class DictationController: ObservableObject {
     /// Поле, сфокусированное в момент старта записи, — вставляем туда же
     /// (перепроверяя secure) после распознавания.
     private var targetElement: AXUIElement?
+    /// Процесс приложения, где шла запись: страховка для вставки, когда AX
+    /// не отдал элемент (Electron/webview) — сверяем хотя бы приложение.
+    private var targetAppPid: pid_t?
+    /// Запись закончилась раньше, чем поднялась модель: звук ждёт её здесь,
+    /// распознавание стартует из завершения prepareModel.
+    private var pendingSamples: [Float]?
+    private var pendingElement: AXUIElement?
+    private var pendingPid: pid_t?
+    /// Идёт загрузка/подготовка модели (в т.ч. фоновая, параллельно записи):
+    /// защита от второй параллельной загрузки.
+    private var isLoadingModel = false
+    /// Какой профиль грузится СЕЙЧАС: настройка могла смениться на лету,
+    /// и сверять удаление/отмену нужно с захваченным профилем, не с ней.
+    private var loadingProfile: Profile?
+    /// Результат летящей загрузки нужно выбросить (файлы модели удалены).
+    /// Отдельно от suppressPrewarm: тот сбрасывается явным нажатием
+    /// клавиши, что не должно оживлять ссылку на стёртые файлы.
+    private var discardCurrentLoad = false
+    /// Сам Task загрузки — чтобы отменять: не отменённое скачивание
+    /// продолжало бы ПЕРЕСОЗДАВАТЬ только что удалённые файлы модели.
+    private var loadTask: Task<Void, Never>?
+    /// Идёт удаление файлов моделей: ЛЮБЫЕ новые загрузки запрещены.
+    /// Нажатие клавиши во время await барьера удаления иначе сбрасывало
+    /// suppressPrewarm и воскрешало стираемую модель — цикл барьера мог
+    /// не завершиться никогда.
+    private var modelDeletionInProgress = false
+    /// Для острова: экран распознавания показывает «Загружаю модель…»
+    /// вместо «Распознаю…», пока звук ждёт модель.
+    @Published private(set) var isAwaitingModel = false
     /// Пробная запись ради диалога TCC: результат всегда отбрасывается,
     /// поле для вставки не запоминается (активация окна сместила бы фокус).
     private var isPermissionProbe = false
@@ -229,7 +258,9 @@ final class DictationController: ObservableObject {
             // Греем ТОЛЬКО уже скачанную модель: иначе удаление моделей
             // оборачивается новой загрузкой при следующем запуске.
             guard Self.isModelCached(Self.preferredProfile) else { return }
-            self?.prepareModel()
+            // Фоновый режим: прогрев не занимает состояние, и нажатие
+            // клавиши во время прогрева сразу пишет звук.
+            self?.prepareModel(ownsState: false)
         }
         let binding = HotKeyBinding.load(HotKeyBinding.dictationKey,
                                          fallback: .dictationDefault)
@@ -263,7 +294,10 @@ final class DictationController: ObservableObject {
     }
 
     private func applyPendingProfileChange() {
-        guard pendingProfileChange, state == .idle else { return }
+        // Не во время загрузки: prepareModel всё равно заблокирован, а
+        // сброс pendingProfileChange здесь оставил бы старый профиль
+        // активным навсегда. Завершение загрузки вызовет нас снова.
+        guard pendingProfileChange, state == .idle, !isLoadingModel else { return }
         guard loadedProfile != Self.preferredProfile else {
             pendingProfileChange = false
             return
@@ -276,7 +310,7 @@ final class DictationController: ObservableObject {
         // смена профиля не должна сама тянуть полтора гигабайта.
         if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
            Self.isModelCached(Self.preferredProfile) {
-            prepareModel()
+            prepareModel(ownsState: false)
         }
     }
 
@@ -295,15 +329,76 @@ final class DictationController: ObservableObject {
         whisper = nil
         loadedProfile = nil
         suppressPrewarm = true
+        // Летящая загрузка (массовое удаление стирает ВСЕ модели):
+        // результат — ссылка на стёртые файлы, а само скачивание
+        // пересоздавало бы их — отменяем.
+        if isLoadingModel {
+            discardCurrentLoad = true
+            loadTask?.cancel()
+        }
         status = "Модель удалена — загрузится при следующей диктовке"
     }
 
+    /// Полная остановка загрузок перед МАССОВЫМ удалением моделей:
+    /// уборка отменённого загрузчика может сама поднять следующего
+    /// (retry ожидающего звука, отложенная смена профиля) — глушим
+    /// респаун через suppressPrewarm и отменяем каждого, пока не
+    /// останется ни одного.
+    func shutdownLoadersForDeletion() async {
+        modelDeletionInProgress = true
+        // Сброс в defer: PrivacyCleanup зовётся сразу после await в том же
+        // синхронном участке MainActor — вклиниться keyDown уже не успеет.
+        defer { modelDeletionInProgress = false }
+        suppressPrewarm = true
+        while isLoadingModel, let task = loadTask {
+            discardCurrentLoad = true
+            task.cancel()
+            await task.value
+        }
+    }
+
+    /// Удаление файлов одного профиля целиком: выгрузка/отмена загрузчика,
+    /// ожидание его остановки, затем стирание файлов. Возвращает ошибку
+    /// PrivacyCleanup или nil.
+    ///
+    /// Барьер ждёт и отменяет только загрузчики УДАЛЯЕМОГО профиля.
+    /// Цепные загрузки (retry ожидающего звука, отложенная смена профиля)
+    /// всегда грузят Self.preferredProfile: при preferred == profile они
+    /// заглушены suppressPrewarm (см. prepareForModelDeletion) — цикл
+    /// конечен; чужой профиль пишет в свою папку и удалению не мешает.
+    func deleteModelFiles(_ profile: Profile) async -> String? {
+        modelDeletionInProgress = true
+        defer { modelDeletionInProgress = false }
+        prepareForModelDeletion(profile)
+        while isLoadingModel, let task = loadTask, loadingProfile == profile {
+            discardCurrentLoad = true
+            task.cancel()
+            await task.value
+        }
+        return PrivacyCleanup.deleteModel(variant: profile.variant)
+    }
+
+    /// Перед удалением файлов ОДНОГО профиля: выгрузить его из памяти и
+    /// не дать летящей фоновой загрузке (loadedProfile ещё nil) оживить
+    /// ссылку на стёртые файлы — её завершение смотрит на discardCurrentLoad.
+    private func prepareForModelDeletion(_ profile: Profile) {
+        guard state == .idle else { return }
+        if loadedProfile == profile { unloadModel() }
+        // Удаляется ТЕКУЩИЙ предпочитаемый профиль: цепные загрузки грузят
+        // именно его — глушим прогрев независимо от того, что грузится
+        // прямо сейчас (грузиться может и A при удалении preferred B).
+        if Self.preferredProfile == profile { suppressPrewarm = true }
+        if isLoadingModel, loadingProfile == profile {
+            discardCurrentLoad = true
+            loadTask?.cancel()
+        }
+    }
+
     /// Выгрузка после простоя: модель держит сотни мегабайт — гигабайты
-    /// unified memory, а диктовка — редкое действие. Кэш на диске остаётся,
-    /// следующее нажатие поднимет модель заново (статус это объяснит).
-    // ponytail: после выгрузки первое нажатие лишь греет модель; писать
-    // звук параллельно с загрузкой — апгрейд, если жалобы будут.
-    private static let idleUnloadSeconds: TimeInterval = 5 * 60
+    /// unified memory. Кэш на диске остаётся; следующее нажатие пишет
+    /// звук сразу, а модель греется параллельно (см. keyDown). 30 минут —
+    /// по жалобе владельца на частые холодные старты при прежних 5.
+    private static let idleUnloadSeconds: TimeInterval = 30 * 60
     private var idleUnloadTimer: Timer?
 
     private func rescheduleIdleUnload() {
@@ -420,7 +515,7 @@ final class DictationController: ObservableObject {
                     // Греем модель сразу после выдачи доступа: иначе первое
                     // же «удержите ещё раз» снова утонет в загрузке.
                     self.status = "Доступ есть, готовлю модель…"
-                    self.prepareModel()
+                    self.prepareModel(ownsState: false)
                 }
             }
             beginRecording()
@@ -431,12 +526,14 @@ final class DictationController: ObservableObject {
             return
         }
 
-        guard whisper != nil else {
+        // Модели в памяти нет — пишем звук СРАЗУ, модель греется
+        // параллельно: нажатие не должно уходить в пустое ожидание.
+        // Если запись кончится раньше загрузки, звук подождёт модель
+        // (pendingSamples), остров покажет «Загружаю модель…».
+        if whisper == nil {
             suppressPrewarm = false
-            prepareModel()
-            return
+            prepareModel(ownsState: false)
         }
-
         beginRecording()
     }
 
@@ -534,32 +631,47 @@ final class DictationController: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    private func prepareModel() {
+    /// `ownsState: false` — фоновая загрузка параллельно записи: состояние
+    /// не трогаем (оно принадлежит записи/распознаванию), прогресс идёт
+    /// только в status.
+    private func prepareModel(ownsState: Bool = true) {
         // Одна загрузка за раз: прогрев при старте и нажатие клавиши
         // не должны запустить её дважды.
-        guard whisper == nil, state == .idle else { return }
-        guard !suppressPrewarm else { return }
-        state = .loadingModel("0%")
+        guard whisper == nil, !isLoadingModel else { return }
+        guard !suppressPrewarm, !modelDeletionInProgress else { return }
+        if ownsState {
+            // Явная загрузка (кнопка в настройках) занимает состояние —
+            // только из покоя. Фоновая (ownsState: false) состояния не
+            // трогает и может стартовать даже из finishRecording
+            // (перезапуск упавшего загрузчика при припаркованном звуке).
+            guard state == .idle else { return }
+            state = .loadingModel("0%")
+        }
+        isLoadingModel = true
+        let profile = Self.preferredProfile
+        loadingProfile = profile
         status = "Загрузка модели распознавания…"
-        Task { [weak self] in
+        loadTask = Task { [weak self] in
             // Разворачиваем сразу: дальше вложенные замыкания берут
             // константу, а не захваченную переменную — иначе Swift 6
             // считает это гонкой.
             guard let self else { return }
             do {
-                let profile = Self.preferredProfile
                 let folder = try await WhisperKit.download(
                     variant: profile.variant,
                     downloadBase: Self.modelStorageDirectory,
                     progressCallback: { progress in
                         Task { @MainActor in
                             // Колбэк прогресса приходит асинхронно и может
-                            // опоздать: обновляем только пока грузимся,
-                            // иначе вернули бы idle обратно в loadingModel.
-                            guard case .loadingModel = self.state else { return }
+                            // опоздать: обновляем только пока грузимся.
+                            guard self.isLoadingModel else { return }
                             let percent = Int(progress.fractionCompleted * 100)
                             self.downloadProgress = progress.fractionCompleted
-                            self.state = .loadingModel("\(percent)%")
+                            // Состояние — только если оно наше: при фоновой
+                            // загрузке им владеет запись/распознавание.
+                            if case .loadingModel = self.state {
+                                self.state = .loadingModel("\(percent)%")
+                            }
                             self.status = "Загрузка модели: \(percent)%"
                         }
                     }
@@ -569,6 +681,9 @@ final class DictationController: ObservableObject {
                 // и «100%» всё это время выглядело бы зависшим.
                 self.downloadProgress = nil
                 self.status = "Готовлю модель…"
+                // Отмена, пришедшая после скачивания: не тратить секунды
+                // на загрузку в память модели, которую уже удалили.
+                try Task.checkCancellation()
                 // tokenizerFolder — тоже корень кэша: токенизатор качается
                 // отдельно от модели и иначе снова уедет в ~/Documents.
                 let whisper = try await WhisperKit(
@@ -576,21 +691,96 @@ final class DictationController: ObservableObject {
                     tokenizerFolder: Self.modelStorageDirectory,
                     load: true
                 )
+                // Пока грузились, модель удалили из настроек: ссылку на
+                // стёртые файлы не оживляем. Флаг отдельный от
+                // suppressPrewarm — тот сбрасывается явным нажатием
+                // клавиши и не должен «прощать» удаление на лету.
+                guard !self.discardCurrentLoad else {
+                    self.finishDiscardedLoad()
+                    return
+                }
                 self.whisper = whisper
                 self.loadedProfile = profile
+                self.loadingProfile = nil
                 self.downloadProgress = nil
-                self.state = .idle
-                self.status = "Модель готова (\(profile.title))"
-                self.applyPendingProfileChange()
+                self.isLoadingModel = false
+                // Состояние возвращаем, только если владели им; при фоновой
+                // загрузке оно у записи/распознавания.
+                if case .loadingModel = self.state { self.state = .idle }
                 azaDebugLog("Aza: dictation model loaded")
+                // Звук уже ждёт модель — сразу в распознавание, сообщение
+                // «Загружаю модель…» в острове сменяется на «Распознаю…».
+                if let samples = self.pendingSamples {
+                    let element = self.pendingElement
+                    let pid = self.pendingPid
+                    self.pendingSamples = nil
+                    self.pendingElement = nil
+                    self.pendingPid = nil
+                    self.isAwaitingModel = false
+                    self.status = "Распознаю…"
+                    self.transcribe(samples: samples, whisper: whisper,
+                                    element: element, targetPid: pid)
+                } else {
+                    self.status = "Модель готова (\(profile.title))"
+                    self.applyPendingProfileChange()
+                    // Фоновая загрузка завершилась при state == .idle:
+                    // didSet не сработает — таймер выгрузки ставим сами,
+                    // иначе модель жила бы в памяти вечно.
+                    self.rescheduleIdleUnload()
+                }
             } catch {
-                self.state = .idle
+                // Отменённая (удалённая на лету) загрузка падает сюда же —
+                // CancellationError из download: та же уборка, что и при
+                // «успехе с discard», а не «Модель не загрузилась».
+                if self.discardCurrentLoad {
+                    self.finishDiscardedLoad()
+                    return
+                }
+                self.isLoadingModel = false
+                self.loadingProfile = nil
                 self.downloadProgress = nil
+                if case .loadingModel = self.state { self.state = .idle }
+                // Припаркованный звук без модели не распознать — честно
+                // отпускаем экран ожидания.
+                if self.pendingSamples != nil {
+                    self.pendingSamples = nil
+                    self.pendingElement = nil
+                    self.pendingPid = nil
+                    self.isAwaitingModel = false
+                    if self.state == .transcribing { self.state = .idle }
+                }
                 self.status = "Модель не загрузилась: \(error.localizedDescription)"
                 self.applyPendingProfileChange()
                 azaDebugLog("Aza: dictation model load failed")
             }
         }
+    }
+
+    /// Уборка отменённой на лету загрузки (модель удалили из настроек):
+    /// общая для guard-ветки успеха и catch после cancel(). Ожидающий
+    /// звук пробует актуальный профиль; отложенная смена профиля
+    /// применяется; статус не застревает на «Готовлю модель…».
+    private func finishDiscardedLoad() {
+        discardCurrentLoad = false
+        isLoadingModel = false
+        loadingProfile = nil
+        downloadProgress = nil
+        if case .loadingModel = state { state = .idle }
+        if pendingSamples != nil {
+            prepareModel(ownsState: false)
+            if !isLoadingModel {
+                pendingSamples = nil
+                pendingElement = nil
+                pendingPid = nil
+                isAwaitingModel = false
+                if state == .transcribing { state = .idle }
+                status = "Модель удалена — звук не распознан"
+            }
+        } else {
+            status = "Модель удалена — загрузится при следующей диктовке"
+            applyPendingProfileChange()
+        }
+        azaDebugLog("Aza: dictation model load discarded (deleted)")
     }
 
     /// Громкость сигналов диктовки, 0…1. Ноль — без звука.
@@ -638,6 +828,11 @@ final class DictationController: ObservableObject {
         // В пробной записи фокус уже уехал на наше активированное окно —
         // запоминать его нельзя, вставлять всё равно нечего.
         targetElement = isPermissionProbe ? nil : TextInsertion.focusedElement()
+        // Элемента может не быть (Electron/webview до пробуждения AX) —
+        // тогда идентичность цели держит хотя бы pid фронтмоста.
+        targetAppPid = isPermissionProbe ? nil
+            : (targetElement.flatMap(TextInsertion.processID(of:))
+               ?? NSWorkspace.shared.frontmostApplication?.processIdentifier)
         let processor = AudioProcessor()
         audio = processor
         do {
@@ -681,7 +876,17 @@ final class DictationController: ObservableObject {
         audio?.purgeAudioSamples(keepingLast: 0)
         audio = nil
         targetElement = nil
+        targetAppPid = nil
         recordingStartedAt = nil
+        // Припаркованный звук тоже отменяется (§5.3: буферы чистятся при
+        // отмене) — экран «Загружаю модель…» не должен пережить отмену.
+        pendingSamples = nil
+        pendingElement = nil
+        pendingPid = nil
+        if isAwaitingModel {
+            isAwaitingModel = false
+            if state == .transcribing { state = .idle }
+        }
         // Сбрасывать в idle можно только из записи: во время загрузки
         // модели это открыло бы дверь параллельным загрузкам (guard в
         // keyDown пропускает только idle).
@@ -734,6 +939,7 @@ final class DictationController: ObservableObject {
             state = .idle
             status = "Слишком короткая запись"
             targetElement = nil
+            targetAppPid = nil
             applyPendingProfileChange()
             return
         }
@@ -742,6 +948,7 @@ final class DictationController: ObservableObject {
             state = .idle
             status = "Тишина — ничего не распознано"
             targetElement = nil
+            targetAppPid = nil
             applyPendingProfileChange()
             azaDebugLog("Aza: dictation skipped, no speech energy")
             return
@@ -749,16 +956,45 @@ final class DictationController: ObservableObject {
 
         state = .transcribing
         recordingStartedAt = nil
-        status = "Распознаю…"
         Self.playTone(start: false)
         let element = targetElement
+        let pid = targetAppPid
         targetElement = nil
+        targetAppPid = nil
 
-        Task { [weak self] in
-            guard let self, let whisper = self.whisper else {
-                azaDebugLog("Aza: dictation transcribe skipped (no self/model)")
+        // Модель ещё греется (запись шла параллельно загрузке): звук
+        // ждёт её, остров показывает «Загружаю модель…» без волны —
+        // распознавание стартует из завершения prepareModel.
+        guard let whisper else {
+            // Загрузчик мог упасть ещё до отпускания клавиши — тогда
+            // паркинг ждал бы вечно. Пробуем поднять заново; не вышло
+            // (повторный сбой, модель удалена) — честный idle.
+            if !isLoadingModel { prepareModel(ownsState: false) }
+            guard isLoadingModel else {
+                state = .idle
+                status = "Модель не загрузилась — звук не распознан"
+                applyPendingProfileChange()
+                azaDebugLog("Aza: dictation dropped samples, no model loader")
                 return
             }
+            pendingSamples = samples
+            pendingElement = element
+            pendingPid = pid
+            isAwaitingModel = true
+            status = "Загружаю модель распознавания…"
+            azaDebugLog("Aza: dictation samples parked awaiting model")
+            return
+        }
+        status = "Распознаю…"
+        transcribe(samples: samples, whisper: whisper, element: element, targetPid: pid)
+    }
+
+    /// Распознавание готовых сэмплов: общий хвост для «модель уже была» и
+    /// «звук дождался модели».
+    private func transcribe(samples: [Float], whisper: WhisperKit,
+                            element: AXUIElement?, targetPid: pid_t?) {
+        Task { [weak self] in
+            guard let self else { return }
             azaDebugLog("Aza: dictation transcribe begin")
             do {
                 // §5.2: русский, английский или автоопределение между ними.
@@ -778,7 +1014,8 @@ final class DictationController: ObservableObject {
                 azaDebugLog("Aza: dictation language=\(language) results=\(results.count)")
                 self.activeLanguage = language
                 let text = Self.reliableText(of: results)
-                self.finish(text: text, language: language, element: element)
+                self.finish(text: text, language: language,
+                            element: element, targetPid: targetPid)
             } catch {
                 self.state = .idle
                 self.status = "Распознавание не удалось: \(error.localizedDescription)"
@@ -788,7 +1025,8 @@ final class DictationController: ObservableObject {
         }
     }
 
-    private func finish(text: String, language: String, element: AXUIElement?) {
+    private func finish(text: String, language: String,
+                        element: AXUIElement?, targetPid: pid_t?) {
         state = .idle
         guard !text.isEmpty else {
             status = "Ничего не распознано"
@@ -808,21 +1046,56 @@ final class DictationController: ObservableObject {
         // Вставляем в поле, где курсор СЕЙЧАС, но только если это то же
         // приложение, что и в момент начала записи: так текст не уедет
         // туда, куда пользователь переключился за время распознавания.
-        // Сравнивать сами элементы нельзя — система отдаёт новую обёртку
-        // для того же поля, и вставка не срабатывала никогда.
+        // Идентичность — по pid: сравнивать AX-элементы нельзя (система
+        // отдаёт новую обёртку), а когда AX слеп (Electron/webview),
+        // элементов нет вовсе — тогда сверяем pid фронтмоста.
         let current = TextInsertion.focusedElement()
-        let sameApp = element.flatMap(TextInsertion.processID(of:))
-            == current.flatMap(TextInsertion.processID(of:))
+        let currentPid = current.flatMap(TextInsertion.processID(of:))
+            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let sameApp = targetPid != nil && targetPid == currentPid
         azaDebugLog("Aza: dictation insert target=\(element == nil ? 0 : 1) current=\(current == nil ? 0 : 1) sameApp=\(sameApp ? 1 : 0)")
 
-        if let current, sameApp,
-           !SecureFieldDetector.isSecure(current),
+        guard sameApp else {
+            status = "Текст в буфере (⌘V): \(text.prefix(60))"
+            applyPendingProfileChange()
+            return
+        }
+        let inserted: Bool
+        let caretBefore = current.flatMap(TextInsertion.caretPosition(of:))
+        if let current, !SecureFieldDetector.isSecure(current),
            TextInsertion.isTextLike(current),
            TextInsertion.insert(text, into: current) == .success {
-            status = "Вставлено (\(language)): \(text.prefix(60))"
+            inserted = true
+            // Electron может ответить success, ничего не вставив: каретка
+            // обязана сдвинуться. ⌘V — только при точно неподвижной
+            // каретке (как в ClipboardCommands): двойная вставка хуже.
+            if let caretBefore {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
+                    guard TextInsertion.caretPosition(of: current) == caretBefore else { return }
+                    // За 180 мс фокус мог уехать: ⌘V летит в ТЕКУЩЕЕ поле,
+                    // поэтому приложение и secure сверяем заново.
+                    let focusedNow = TextInsertion.focusedElement()
+                    let pidNow = focusedNow.flatMap(TextInsertion.processID(of:))
+                        ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+                    guard pidNow == targetPid,
+                          focusedNow.map({ !SecureFieldDetector.isSecure($0) }) ?? true
+                    else { return }
+                    _ = TextInsertion.postPasteCommand()
+                }
+            }
+        } else if let current, SecureFieldDetector.isSecure(current) {
+            // Защищённое поле: текст остаётся только в буфере.
+            inserted = false
         } else {
-            status = "Текст в буфере (⌘V): \(text.prefix(60))"
+            // AX не видит поле или отверг вставку (Claude-чат VS Code,
+            // Electron) — текст уже в буфере, добиваем синтетическим ⌘V,
+            // как вставка из истории буфера (ClipboardCommands).
+            inserted = TextInsertion.postPasteCommand()
+            azaDebugLog("Aza: dictation paste fallback ok=\(inserted ? 1 : 0)")
         }
+        status = inserted
+            ? "Вставлено (\(language)): \(text.prefix(60))"
+            : "Текст в буфере (⌘V): \(text.prefix(60))"
         applyPendingProfileChange()
     }
 }
