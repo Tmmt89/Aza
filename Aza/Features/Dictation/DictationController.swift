@@ -41,6 +41,7 @@ final class DictationController: ObservableObject {
         // В памяти может лежать ДРУГОЙ профиль — тогда prepareModel
         // молча выходил по guard whisper == nil, и кнопка не работала.
         if loadedProfile != Self.preferredProfile {
+            cancelWarmup()
             whisper = nil
             loadedProfile = nil
         }
@@ -189,6 +190,39 @@ final class DictationController: ObservableObject {
     /// Сам Task загрузки — чтобы отменять: не отменённое скачивание
     /// продолжало бы ПЕРЕСОЗДАВАТЬ только что удалённые файлы модели.
     private var loadTask: Task<Void, Never>?
+    /// Холостой прогон после загрузки: первое распознавание платит за
+    /// раскрутку ANE (специализация CoreML) — переносим её в фоновый
+    /// прогрев, чтобы первая реальная диктовка шла уже на горячей модели.
+    /// Реальное распознавание дожидается прогрева (await value).
+    private var warmupTask: Task<Void, Never>?
+
+    /// Отменённые прогоны, которые могли ещё крутиться: cancel неблокирующий,
+    /// и барьеры удаления обязаны дождаться каждого — обнуление одной ссылки
+    /// оставляло бы «await ничего» при живом прогоне.
+    private var retiredWarmups: [Task<Void, Never>] = []
+
+    /// Прогрев живёт вместе с моделью: смена профиля, выгрузка и удаление
+    /// гасят его — иначе транскрипция могла бы ждать прогрев УЖЕ выгруженной
+    /// модели, а удаление файлов гонялось бы с её холостым прогоном.
+    /// Новые транскрипции отменённый прогон не ждут (warmupTask = nil);
+    /// ссылка уходит в retiredWarmups до ближайшего drainWarmup.
+    private func cancelWarmup() {
+        if let warmupTask {
+            warmupTask.cancel()
+            retiredWarmups.append(warmupTask)
+        }
+        warmupTask = nil
+    }
+
+    /// Для барьеров удаления: дождаться, пока ВСЕ отменённые прогоны
+    /// реально остановятся — файлы нельзя стирать под работающей моделью.
+    private func drainWarmup() async {
+        cancelWarmup()
+        let retiring = retiredWarmups
+        retiredWarmups = []
+        for task in retiring { await task.value }
+    }
+
     /// Идёт удаление файлов моделей: ЛЮБЫЕ новые загрузки запрещены.
     /// Нажатие клавиши во время await барьера удаления иначе сбрасывало
     /// suppressPrewarm и воскрешало стираемую модель — цикл барьера мог
@@ -303,6 +337,7 @@ final class DictationController: ObservableObject {
             return
         }
         pendingProfileChange = false
+        cancelWarmup()
         whisper = nil
         loadedProfile = nil
         status = "Профиль изменён — модель загрузится при следующей диктовке"
@@ -326,6 +361,7 @@ final class DictationController: ObservableObject {
     /// бессмысленна, а автоматический прогрев скачал бы модель заново.
     func unloadModel() {
         guard state == .idle else { return }
+        cancelWarmup()
         whisper = nil
         loadedProfile = nil
         suppressPrewarm = true
@@ -355,6 +391,9 @@ final class DictationController: ObservableObject {
             task.cancel()
             await task.value
         }
+        // Холостой прогон тоже гоняет модель — файлы нельзя стирать,
+        // пока он не остановился.
+        await drainWarmup()
     }
 
     /// Удаление файлов одного профиля целиком: выгрузка/отмена загрузчика,
@@ -375,6 +414,8 @@ final class DictationController: ObservableObject {
             task.cancel()
             await task.value
         }
+        // Прогрев мог идти на удаляемом профиле — дожидаемся остановки.
+        await drainWarmup()
         return PrivacyCleanup.deleteModel(variant: profile.variant)
     }
 
@@ -409,6 +450,7 @@ final class DictationController: ObservableObject {
                                                repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.state == .idle, self.whisper != nil else { return }
+                self.cancelWarmup()
                 self.whisper = nil
                 self.loadedProfile = nil
                 azaDebugLog("Aza: dictation model unloaded after idle")
@@ -540,9 +582,17 @@ final class DictationController: ObservableObject {
     private static func options(for language: String, prompt: [Int]?) -> DecodingOptions {
         // Без таймстемпов: диктовке нужны слова, а не разметка по секундам,
         // и декодер тратит меньше токенов на сегмент.
+        // temperatureFallbackCount 1 (дефолт 5): на «неуверенных» сегментах
+        // декодер перезапускается с ростом температуры — для диктовки
+        // пятикратный пересчёт лишний, одного повтора достаточно.
+        // VAD-чанкинг: длинная запись режется по паузам и окна идут
+        // параллельно (дефолтные 16 воркеров macOS); короткая запись —
+        // один чанк, накладных расходов нет.
         DecodingOptions(task: .transcribe, language: language,
+                        temperatureFallbackCount: 1,
                         usePrefillPrompt: true, withoutTimestamps: true,
-                        promptTokens: prompt)
+                        promptTokens: prompt,
+                        chunkingStrategy: .vad)
     }
 
     /// Свои слова: имена и термины, которые Whisper обычно коверкает.
@@ -592,9 +642,33 @@ final class DictationController: ObservableObject {
     // ponytail: порог консервативный, подстроить по azaDebugLog scores
     private static let confidentRussianScore: Float = -0.35
 
+    /// Запись длиннее этого — язык решает детектор: на длинной речи он
+    /// надёжен, а «второй полный прогон» именно там дороже всего (средний
+    /// logprob длинной диктовки естественно ниже порога уверенности, и
+    /// реальная русская запись на 15 с получала ещё 14 с английского
+    /// прогона, который проигрывал с разницей 0.0004 и выбрасывался).
+    private static let detectorMinSamples = 10 * 16000
+
     private static func autoTranscribe(
         whisper: WhisperKit, samples: [Float], prompt: [Int]?
     ) async throws -> (String, [TranscriptionResult]) {
+        // Длинная запись: один быстрый вызов детектора (проход энкодера
+        // + один шаг декодера) вместо двух полных прогонов. Всё, что не
+        // английский, — русский: §5.2 поддерживает только эти два языка,
+        // приоритет русского. Detected-язык логируется без содержимого.
+        if samples.count >= Self.detectorMinSamples,
+           let detected = try? await whisper.detectLangauge(
+               audioArray: Array(samples.prefix(30 * 16000))).language {
+            azaDebugLog("Aza: dictation detector language=\(detected)")
+            let language = detected == "en" ? "en" : "ru"
+            let results = try await whisper.transcribe(
+                audioArray: samples,
+                decodeOptions: options(for: language, prompt: prompt))
+            return (language, results)
+        }
+        // Короткие фразы: схема «по результату» — детектор на них
+        // ошибается (русскую речь принимал за английскую), а лишний
+        // прогон короткой записи дешёвый.
         // Упавший прогон не должен обнулять удачный: берём то, что есть.
         let russian = try? await whisper.transcribe(
             audioArray: samples, decodeOptions: options(for: "ru", prompt: prompt))
@@ -727,6 +801,21 @@ final class DictationController: ObservableObject {
                     // didSet не сработает — таймер выгрузки ставим сами,
                     // иначе модель жила бы в памяти вечно.
                     self.rescheduleIdleUnload()
+                    // Прогрев — только когда звук НЕ ждал модель (ожидавший
+                    // звук сам прогревает её первым реальным прогоном) И
+                    // модель всё ещё актуальна: applyPendingProfileChange
+                    // строкой выше могла применить отложенную смену A→B и
+                    // выгрузить только что загруженную A — прогрев устаревшей
+                    // модели ждала бы транскрипция B, а барьер удаления его
+                    // не видел бы.
+                    if self.whisper != nil, self.loadedProfile == profile {
+                        self.warmupTask = Task {
+                            _ = try? await whisper.transcribe(
+                                audioArray: [Float](repeating: 0, count: 16000),
+                                decodeOptions: Self.options(for: "ru", prompt: nil))
+                            azaDebugLog("Aza: dictation model warmed")
+                        }
+                    }
                 }
             } catch {
                 // Отменённая (удалённая на лету) загрузка падает сюда же —
@@ -761,6 +850,7 @@ final class DictationController: ObservableObject {
     /// звук пробует актуальный профиль; отложенная смена профиля
     /// применяется; статус не застревает на «Готовлю модель…».
     private func finishDiscardedLoad() {
+        cancelWarmup()
         discardCurrentLoad = false
         isLoadingModel = false
         loadingProfile = nil
@@ -995,6 +1085,9 @@ final class DictationController: ObservableObject {
                             element: AXUIElement?, targetPid: pid_t?) {
         Task { [weak self] in
             guard let self else { return }
+            // Прогрев ещё идёт — дожидаемся: два одновременных прогона
+            // на одном экземпляре WhisperKit не нужны.
+            await self.warmupTask?.value
             azaDebugLog("Aza: dictation transcribe begin")
             do {
                 // §5.2: русский, английский или автоопределение между ними.
