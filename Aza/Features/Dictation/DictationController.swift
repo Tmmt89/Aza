@@ -356,12 +356,16 @@ final class DictationController: ObservableObject {
         }
     }
 
-    /// Есть ли модель профиля на диске (в кэше WhisperKit).
-    static func isModelCached(_ profile: Profile) -> Bool {
-        let folder = modelStorageDirectory
+    /// Папка модели профиля в кэше WhisperKit.
+    static func cachedModelFolder(_ profile: Profile) -> URL {
+        modelStorageDirectory
             .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
             .appendingPathComponent(profile.variant, isDirectory: true)
-        return FileManager.default.fileExists(atPath: folder.path)
+    }
+
+    /// Есть ли модель профиля на диске (в кэше WhisperKit).
+    static func isModelCached(_ profile: Profile) -> Bool {
+        FileManager.default.fileExists(atPath: cachedModelFolder(profile).path)
     }
 
     /// Выгружает модель из памяти: после удаления файлов ссылка на них
@@ -882,41 +886,99 @@ final class DictationController: ObservableObject {
             // константу, а не захваченную переменную — иначе Swift 6
             // считает это гонкой.
             guard let self else { return }
+            let loadStart = Date()
             do {
-                let folder = try await WhisperKit.download(
-                    variant: profile.variant,
-                    downloadBase: Self.modelStorageDirectory,
-                    progressCallback: { progress in
-                        Task { @MainActor in
-                            // Колбэк прогресса приходит асинхронно и может
-                            // опоздать: обновляем только пока грузимся.
-                            guard self.isLoadingModel else { return }
-                            let percent = Int(progress.fractionCompleted * 100)
-                            self.downloadProgress = progress.fractionCompleted
-                            // Состояние — только если оно наше: при фоновой
-                            // загрузке им владеет запись/распознавание.
-                            if case .loadingModel = self.state {
-                                self.state = .loadingModel("\(percent)%")
-                            }
-                            self.status = "Загрузка модели: \(percent)%"
+                // Кэш на месте — сеть не нужна: WhisperKit.download даже при
+                // полном кэше ходит на Hugging Face сверять ревизию, и каждый
+                // подъём модели платил секунды сети (офлайн — ждал таймаута).
+                // Битый кэш ловится ниже: неудачная загрузка из кэша один раз
+                // повторяется через полноценный download.
+                var folder = Self.cachedModelFolder(profile)
+                let usedCache = Self.isModelCached(profile)
+                let progressCallback: (Progress) -> Void = { progress in
+                    Task { @MainActor in
+                        // Колбэк прогресса приходит асинхронно и может
+                        // опоздать: обновляем только пока грузимся.
+                        guard self.isLoadingModel else { return }
+                        let percent = Int(progress.fractionCompleted * 100)
+                        self.downloadProgress = progress.fractionCompleted
+                        // Состояние — только если оно наше: при фоновой
+                        // загрузке им владеет запись/распознавание.
+                        if case .loadingModel = self.state {
+                            self.state = .loadingModel("\(percent)%")
                         }
+                        self.status = "Загрузка модели: \(percent)%"
                     }
-                )
-                // Скачивание позади — полоса прогресса уходит сразу, не
-                // дожидаясь загрузки в память: это ещё несколько секунд,
-                // и «100%» всё это время выглядело бы зависшим.
-                self.downloadProgress = nil
+                }
+                if !usedCache {
+                    folder = try await WhisperKit.download(
+                        variant: profile.variant,
+                        downloadBase: Self.modelStorageDirectory,
+                        progressCallback: progressCallback
+                    )
+                    // Скачивание позади — полоса прогресса уходит сразу, не
+                    // дожидаясь загрузки в память: это ещё несколько секунд,
+                    // и «100%» всё это время выглядело бы зависшим.
+                    self.downloadProgress = nil
+                }
                 self.status = "Готовлю модель…"
                 // Отмена, пришедшая после скачивания: не тратить секунды
                 // на загрузку в память модели, которую уже удалили.
                 try Task.checkCancellation()
                 // tokenizerFolder — тоже корень кэша: токенизатор качается
                 // отдельно от модели и иначе снова уедет в ~/Documents.
-                let whisper = try await WhisperKit(
-                    modelFolder: folder.path,
-                    tokenizerFolder: Self.modelStorageDirectory,
-                    load: true
-                )
+                let whisper: WhisperKit
+                do {
+                    whisper = try await WhisperKit(
+                        modelFolder: folder.path,
+                        tokenizerFolder: Self.modelStorageDirectory,
+                        load: true
+                    )
+                } catch where usedCache && !Task.isCancelled {
+                    // Кэш подвёл. Ступень 1 — дешёвый ремонт: download со
+                    // сверкой commit докачивает недостающие файлы (прерванная
+                    // закачка — частый случай) и заодно переживает транзиентный
+                    // сбой инициализации, НЕ трогая полтора гигабайта целых.
+                    azaDebugLog("Aza: cached model load failed, repairing")
+                    self.status = "Кэш модели повреждён — восстанавливаю…"
+                    var repairDownloadSucceeded = false
+                    do {
+                        let repaired = try await WhisperKit.download(
+                            variant: profile.variant,
+                            downloadBase: Self.modelStorageDirectory,
+                            progressCallback: progressCallback)
+                        repairDownloadSucceeded = true
+                        self.downloadProgress = nil
+                        try Task.checkCancellation()
+                        whisper = try await WhisperKit(
+                            modelFolder: repaired.path,
+                            tokenizerFolder: Self.modelStorageDirectory,
+                            load: true
+                        )
+                    } catch where repairDownloadSucceeded && !Task.isCancelled {
+                        // Ступень 2 — ТОЛЬКО когда докачка со сверкой прошла
+                        // (сеть есть, состав по commit на месте), а init всё
+                        // равно упал: байты биты локально, докачка их не
+                        // заменит (совпавший commit не хэшируется). Сбой самой
+                        // докачки (офлайн, HF) кэш НЕ сносит — честная ошибка,
+                        // модель цела до следующей попытки. Снос — fail-closed:
+                        // не удалилось — ошибка, а не повтор тех же байтов.
+                        azaDebugLog("Aza: repair failed, full redownload")
+                        try FileManager.default.removeItem(at: folder)
+                        self.status = "Кэш модели повреждён — скачиваю заново…"
+                        let fresh = try await WhisperKit.download(
+                            variant: profile.variant,
+                            downloadBase: Self.modelStorageDirectory,
+                            progressCallback: progressCallback)
+                        self.downloadProgress = nil
+                        try Task.checkCancellation()
+                        whisper = try await WhisperKit(
+                            modelFolder: fresh.path,
+                            tokenizerFolder: Self.modelStorageDirectory,
+                            load: true
+                        )
+                    }
+                }
                 // Пока грузились, модель удалили из настроек: ссылку на
                 // стёртые файлы не оживляем. Флаг отдельный от
                 // suppressPrewarm — тот сбрасывается явным нажатием
@@ -925,6 +987,8 @@ final class DictationController: ObservableObject {
                     self.finishDiscardedLoad()
                     return
                 }
+                azaDebugLog(String(format: "Aza: dictation model ready in %.1fs cache=%d",
+                                   Date().timeIntervalSince(loadStart), usedCache ? 1 : 0))
                 self.whisper = whisper
                 self.loadedProfile = profile
                 self.loadingProfile = nil
