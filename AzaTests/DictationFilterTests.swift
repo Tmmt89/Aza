@@ -26,6 +26,73 @@ final class DictationFilterTests: XCTestCase {
             "Привет.")
     }
 
+    func testFillerSoundsRemoved() {
+        // Паразит в начале уходит вместе с запятой, заглавная восстанавливается.
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "Эм, привет, мир."),
+            "Привет, мир.")
+        // В середине и с дефисами; регистр паразита не важен.
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "Я, э-э, думаю, umm, что да."),
+            "Я, думаю, что да.")
+        // Настоящие слова не трогаются, текст без паразитов — как был.
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "Ну вот и всё."),
+            "Ну вот и всё.")
+        // Внутри слова ничего не режется; паразит в конце уходит без хвоста.
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "эмаль и эм"),
+            "эмаль и")
+        // Заглавная восстанавливается и за открывающей кавычкой.
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "Эм, «привет»"),
+            "«Привет»")
+        // Перенос строки — тоже граница слова и сохраняется, с какой бы
+        // стороны от паразита он ни стоял.
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "строка,\nэм да"),
+            "строка,\nда")
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "готово эм\nследующая"),
+            "готово\nследующая")
+        // Одиночные «э» и "err" — настоящие слова, не трогаются.
+        XCTAssertEqual(
+            DictationFilters.removingFillerSounds(from: "Э, постой. To err is human."),
+            "Э, постой. To err is human.")
+    }
+
+    func testCustomWordFuzzyCorrection() {
+        let words = ["Ахьмад", "Соьлжа-ГӀала"]
+        // Одна опечатка притягивается, пунктуация и соседи не трогаются.
+        XCTAssertEqual(
+            DictationFilters.applyingCustomWords(to: "Привет, Ахьмат!", words: words),
+            "Привет, Ахьмад!")
+        // Палочка-двойник и регистр чинятся формой пользователя.
+        XCTAssertEqual(
+            DictationFilters.applyingCustomWords(to: "еду в соьлжа-г1ала", words: words),
+            "еду в Соьлжа-ГӀала")
+        // Далёкое слово и короткие токены не притягиваются.
+        XCTAssertEqual(
+            DictationFilters.applyingCustomWords(to: "Ахмед да", words: ["Ахьмад"]),
+            "Ахмед да")
+        // Пустой список — no-op.
+        XCTAssertEqual(
+            DictationFilters.applyingCustomWords(to: "текст", words: []),
+            "текст")
+        // Ничья двух разных кандидатов — fail-closed, слово не трогается.
+        XCTAssertEqual(
+            DictationFilters.applyingCustomWords(to: "Рамиль тут",
+                                                 words: ["Камиль", "Самиль"]),
+            "Рамиль тут")
+        // Многословная запись списка (в т.ч. через таб) пропускается.
+        XCTAssertEqual(
+            DictationFilters.applyingCustomWords(to: "Дала аьтто",
+                                                 words: ["Дала\tаьтто"]),
+            "Дала аьтто")
+        XCTAssertNil(DictationFilters.levenshtein("абвг", "где", cap: 1))
+        XCTAssertEqual(DictationFilters.levenshtein("хало", "хала", cap: 1), 1)
+    }
+
     func testCustomWordsParsing() {
         XCTAssertEqual(
             DictationFilters.words(fromCustomList: " Ахьмад, ,\nСоьлжа-ГӀала "),

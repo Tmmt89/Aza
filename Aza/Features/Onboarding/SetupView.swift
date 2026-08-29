@@ -51,6 +51,8 @@ struct SetupView: View {
     @State private var modelDeleteError: String?
     @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
     @AppStorage(DictationController.unloadTimeoutStorageKey) private var unloadMinutes = 30
+    @AppStorage(DictationController.removeFillersStorageKey) private var removeFillers = true
+    @AppStorage(DictationController.streamingStorageKey) private var streamingDictation = true
     @AppStorage(DictationController.customWordsStorageKey) private var dictationCustomWords = ""
     @AppStorage(DictationController.toneVolumeStorageKey) private var toneVolume =
         DictationController.toneVolumeDefault
@@ -512,6 +514,12 @@ struct SetupView: View {
                     .font(AzaStyle.body)
                     .frame(width: 200)
             }
+            divider
+            settingToggle("Убирать звуки-паразиты", isOn: $removeFillers,
+                          help: "«Эм», «э-э», “uh” вырезаются из текста. Настоящие слова («ну», «вот») не трогаются никогда.")
+            divider
+            settingToggle("Распознавать во время записи", isOn: $streamingDictation,
+                          help: "Текст распознаётся, пока вы говорите, — после отпускания остаётся дораспознать только хвост. Работает при явно выбранном языке (не «Авто»). Тратит чуть больше энергии во время записи.")
             divider
             HStack {
                 Text("Выгружать модель")

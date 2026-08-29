@@ -196,10 +196,19 @@ final class DictationController: ObservableObject {
     /// Реальное распознавание дожидается прогрева (await value).
     private var warmupTask: Task<Void, Never>?
 
-    /// Отменённые прогоны, которые могли ещё крутиться: cancel неблокирующий,
-    /// и барьеры удаления обязаны дождаться каждого — обнуление одной ссылки
+    /// Отменённая работа модели (прогревы И стрим-циклы), которая могла ещё
+    /// крутиться: cancel неблокирующий, и барьеры удаления с новыми
+    /// прогонами обязаны дождаться каждого — обнуление одной ссылки
     /// оставляло бы «await ничего» при живом прогоне.
     private var retiredWarmups: [Task<Void, Never>] = []
+
+    /// Дождаться ВСЕЙ отменённой работы модели: два одновременных прогона
+    /// на одном экземпляре WhisperKit не допускаются.
+    private func awaitRetiredModelWork() async {
+        let retiring = retiredWarmups
+        retiredWarmups = []
+        for task in retiring { await task.value }
+    }
 
     /// Прогрев живёт вместе с моделью: смена профиля, выгрузка и удаление
     /// гасят его — иначе транскрипция могла бы ждать прогрев УЖЕ выгруженной
@@ -214,13 +223,11 @@ final class DictationController: ObservableObject {
         warmupTask = nil
     }
 
-    /// Для барьеров удаления: дождаться, пока ВСЕ отменённые прогоны
-    /// реально остановятся — файлы нельзя стирать под работающей моделью.
+    /// Для барьеров удаления: дождаться, пока ВСЯ отменённая работа модели
+    /// реально остановится — файлы нельзя стирать под работающей моделью.
     private func drainWarmup() async {
         cancelWarmup()
-        let retiring = retiredWarmups
-        retiredWarmups = []
-        for task in retiring { await task.value }
+        await awaitRetiredModelWork()
     }
 
     /// Идёт удаление файлов моделей: ЛЮБЫЕ новые загрузки запрещены.
@@ -630,10 +637,138 @@ final class DictationController: ObservableObject {
         return tokenizer.encode(text: " " + words.joined(separator: ", "))
     }
 
-    /// Фильтр галлюцинаций (см. DictationFilters.reliableText).
-    private static func reliableText(of results: [TranscriptionResult]) -> String {
-        DictationFilters.reliableText(segments: results.flatMap(\.segments)
-            .map { ($0.text, $0.avgLogprob, $0.noSpeechProb) })
+    // MARK: Стриминговая пред-транскрипция (приём Handy)
+
+    /// Распознавание ВО ВРЕМЯ записи: каждые ~2 с накопившийся буфер
+    /// прогоняется с clipTimestamps от подтверждённой границы (алгоритм
+    /// WhisperKit AudioStreamTranscriber, перенесённый на наш конвейер
+    /// записи — их актор владеет микрофоном сам и не совместим с пробой
+    /// TCC/фиксацией/предохранителем). К отпусканию клавиши распознан
+    /// почти весь текст, финал — только хвост. Работает при ЯВНОМ языке
+    /// (§5.2): в «Авто» язык выбирается по результату целой записи, и
+    /// стримить нечем — там остаётся пакетный путь.
+    static let streamingStorageKey = "DictationStreaming"
+    static var streamingEnabled: Bool {
+        (UserDefaults.standard.object(forKey: streamingStorageKey) as? Bool) ?? true
+    }
+
+    private var streamTask: Task<Void, Never>?
+    /// Подтверждённые стримом сегменты и граница подтверждения в секундах.
+    private var streamSegments: [(text: String, avgLogprob: Float, noSpeechProb: Float)] = []
+    private var streamConfirmedEnd: Float = 0
+    /// Язык, захваченный при СТАРТЕ стрима: смена языка в настройках
+    /// посреди записи не должна дать префикс на одном языке и хвост на другом.
+    private var streamLanguage: String?
+    private var streamBuffer: StreamBuffer?
+
+    /// Потокобезопасная копия звука для стрима: тап AVAudioEngine дописывает
+    /// audioSamples БЕЗ синхронизации, и читать её во время записи — гонка
+    /// (у родного AudioStreamTranscriber она тоже есть). Пишем свою копию
+    /// под замком из колбэка startRecordingLive; читаем снапшотом.
+    private final class StreamBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var samples: [Float] = []
+
+        func append(_ chunk: [Float]) {
+            lock.lock()
+            samples.append(contentsOf: chunk)
+            lock.unlock()
+        }
+
+        func snapshot() -> [Float] {
+            lock.lock()
+            defer { lock.unlock() }
+            return samples
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return samples.count
+        }
+    }
+
+    private func stopStreaming() {
+        // Отменённый цикл мог держать модель в текущем проходе: в ретайр,
+        // как прогревы, — barriers удаления и новые прогоны его дождутся.
+        if let streamTask {
+            streamTask.cancel()
+            retiredWarmups.append(streamTask)
+        }
+        streamTask = nil
+        streamBuffer = nil
+        streamSegments = []
+        streamConfirmedEnd = 0
+        streamLanguage = nil
+    }
+
+    private func startStreaming(buffer: StreamBuffer, whisper: WhisperKit) {
+        let language = Self.preferredLanguage
+        streamSegments = []
+        streamConfirmedEnd = 0
+        streamLanguage = language
+        // Снапшот отменённой работы — ДО создания задачи: awaitRetired
+        // изнутри само-дедлочился бы, если стрим отменят во время await
+        // прогрева (задача попадает в ретайр и ждала бы собственный value).
+        let predecessors = retiredWarmups
+        retiredWarmups = []
+        streamTask = Task { [weak self] in
+            guard let self else { return }
+            await self.warmupTask?.value
+            for task in predecessors { await task.value }
+            let prompt = Self.promptTokens(for: whisper)
+            var lastCount = 0
+            while !Task.isCancelled, self.state == .recording,
+                  self.streamBuffer === buffer {
+                // Меньше 2 с новых сэмплов — подождать следующего среза.
+                guard buffer.count - lastCount >= 32_000 else {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    continue
+                }
+                let samples = buffer.snapshot()
+                lastCount = samples.count
+                var options = Self.options(for: language, prompt: prompt)
+                options.chunkingStrategy = nil // срез короткий, чанки не нужны
+                // Стриму нужны таймстемпы: без них Whisper отдаёт один
+                // грубый сегмент на окно, и подтверждать нечего.
+                options.withoutTimestamps = false
+                options.clipTimestamps = self.streamConfirmedEnd > 0
+                    ? [self.streamConfirmedEnd] : []
+                guard let results = try? await whisper.transcribe(
+                    audioArray: samples, decodeOptions: options) else { continue }
+                guard !Task.isCancelled, self.state == .recording,
+                      self.streamBuffer === buffer else { break }
+                // Последние 2 сегмента не подтверждаем — их ещё «дожуёт»
+                // следующий проход (правило AudioStreamTranscriber).
+                let segments = results.flatMap(\.segments)
+                guard segments.count > 2 else { continue }
+                let confirmed = segments.dropLast(2)
+                guard let last = confirmed.last,
+                      last.end > self.streamConfirmedEnd else { continue }
+                self.streamConfirmedEnd = last.end
+                self.streamSegments.append(contentsOf: confirmed.map {
+                    (text: $0.text, avgLogprob: $0.avgLogprob, noSpeechProb: $0.noSpeechProb)
+                })
+                azaDebugLog("Aza: dictation stream confirmed=\(self.streamSegments.count) end=\(self.streamConfirmedEnd)")
+            }
+        }
+    }
+
+    /// Убирать звуки-паразиты («эм», «э-э», "uh") из транскрипта.
+    static let removeFillersStorageKey = "DictationRemoveFillers"
+    static var removeFillers: Bool {
+        (UserDefaults.standard.object(forKey: removeFillersStorageKey) as? Bool) ?? true
+    }
+
+    /// Финальный текст из сегментов: фильтр галлюцинаций (см.
+    /// DictationFilters.reliableText), по настройке — звуков-паразитов,
+    /// и fuzzy-притяжка своих слов (пустой список — no-op).
+    private static func finishText(
+        segments: [(text: String, avgLogprob: Float, noSpeechProb: Float)]
+    ) -> String {
+        var text = DictationFilters.reliableText(segments: segments)
+        if removeFillers { text = DictationFilters.removingFillerSounds(from: text) }
+        return DictationFilters.applyingCustomWords(to: text, words: customWords)
     }
 
     /// Средняя уверенность распознавания: по ней сравниваем две гипотезы.
@@ -942,13 +1077,29 @@ final class DictationController: ObservableObject {
                ?? NSWorkspace.shared.frontmostApplication?.processIdentifier)
         let processor = AudioProcessor()
         audio = processor
+        // Копия звука для стрима собирается прямо из колбэка записи —
+        // читать processor.audioSamples во время записи нельзя (гонка).
+        let buffer = (!isPermissionProbe && whisper != nil
+                      && Self.streamingEnabled && Self.preferredLanguage != "auto")
+            ? StreamBuffer() : nil
+        // startRecordingLive присваивает колбэк уже ПОСЛЕ запуска движка:
+        // первые ~100–400 мс (раскрутка) долетают в audioSamples мимо нашей
+        // копии. Это не чинится снаружи без гонки на audioBufferCallback,
+        // поэтому в стрим-режиме финал идёт по ТОЙ ЖЕ копии (см.
+        // finishRecording) — таймлайны совпадают конструктивно, а голова
+        // отброшена из обоих проходов одинаково (пользователь начинает
+        // говорить после сигнала — терять там нечего).
+        let capture: (([Float]) -> Void)? = buffer.map { buffer in
+            { chunk in buffer.append(chunk) }
+        }
         do {
-            try processor.startRecordingLive(callback: nil)
+            try processor.startRecordingLive(callback: capture)
         } catch {
             audio = nil
             status = "Микрофон не запустился: \(error.localizedDescription)"
             return
         }
+        streamBuffer = buffer
         state = .recording
         recordingStartedAt = Date()
         status = isLatched
@@ -957,6 +1108,11 @@ final class DictationController: ObservableObject {
         // Пока острова нет, звук — единственный сигнал «пишу»: панель
         // меню пользователь в этот момент не открывает.
         if !isPermissionProbe { Self.playTone(start: true) }
+        // Стрим стартует только с готовой моделью: если она грузится
+        // параллельно, запись всё равно короче загрузки — распознает финал.
+        if let buffer, let whisper {
+            startStreaming(buffer: buffer, whisper: whisper)
+        }
         failsafeTimer = Timer.scheduledTimer(withTimeInterval: Self.maxRecordingSeconds,
                                              repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -979,6 +1135,7 @@ final class DictationController: ObservableObject {
         isLatched = false
         failsafeTimer?.invalidate()
         failsafeTimer = nil
+        stopStreaming()
         audio?.stopRecording()
         audio?.purgeAudioSamples(keepingLast: 0)
         audio = nil
@@ -1036,13 +1193,23 @@ final class DictationController: ObservableObject {
         failsafeTimer = nil
 
         processor.stopRecording()
+        // Тап остановлен — оба буфера стабильны, читать безопасно. Финал
+        // всегда по ПОЛНОМУ буферу процессора (ни одна миллисекунда не
+        // теряется); разница длин с нашей стрим-копией — точная длина
+        // «головы», долетевшей до установки колбэка внутри
+        // startRecordingLive: на неё сдвигается граница подтверждённого,
+        // а сама голова дораспознаётся клип-парой в финальном прогоне.
+        let captured = streamBuffer?.snapshot() ?? []
         let samples = Array(processor.audioSamples)
+        let streamHead: Float = captured.isEmpty ? 0
+            : Float(max(0, samples.count - captured.count)) / 16000
         processor.purgeAudioSamples(keepingLast: 0)
         audio = nil
-        azaDebugLog("Aza: dictation stopped samples=\(samples.count)")
+        azaDebugLog("Aza: dictation stopped samples=\(samples.count) captured=\(captured.count) head=\(streamHead)")
 
         // Короче ~0,3 с — случайное нажатие, распознавать нечего.
         guard samples.count > 4800 else {
+            stopStreaming()
             state = .idle
             status = "Слишком короткая запись"
             targetElement = nil
@@ -1052,6 +1219,7 @@ final class DictationController: ObservableObject {
         }
 
         guard DictationFilters.hasSpeech(samples) else {
+            stopStreaming()
             state = .idle
             status = "Тишина — ничего не распознано"
             targetElement = nil
@@ -1073,6 +1241,8 @@ final class DictationController: ObservableObject {
         // ждёт её, остров показывает «Загружаю модель…» без волны —
         // распознавание стартует из завершения prepareModel.
         guard let whisper else {
+            // Модели не было — стрим и не стартовал; чистим защитно.
+            stopStreaming()
             // Загрузчик мог упасть ещё до отпускания клавиши — тогда
             // паркинг ждал бы вечно. Пробуем поднять заново; не вышло
             // (повторный сбой, модель удалена) — честный idle.
@@ -1093,26 +1263,71 @@ final class DictationController: ObservableObject {
             return
         }
         status = "Распознаю…"
-        transcribe(samples: samples, whisper: whisper, element: element, targetPid: pid)
+        // Стрим передаётся финальному распознаванию: оно дождётся его
+        // текущего прохода и допишет только неподтверждённый хвост.
+        let stream = streamTask
+        streamTask = nil
+        transcribe(samples: samples, whisper: whisper, element: element,
+                   targetPid: pid, stream: stream, streamHead: streamHead)
     }
 
     /// Распознавание готовых сэмплов: общий хвост для «модель уже была» и
     /// «звук дождался модели».
     private func transcribe(samples: [Float], whisper: WhisperKit,
-                            element: AXUIElement?, targetPid: pid_t?) {
+                            element: AXUIElement?, targetPid: pid_t?,
+                            stream: Task<Void, Never>? = nil,
+                            streamHead: Float = 0) {
         Task { [weak self] in
             guard let self else { return }
             // Прогрев ещё идёт — дожидаемся: два одновременных прогона
             // на одном экземпляре WhisperKit не нужны.
             await self.warmupTask?.value
-            azaDebugLog("Aza: dictation transcribe begin")
+            // Стрим: отменяем цикл и ждём его текущий проход (тот держит
+            // модель), затем забираем подтверждённое.
+            await self.awaitRetiredModelWork()
+            var confirmed: [(text: String, avgLogprob: Float, noSpeechProb: Float)] = []
+            var clipStart: Float = 0
+            var streamedLanguage: String?
+            if let stream {
+                stream.cancel()
+                await stream.value
+                confirmed = self.streamSegments
+                clipStart = self.streamConfirmedEnd
+                streamedLanguage = self.streamLanguage
+                self.streamSegments = []
+                self.streamConfirmedEnd = 0
+                self.streamLanguage = nil
+                self.streamBuffer = nil
+            }
+            azaDebugLog("Aza: dictation transcribe begin streamed=\(confirmed.count) clip=\(clipStart)")
             do {
                 // §5.2: русский, английский или автоопределение между ними.
                 let language: String
                 var results: [TranscriptionResult]
                 let prompt = Self.promptTokens(for: whisper)
 
-                if Self.preferredLanguage == "auto" {
+                if clipStart > 0 {
+                    // Стрим работал (значит, язык явный): финалим только
+                    // неподтверждённый хвост — ЯЗЫКОМ СТРИМА, а не живой
+                    // настройкой: её могли сменить посреди записи.
+                    // Голова (streamHead — звук до установки колбэка, стрим
+                    // её не видел) дораспознаётся клип-парой [0, head] в том
+                    // же прогоне; подтверждённая граница сдвигается на head:
+                    // таймстемпы стрима шли по копии без головы.
+                    language = streamedLanguage ?? Self.preferredLanguage
+                    var options = Self.options(for: language, prompt: prompt)
+                    options.clipTimestamps = streamHead > 0
+                        ? [0, streamHead, streamHead + clipStart]
+                        : [clipStart]
+                    // Дефолтный windowClipTime 1.0 не заходит в клипы короче
+                    // секунды: пропали бы и голова (~0,1–0,4 с), и подсекундный
+                    // ХВОСТ (последние слова после подтверждённой границы).
+                    // Риск лишнего окна на самом краю гасит фильтр reliableText.
+                    options.windowClipTime = 0.05
+                    options.chunkingStrategy = nil
+                    results = try await whisper.transcribe(
+                        audioArray: samples, decodeOptions: options)
+                } else if Self.preferredLanguage == "auto" {
                     (language, results) = try await Self.autoTranscribe(
                         whisper: whisper, samples: samples, prompt: prompt)
                 } else {
@@ -1123,7 +1338,20 @@ final class DictationController: ObservableObject {
                 }
                 azaDebugLog("Aza: dictation language=\(language) results=\(results.count)")
                 self.activeLanguage = language
-                let text = Self.reliableText(of: results)
+                let segments = results.flatMap(\.segments)
+                // Хронология текста: сегменты головы (до streamHead, стрим их
+                // не видел) — ПЕРЕД подтверждёнными, хвост — после. Таймстемпы
+                // Whisper абсолютные, граница с допуском на округление.
+                let boundary = streamHead + 0.1
+                let splitByHead = clipStart > 0 && streamHead > 0
+                let head = splitByHead ? segments.filter { $0.end <= boundary } : []
+                let tail = splitByHead ? segments.filter { $0.end > boundary } : segments
+                func tuples(_ list: [TranscriptionSegment])
+                    -> [(text: String, avgLogprob: Float, noSpeechProb: Float)] {
+                    list.map { (text: $0.text, avgLogprob: $0.avgLogprob,
+                                noSpeechProb: $0.noSpeechProb) }
+                }
+                let text = Self.finishText(segments: tuples(head) + confirmed + tuples(tail))
                 self.finish(text: text, language: language,
                             element: element, targetPid: targetPid)
             } catch {
