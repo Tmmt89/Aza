@@ -45,21 +45,21 @@ final class ClipboardCommands: ObservableObject {
                 status = "Файлы недоступны"
                 return false
             }
-            pasteboard.clearContents()
+            PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
             pasteboard.writeObjects(urls)
         case .image:
             guard let data = store.imageData(for: entry) else {
                 status = "Изображение недоступно"
                 return false
             }
-            pasteboard.clearContents()
+            PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
             pasteboard.setData(data, forType: .png)
         case .rtf:
-            pasteboard.clearContents()
+            PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
             if let rtf = entry.rtfData { pasteboard.setData(rtf, forType: .rtf) }
             pasteboard.setString(entry.text, forType: .string)
         case .text, .link:
-            pasteboard.clearContents()
+            PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
             pasteboard.setString(entry.text, forType: .string)
         }
         status = "Скопировано — вставьте ⌘V"

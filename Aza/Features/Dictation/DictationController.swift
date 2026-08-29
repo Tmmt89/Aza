@@ -730,7 +730,13 @@ final class DictationController: ObservableObject {
                     continue
                 }
                 let samples = buffer.snapshot()
+                let newSlice = Array(samples[lastCount...])
                 lastCount = samples.count
+                // Новый срез без речи (пауза в диктовке): прогон не нужен —
+                // граница подтверждения не сдвинется, а энкодер жёг бы
+                // энергию впустую (та же логика useVAD у родного
+                // AudioStreamTranscriber).
+                guard DictationFilters.hasSpeech(newSlice) else { continue }
                 var options = Self.options(for: language, prompt: prompt)
                 options.chunkingStrategy = nil // срез короткий, чанки не нужны
                 // Стриму нужны таймстемпы: без них Whisper отдаёт один
@@ -1379,6 +1385,22 @@ final class DictationController: ObservableObject {
                     // же прогоне; подтверждённая граница сдвигается на head:
                     // таймстемпы стрима шли по копии без головы.
                     language = streamedLanguage ?? Self.preferredLanguage
+                    // Ни в хвосте, ни в голове нет речи (типовой случай:
+                    // договорили, выдохнули, отпустили) — финальный прогон
+                    // не нужен вовсе, текст уже подтверждён стримом.
+                    let boundary = min(samples.count, Int((streamHead + clipStart) * 16000))
+                    let headEnd = min(samples.count, Int(streamHead * 16000))
+                    let tailSilent = !DictationFilters.hasSpeech(Array(samples[boundary...]))
+                    let headSilent = streamHead <= 0
+                        || !DictationFilters.hasSpeech(Array(samples[..<headEnd]))
+                    if tailSilent, headSilent, !confirmed.isEmpty {
+                        azaDebugLog("Aza: dictation final pass skipped, silent tail")
+                        self.activeLanguage = language
+                        let text = Self.finishText(segments: confirmed)
+                        self.finish(text: text, language: language,
+                                    element: element, targetPid: targetPid)
+                        return
+                    }
                     var options = Self.options(for: language, prompt: prompt)
                     options.clipTimestamps = streamHead > 0
                         ? [0, streamHead, streamHead + clipStart]
@@ -1438,12 +1460,32 @@ final class DictationController: ObservableObject {
         azaDebugLog("Aza: dictation done lang=\(language) len=\(text.count)")
 
         // §5.6: транскрипт всегда в буфер и историю — вставка лишь бонус.
+        // Буфер — ДО вставки (⌘V-фолбэки читают его), а шифрование и запись
+        // истории на диск — ПОСЛЕ: AES + atomic write на главном потоке
+        // нечего делать между распознаванием и появлением текста в поле.
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
+        // Монитор буфера это изменение пропускает: иначе его опрос успевал
+        // бы раньше отложенного персиста и записывал транскрипт с
+        // атрибуцией фронтмоста (дедуп сохраняет метаданные ПЕРВОЙ записи).
+        // Счётчик — из clearContents(): он возвращает НОВОЕ значение
+        // атомарно, setString его не меняет — чужая копия между записью и
+        // чтением changeCount не может быть помечена и проглочена.
+        PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        clipboardStore()?.add(text: text,
-                              sourceAppBundleID: Bundle.main.bundleIdentifier,
-                              sourceAppName: "Aza (диктовка)")
+        // Персист истории — вне ВСЕХ путей вставки, включая отложенный
+        // ⌘V-добив на 180 мс: AES + запись на главном потоке не должны
+        // задержать и его. Планируется здесь (до любых ранних выходов —
+        // §5.6 сохраняется), выполняется через 250 мс; метка времени —
+        // момента диктовки, чтобы копия пользователя в эти 250 мс не
+        // оказалась в истории «раньше» транскрипта.
+        let store = clipboardStore
+        let dictatedAt = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) {
+            store()?.add(text: text,
+                         sourceAppBundleID: Bundle.main.bundleIdentifier,
+                         sourceAppName: "Aza (диктовка)",
+                         copiedAt: dictatedAt)
+        }
 
         // Вставляем в поле, где курсор СЕЙЧАС, но только если это то же
         // приложение, что и в момент начала записи: так текст не уедет

@@ -184,10 +184,20 @@ final class ClipboardStore: ObservableObject {
     /// Возврат true — дубликат обработан, добавлять не нужно.
     private func dedup(where match: (ClipEntry) -> Bool,
                        at copiedAt: Date = Date(),
+                       sourceAppBundleID: String?,
+                       sourceAppName: String?,
                        update: (inout ClipEntry) -> Void = { _ in }) -> Bool {
         guard let index = entries.firstIndex(where: match) else { return false }
         var moved = entries.remove(at: index)
-        moved.createdAt = copiedAt
+        // Метка только растёт, а атрибуция следует за НОВЕЙШИМ событием:
+        // повторная копия из другого приложения перевешивает источник на
+        // себя; запоздавший персист (диктовка, +250 мс), оказавшийся
+        // старее свежей записи, не отматывает её и не трогает источник.
+        if copiedAt >= moved.createdAt {
+            moved.createdAt = copiedAt
+            moved.sourceAppBundleID = sourceAppBundleID
+            moved.sourceAppName = sourceAppName
+        }
         update(&moved)
         insert(moved)
         commit(removingBlobsOf: pruneExpired())
@@ -214,13 +224,18 @@ final class ClipboardStore: ObservableObject {
     /// Добавляет текстовую запись (повторное копирование поднимает наверх).
     /// Текст хранится КАК СКОПИРОВАН: обрезка пробелов/переводов строки
     /// меняла бы вставляемое (отступы кода). Трим — только для проверки
-    /// «не пусто».
-    func add(text: String, sourceAppBundleID: String?, sourceAppName: String?) {
+    /// «не пусто». `copiedAt` — момент копирования, если запись
+    /// добавляется отложенно (диктовка персистится через 250 мс).
+    func add(text: String, sourceAppBundleID: String?, sourceAppName: String?,
+             copiedAt: Date = Date()) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, text.count <= Self.maxItemCharacters else { return }
-        if dedup(where: { $0.resolvedKind == .text && $0.text == text }) { return }
+        if dedup(where: { $0.resolvedKind == .text && $0.text == text },
+                 at: copiedAt,
+                 sourceAppBundleID: sourceAppBundleID,
+                 sourceAppName: sourceAppName) { return }
         insertNew(ClipEntry(
-            id: UUID(), text: text, createdAt: Date(),
+            id: UUID(), text: text, createdAt: copiedAt,
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
             byteSize: text.utf8.count
         ))
@@ -230,7 +245,9 @@ final class ClipboardStore: ObservableObject {
     func addLink(_ url: URL, sourceAppBundleID: String?, sourceAppName: String?) {
         let text = url.absoluteString
         guard !text.isEmpty, text.count <= Self.maxItemCharacters else { return }
-        if dedup(where: { $0.resolvedKind == .link && $0.text == text }) { return }
+        if dedup(where: { $0.resolvedKind == .link && $0.text == text },
+                 sourceAppBundleID: sourceAppBundleID,
+                 sourceAppName: sourceAppName) { return }
         insertNew(ClipEntry(
             id: UUID(), text: text, createdAt: Date(),
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
@@ -246,7 +263,9 @@ final class ClipboardStore: ObservableObject {
         let display = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !display.isEmpty, display.count <= Self.maxItemCharacters else { return }
         let hash = Self.sha256(rtf)
-        if dedup(where: { $0.resolvedKind == .rtf && $0.contentHash == hash }) { return }
+        if dedup(where: { $0.resolvedKind == .rtf && $0.contentHash == hash },
+                 sourceAppBundleID: sourceAppBundleID,
+                 sourceAppName: sourceAppName) { return }
         insertNew(ClipEntry(
             id: UUID(), text: display, createdAt: Date(),
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
@@ -278,6 +297,8 @@ final class ClipboardStore: ObservableObject {
         // она могла быть сгенерирована в прежнем маленьком размере.
         if dedup(where: { $0.resolvedKind == .image && $0.contentHash == hash },
                  at: copiedAt,
+                 sourceAppBundleID: sourceAppBundleID,
+                 sourceAppName: sourceAppName,
                  update: { if let thumbnail { $0.thumbnailData = thumbnail } }) { return }
         let id = UUID()
         guard let sealedSize = writeBlob(png, for: id) else { return }
@@ -293,7 +314,9 @@ final class ClipboardStore: ObservableObject {
     func addFiles(paths: [String], sourceAppBundleID: String?, sourceAppName: String?) {
         guard !paths.isEmpty else { return }
         let names = paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
-        if dedup(where: { $0.resolvedKind == .files && $0.filePaths == paths }) { return }
+        if dedup(where: { $0.resolvedKind == .files && $0.filePaths == paths },
+                 sourceAppBundleID: sourceAppBundleID,
+                 sourceAppName: sourceAppName) { return }
         insertNew(ClipEntry(
             id: UUID(), text: names, createdAt: Date(),
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
@@ -303,9 +326,13 @@ final class ClipboardStore: ObservableObject {
     }
 
     /// Копирование карточки обратно в буфер: поднять наверх без
-    /// переклассификации содержимого.
+    /// переклассификации. Атрибуция остаётся исходной — карточка
+    /// показывает, ОТКУДА содержимое пришло, а не кто его переиспользовал.
     func touch(id: UUID) {
-        _ = dedup(where: { $0.id == id })
+        guard let entry = entries.first(where: { $0.id == id }) else { return }
+        _ = dedup(where: { $0.id == id },
+                  sourceAppBundleID: entry.sourceAppBundleID,
+                  sourceAppName: entry.sourceAppName)
     }
 
     private static func sha256(_ data: Data) -> String {
