@@ -10,6 +10,8 @@ struct ContentView: View {
     @ObservedObject var dictation: DictationController
     /// Остров держит времена намаза — панель показывает то же самое.
     @ObservedObject var island: IslandStore
+    /// «Залипший» Secure Input — единственный сигнал, почему клавиши молчат.
+    @ObservedObject var secureInput: SecureInputMonitor
     /// Открыть окно настройки (§9) — оно же страница состояния прав.
     var openSetup: () -> Void = {}
     /// Хранилище появляется после фонового получения ключа Keychain.
@@ -27,6 +29,9 @@ struct ContentView: View {
         }
         if !hotKey.inputMonitoringGranted {
             result.append("Нет мониторинга ввода — исправление раскладки не работает")
+        }
+        if let secure = secureInput.warning {
+            result.append(secure)
         }
         if let issue = island.prayer.notificationIssue {
             result.append(issue)
@@ -165,5 +170,6 @@ struct ContentView: View {
     return ContentView(hotKey: GlobalHotKey(), clipboardStartup: startup,
                        dictation: dictation,
                        island: IslandStore(startup: startup, dictation: dictation,
-                                           prayer: PrayerStore()))
+                                           prayer: PrayerStore()),
+                       secureInput: SecureInputMonitor())
 }

@@ -50,6 +50,7 @@ struct SetupView: View {
     /// isModelCached с диска при перерисовке.
     @State private var modelDeleteError: String?
     @AppStorage(DictationController.languageStorageKey) private var dictationLanguage = "auto"
+    @AppStorage(DictationController.unloadTimeoutStorageKey) private var unloadMinutes = 30
     @AppStorage(DictationController.customWordsStorageKey) private var dictationCustomWords = ""
     @AppStorage(DictationController.toneVolumeStorageKey) private var toneVolume =
         DictationController.toneVolumeDefault
@@ -510,6 +511,31 @@ struct SetupView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(AzaStyle.body)
                     .frame(width: 200)
+            }
+            divider
+            HStack {
+                Text("Выгружать модель")
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.ink)
+                HelpDot(text: "Модель держит сотни мегабайт — гигабайты памяти. После простоя она выгружается; следующая диктовка стартует сразу, но распознавание чуть подождёт её подъёма. «Никогда» — максимум скорости ценой памяти.")
+                Spacer(minLength: 8)
+                // Чтение через валидированный аксессор: чужое значение в
+                // defaults иначе оставляло бы Picker без выбранного пункта,
+                // хотя контроллер уже считает его тридцатью минутами.
+                Picker("", selection: Binding(
+                    get: { DictationController.unloadMinutes },
+                    set: { unloadMinutes = $0 }
+                )) {
+                    Text("Через 5 мин").tag(5)
+                    Text("Через 30 мин").tag(30)
+                    Text("Через час").tag(60)
+                    Text("Никогда").tag(0)
+                }
+                .labelsHidden()
+                .frame(width: 140)
+                .onChange(of: unloadMinutes) { _, _ in
+                    model.dictation.unloadTimeoutChanged()
+                }
             }
             divider
             ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in

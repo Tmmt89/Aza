@@ -92,6 +92,8 @@ struct AzaApp: App {
     static let menuBarIconKey = "MenuBarIconVisible"
 
     @StateObject private var hotKey = GlobalHotKey()
+    /// «Залипший» Secure Input глушит все перехваты клавиш — предупреждаем.
+    @StateObject private var secureInput = SecureInputMonitor()
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @AppStorage(Self.menuBarIconKey) private var menuBarIconVisible = true
     @StateObject private var clipboardStartup: ClipboardStartup
@@ -156,6 +158,7 @@ struct AzaApp: App {
             ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup,
                         dictation: dictation,
                         island: islandStore,
+                        secureInput: secureInput,
                         openSetup: { setup.show() })
         }
         .menuBarExtraStyle(.window)

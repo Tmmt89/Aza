@@ -437,16 +437,33 @@ final class DictationController: ObservableObject {
 
     /// Выгрузка после простоя: модель держит сотни мегабайт — гигабайты
     /// unified memory. Кэш на диске остаётся; следующее нажатие пишет
-    /// звук сразу, а модель греется параллельно (см. keyDown). 30 минут —
-    /// по жалобе владельца на частые холодные старты при прежних 5.
-    private static let idleUnloadSeconds: TimeInterval = 30 * 60
+    /// звук сразу, а модель греется параллельно (см. keyDown). Срок —
+    /// настройка (идея Handy): 0 = «никогда», по умолчанию 30 минут
+    /// (жалоба владельца на частые холодные старты при прежних 5).
+    static let unloadTimeoutStorageKey = "DictationUnloadMinutes"
+    /// Допустимые значения зашиты: чужая запись в defaults не должна
+    /// ронять приложение (Int-переполнение в minutes * 60) или оставлять
+    /// Picker без выбранного пункта — незнакомое значение читается как 30.
+    static let unloadMinuteChoices = [0, 5, 30, 60]
+    static var unloadMinutes: Int {
+        let raw = UserDefaults.standard.object(forKey: unloadTimeoutStorageKey) as? Int ?? 30
+        return unloadMinuteChoices.contains(raw) ? raw : 30
+    }
     private var idleUnloadTimer: Timer?
+
+    /// Смена настройки применяется сразу: «никогда» снимает уже взведённый
+    /// таймер, укорочение — перевзводит.
+    func unloadTimeoutChanged() {
+        rescheduleIdleUnload()
+    }
 
     private func rescheduleIdleUnload() {
         idleUnloadTimer?.invalidate()
         idleUnloadTimer = nil
         guard state == .idle, whisper != nil else { return }
-        idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: Self.idleUnloadSeconds,
+        let minutes = Self.unloadMinutes
+        guard minutes > 0 else { return }
+        idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes) * 60,
                                                repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.state == .idle, self.whisper != nil else { return }
