@@ -377,6 +377,13 @@ enum LayoutCorrectionEngine {
         }
         guard !isValidEnglishTyped(word),
               isValidWord(mapped, language: "ru") else { return nil }
+        // Тот же предохранитель неоднозначности, что у directCorrection:
+        // прямой путь для "vfkj" воздержался (могло быть чеченское «хало»),
+        // и бэквард-контекст не имеет права ретроактивно обойти отказ.
+        // Точное попадание ремапа в чеченский словарь, как и там, побеждает.
+        if ChechenAutocorrect.isAmbiguityAbstentionEnabled,
+           !ChechenLexicon.shared.contains(mapped),
+           firstKeyAlternativeIsChechen(for: word, table: table) { return nil }
         return mapped
     }
 

@@ -417,6 +417,10 @@ final class DictationController: ObservableObject {
     /// заглушены suppressPrewarm (см. prepareForModelDeletion) — цикл
     /// конечен; чужой профиль пишет в свою папку и удалению не мешает.
     func deleteModelFiles(_ profile: Profile) async -> String? {
+        // Кнопка в UI выключена при занятости, но между кликом и стартом
+        // Task диктовка могла начаться — граница API обязана проверить сама:
+        // стирать файлы под живой моделью нельзя.
+        guard state == .idle else { return "диктовка занята — попробуйте снова" }
         modelDeletionInProgress = true
         defer { modelDeletionInProgress = false }
         prepareForModelDeletion(profile)
@@ -591,6 +595,9 @@ final class DictationController: ObservableObject {
             beginRecording()
             return
         default:
+            // Фиксация не должна пережить отказ: иначе следующее одиночное
+            // нажатие неожиданно начнёт зафиксированную запись.
+            isLatched = false
             status = "Нет доступа к микрофону — откройте Настройки → Конфиденциальность → Микрофон"
             openMicrophoneSettings()
             return
@@ -1459,19 +1466,9 @@ final class DictationController: ObservableObject {
         }
         azaDebugLog("Aza: dictation done lang=\(language) len=\(text.count)")
 
-        // §5.6: транскрипт всегда в буфер и историю — вставка лишь бонус.
-        // Буфер — ДО вставки (⌘V-фолбэки читают его), а шифрование и запись
-        // истории на диск — ПОСЛЕ: AES + atomic write на главном потоке
-        // нечего делать между распознаванием и появлением текста в поле.
-        let pasteboard = NSPasteboard.general
-        // Монитор буфера это изменение пропускает: иначе его опрос успевал
-        // бы раньше отложенного персиста и записывал транскрипт с
-        // атрибуцией фронтмоста (дедуп сохраняет метаданные ПЕРВОЙ записи).
-        // Счётчик — из clearContents(): он возвращает НОВОЕ значение
-        // атомарно, setString его не меняет — чужая копия между записью и
-        // чтением changeCount не может быть помечена и проглочена.
-        PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        // Транскрипт живёт во вкладке «Диктовка», а не в буфере: буфер
+        // ниже используется лишь как ТРАНСПОРТ для ⌘V-фолбэков и после
+        // вставки возвращается к прежнему содержимому.
         // Персист истории — вне ВСЕХ путей вставки, включая отложенный
         // ⌘V-добив на 180 мс: AES + запись на главном потоке не должны
         // задержать и его. Планируется здесь (до любых ранних выходов —
@@ -1484,7 +1481,7 @@ final class DictationController: ObservableObject {
             store()?.add(text: text,
                          sourceAppBundleID: Bundle.main.bundleIdentifier,
                          sourceAppName: "Aza (диктовка)",
-                         copiedAt: dictatedAt)
+                         copiedAt: dictatedAt, isTranscript: true)
         }
 
         // Вставляем в поле, где курсор СЕЙЧАС, но только если это то же
@@ -1500,10 +1497,38 @@ final class DictationController: ObservableObject {
         azaDebugLog("Aza: dictation insert target=\(element == nil ? 0 : 1) current=\(current == nil ? 0 : 1) sameApp=\(sameApp ? 1 : 0)")
 
         guard sameApp else {
-            status = "Текст в буфере (⌘V): \(text.prefix(60))"
+            // Вставлять некуда — буфер не трогаем вовсе: транскрипт уже
+            // едет в свою вкладку отложенным персистом выше.
+            status = "Транскрипт во вкладке «Диктовка»: \(text.prefix(60))"
             applyPendingProfileChange()
             return
         }
+
+        // Буфер — транспорт для ⌘V-фолбэков: снимаем снимок текущего
+        // содержимого, кладём транскрипт и после вставки возвращаем всё
+        // как было. TransientType — чтобы чужие менеджеры буфера
+        // (стандарт nspasteboard.org) транскрипт тоже не записывали.
+        // Монитор своей Aza пропускает запись по ignoredChangeCount:
+        // счётчик — из clearContents(), он возвращает НОВОЕ значение
+        // атомарно, setString его не меняет.
+        let pasteboard = NSPasteboard.general
+        let saved = Self.snapshot(of: pasteboard)
+        PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        pasteboard.setString("", forType:
+            NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        let written = pasteboard.changeCount
+        // Возврат буфера — после последнего фолбэка (⌘V на 180 мс) с
+        // запасом на обработку события целевым приложением. Если за это
+        // время буфер менял кто-то другой — не трогаем: его копия новее.
+        // ponytail: 600 мс — потолок для медленных Electron; если ⌘V
+        // обрабатывается дольше, вставится восстановленное — поднять задержку.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(600)) {
+            guard pasteboard.changeCount == written else { return }
+            PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
+            if !saved.isEmpty { pasteboard.writeObjects(saved) }
+        }
+
         let inserted: Bool
         let caretBefore = current.flatMap(TextInsertion.caretPosition(of:))
         if let current, !SecureFieldDetector.isSecure(current),
@@ -1528,7 +1553,7 @@ final class DictationController: ObservableObject {
                 }
             }
         } else if let current, SecureFieldDetector.isSecure(current) {
-            // Защищённое поле: текст остаётся только в буфере.
+            // Защищённое поле: не вставляем; транскрипт ждёт во вкладке.
             inserted = false
         } else {
             // AX не видит поле или отверг вставку (Claude-чат VS Code,
@@ -1539,7 +1564,24 @@ final class DictationController: ObservableObject {
         }
         status = inserted
             ? "Вставлено (\(language)): \(text.prefix(60))"
-            : "Текст в буфере (⌘V): \(text.prefix(60))"
+            : "Транскрипт во вкладке «Диктовка»: \(text.prefix(60))"
         applyPendingProfileChange()
+    }
+
+    /// Копия содержимого буфера для возврата после ⌘V-вставки: данные всех
+    /// типов переносятся в новые NSPasteboardItem — записанный в буфер item
+    /// повторно записать нельзя. Чтение data(forType:) разворачивает
+    /// отложенные (promised) данные — цена возврата любых типов, включая
+    /// изображения и файлы.
+    private static func snapshot(of pasteboard: NSPasteboard) -> [NSPasteboardItem] {
+        (pasteboard.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        }
     }
 }

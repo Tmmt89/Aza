@@ -2,7 +2,6 @@ import AppKit
 import AVFoundation
 import ApplicationServices
 import Combine
-import CoreLocation
 import ServiceManagement
 import SwiftUI
 import UserNotifications
@@ -130,6 +129,14 @@ final class SetupModel: ObservableObject {
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &cancellables)
+        // SwiftUI не видит вложенные ObservableObject: без форварда прогресс
+        // загрузки модели замерзал, а busy-флаг в DataSheet устаревал и
+        // разрешал удалить модели под живой диктовкой.
+        for publisher in [dictation.objectWillChange, prayer.objectWillChange] {
+            publisher
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &cancellables)
+        }
         refresh()
     }
 
@@ -162,18 +169,18 @@ final class SetupModel: ObservableObject {
         refresh()
     }
 
-    func openInputMonitoringSettings() {
-        openSettings("Privacy_ListenEvent")
-    }
-
     func requestMicrophone() {
         AVCaptureDevice.requestAccess(for: .audio) { _ in
             Task { @MainActor [weak self] in self?.refresh() }
         }
     }
 
+    /// Кнопка «Разрешить» не только спрашивает систему, но и ВКЛЮЧАЕТ
+    /// уведомления: setNotifications — единственный путь, который пишет
+    /// PrayerNotificationsEnabled и планирует расписание. Раньше вызывался
+    /// только requestAuthorization, и функция была невключаемой из UI.
     func requestNotifications() async {
-        _ = await prayer.notifications.requestAuthorization()
+        await prayer.setNotifications(enabled: true)
         refresh()
     }
 
@@ -209,10 +216,4 @@ final class SetupModel: ObservableObject {
         exit(EXIT_SUCCESS)
     }
 
-    private func openSettings(_ anchor: String) {
-        guard let url = URL(string:
-            "x-apple.systempreferences:com.apple.preference.security?\(anchor)")
-        else { return }
-        NSWorkspace.shared.open(url)
-    }
 }

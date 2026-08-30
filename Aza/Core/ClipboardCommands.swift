@@ -77,10 +77,25 @@ final class ClipboardCommands: ObservableObject {
             return
         }
         status = "Вставляю в активное приложение…"
+        // Цель — приложение, активное ДО скрытия наших окон: cmd-tab за
+        // 180 мс паузы не должен увести текст в другое (диктовка сверяет
+        // pid так же с аудита 28.08 — этот путь оставался без сверки).
+        // Фронтмостом может оказаться сама Aza (открыто окно настроек):
+        // тогда цель неизвестна — сверять не с чем, ведём себя как раньше.
+        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let targetPid = frontPid == ProcessInfo.processInfo.processIdentifier
+            ? nil : frontPid
         NSApp.hide(nil)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) { [weak self] in
             guard let self else { return }
+            let currentPid = TextInsertion.focusedElement()
+                .flatMap(TextInsertion.processID(of:))
+                ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+            guard targetPid == nil || currentPid == targetPid else {
+                self.status = "Фокус сменился — текст в буфере (⌘V)"
+                return
+            }
             guard let element = TextInsertion.focusedElement(),
                   TextInsertion.isTextLike(element) else {
                 // AX не видит поле (Electron, webview) — запись уже в

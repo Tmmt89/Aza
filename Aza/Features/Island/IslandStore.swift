@@ -103,11 +103,9 @@ extension ClipEntry {
         thumbnailData.flatMap(NSImage.init(data:))
     }
 
-    var fileURLs: [URL] {
-        (filePaths ?? []).map { URL(fileURLWithPath: $0) }
-    }
-
     var favorite: Bool { isFavorite == true }
+
+    var transcript: Bool { isTranscript == true }
 
     /// Иконка приложения-источника: хранилище держит только bundle ID,
     /// иконку спрашиваем у системы (и только для установленных программ).
@@ -151,7 +149,8 @@ final class IslandStore: ObservableObject {
     @Published var mode: IslandMode = .idle {
         didSet {
             guard oldValue != mode else { return }
-            compactVisibleUntil = mode == .idle ? .now.addingTimeInterval(3) : .distantPast
+            compactVisibleUntil = mode == .idle
+                ? ContinuousClock.now.advanced(by: .seconds(3)) : ContinuousClock.now
             updateIslandPresence()
             syncPhraseDigitHotKeys()
         }
@@ -165,8 +164,10 @@ final class IslandStore: ObservableObject {
     @Published var notchWidth: CGFloat = AzaStyle.notchWidth
     @Published var notchHeight: CGFloat = 32
     @Published var selectedID: ClipEntry.ID?
-    @Published var showsFavorites = false
-    @Published var searchQuery = ""
+    /// Разделы буфера: транскрипты диктовок живут отдельно и не забивают
+    /// историю; избранное — сквозное (и обычные записи, и транскрипты).
+    enum ClipSection { case history, favorites, transcripts }
+    @Published var section: ClipSection = .history
     /// Свежескопированная запись: компактный остров пару секунд
     /// показывает «Скопировано · тип», затем возвращается к намазу.
     @Published private(set) var recentCopy: ClipEntry?
@@ -204,8 +205,9 @@ final class IslandStore: ObservableObject {
     /// Замыкание, а не прямая ссылка: окно создаётся в AzaApp.
     var openSetup: () -> Void = {}
 
-    private var compactVisibleUntil = Date.now.addingTimeInterval(3)
-    private var suppressedUntil = Date.distantPast
+    /// Монотонные дедлайны: wall-clock (Date) прыгает при переводе часов и
+    /// NTP-коррекции — остров оставался видимым на величину скачка.
+    private var compactVisibleUntil = ContinuousClock.now.advanced(by: .seconds(3))
     private var cancellables: Set<AnyCancellable> = []
     private var recentCopyTask: Task<Void, Never>?
     /// Верхняя запись истории на прошлом снимке: id и createdAt порознь,
@@ -419,7 +421,12 @@ final class IslandStore: ObservableObject {
         let shift = event.modifierFlags.contains(.shift)
         if phraseShiftHeld != shift { phraseShiftHeld = shift }
         guard event.keyCode == UInt16(kVK_RightOption) else { return }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Caps Lock — состояние, а не удерживаемый модификатор: без вычета
+        // строгое равенство .option никогда не срабатывало при включённом
+        // Caps Lock, и панель фраз не открывалась.
+        let flags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting(.capsLock)
         azaDebugLog("Aza: right-option flagsChanged option=\(flags == .option ? 1 : 0) mode=\(mode.rawValue)")
         if flags == .option {
             // Нажата правая ⌥ без других модификаторов. Из активных
@@ -546,10 +553,6 @@ final class IslandStore: ObservableObject {
         return prayer.source?.label ?? "Нет расписания"
     }
 
-    func prayerSourceLabel(for occurrence: PrayerOccurrence?) -> String {
-        occurrence?.source?.label ?? prayerSourceLabel
-    }
-
     /// Подпись ближайшего намаза, ЕСЛИ она отличается от подписи
     /// сегодняшней сетки. После иши ближайший намаз уже завтрашний, а на
     /// границе покрытия расписания завтра может считаться расчётом —
@@ -566,7 +569,6 @@ final class IslandStore: ObservableObject {
 
     var commands: ClipboardCommands { startup.commands }
     var entries: [ClipEntry] { startup.store?.entries ?? [] }
-    var isHistoryPaused: Bool { startup.monitor?.isRunning == false }
 
 
     func updateIslandPresence(now: Date = .now) {
@@ -583,8 +585,12 @@ final class IslandStore: ObservableObject {
         case "pinned": isIslandVisible = true
         case "hidden": isIslandVisible = false
         default:
-            isIslandVisible = now < compactVisibleUntil
-                || (now >= suppressedUntil && prayerCountdownPhase != .hidden)
+            // Отсчёт до намаза ЗАКРЕПЛЯЕТ остров: пока фаза видима, ни
+            // клик мимо, ни уход курсора его не прячут — раньше любой
+            // клик по другому приложению убирал плашку на 8 секунд, и
+            // она мигала «исчез—появился» все пять минут.
+            isIslandVisible = prayerCountdownPhase != .hidden
+                || ContinuousClock.now < compactVisibleUntil
         }
         if lastLoggedPresence != isIslandVisible {
             lastLoggedPresence = isIslandVisible
@@ -620,14 +626,12 @@ final class IslandStore: ObservableObject {
     }
 
     func revealCompactIsland() {
-        suppressedUntil = .distantPast
-        compactVisibleUntil = .now.addingTimeInterval(3)
+        compactVisibleUntil = ContinuousClock.now.advanced(by: .seconds(3))
         updateIslandPresence()
     }
 
     func hideCompactIsland(now: Date = .now) {
-        compactVisibleUntil = .distantPast
-        suppressedUntil = now.addingTimeInterval(8)
+        compactVisibleUntil = ContinuousClock.now
         updateIslandPresence(now: now)
     }
 
@@ -640,7 +644,11 @@ final class IslandStore: ObservableObject {
 
     func visibleEntries(matching query: String) -> [ClipEntry] {
         let filtered = ClipboardCommands.filtered(entries: entries, query: query)
-        return showsFavorites ? filtered.filter(\.favorite) : filtered
+        switch section {
+        case .history: return filtered.filter { !$0.transcript }
+        case .favorites: return filtered.filter(\.favorite)
+        case .transcripts: return filtered.filter(\.transcript)
+        }
     }
 
     func moveSelection(by offset: Int, in visible: [ClipEntry]) {

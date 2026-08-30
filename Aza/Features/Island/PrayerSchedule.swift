@@ -144,6 +144,10 @@ struct PrayerOccurrence {
 }
 
 struct PrayerCatalog: Decodable {
+    /// Поддерживаемая версия схемы: файлы новее не читаем — молча выбросить
+    /// незнакомые поля значит показать не те времена под видом выверенных.
+    static let supportedSchemaVersion = 1
+
     let schemaVersion: Int
     let year: Int
     let cityCount: Int
@@ -153,6 +157,17 @@ struct PrayerCatalog: Decodable {
     /// Кто выпустил таблицу («ДУМ ЧР»): подпись обязана быть в интерфейсе
     /// (§4.3). Опционально — старые файлы без поля читаются как прежде.
     let sourceLabel: String?
+    /// Порядок значений в times, как его декларирует сам файл. Раньше поле
+    /// игнорировалось, а времена зиповались по зашитому порядку enum —
+    /// файл с другим порядком показал бы времена под чужими именами.
+    var prayers: [String]? = nil
+
+    /// Заявленный порядок совпадает с нашим (или не заявлен — тогда
+    /// действует контракт схемы v1: Fajr…Isha).
+    var declaresSupportedOrder: Bool {
+        guard let prayers else { return true }
+        return prayers == PrayerKind.allCases.map(\.rawValue)
+    }
 
     // Каталога в бандле нет и быть не должно: расписания приходят из
     // Application Support и проходят проверку происхождения в
@@ -172,12 +187,12 @@ struct PrayerCatalog: Decodable {
     /// честно отказаться и уйти в расчёт.
     func city(named name: String, on date: Date? = nil) -> CityPrayerSchedule? {
         let target = Self.normalized(name)
-        let matches = cities.filter { Self.normalized($0.name) == target }
-        if matches.count > 1, let date {
-            // Один город может прийти из нескольких годовых файлов —
-            // выбираем тот, чьё покрытие включает нужный день.
-            let covering = matches.filter { $0.covers(date) }
-            return covering.count == 1 ? covering[0] : nil
+        var matches = cities.filter { Self.normalized($0.name) == target }
+        if let date {
+            // Покрытие обязано включать день и для ЕДИНСТВЕННОГО совпадения:
+            // случайная строка за пределами заявленного покрытия иначе
+            // показывалась бы как выверенная таблица вместо отказа.
+            matches = matches.filter { $0.covers(date) }
         }
         return matches.count == 1 ? matches[0] : nil
     }
@@ -197,7 +212,10 @@ struct PrayerCatalog: Decodable {
     /// по id вернул бы день из другого снимка под подписью выбранного.
     func prayers(_ city: CityPrayerSchedule, on date: Date) -> [PrayerOccurrence] {
         guard let calendar = calendar(for: city),
-              let day = city.days.first(where: { $0.date == dateKey(date, calendar: calendar) }) else {
+              let day = city.days.first(where: { $0.date == dateKey(date, calendar: calendar) }),
+              // Ровно шесть значений: zip молча отбросил бы лишние, и строка
+              // с седьмым значением сошла бы за выверенную таблицу.
+              day.times.count == PrayerKind.allCases.count else {
             return []
         }
         return zip(PrayerKind.allCases, day.times).compactMap { kind, time in

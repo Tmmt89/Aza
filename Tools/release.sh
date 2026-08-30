@@ -90,6 +90,28 @@ if codesign -d --entitlements - "$APP" 2>&1 | grep -q "get-task-allow"; then
     echo "        с ним нотаризация откажет"
     exit 1
 fi
+# Подпись обязана быть именно Developer ID: AZA_SIGN_IDENTITY мог подсунуть
+# self-signed или Apple Development — структурно валидную, но нераздаваемую.
+if ! codesign -dv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
+    echo "ОШИБКА: цепочка подписи не Developer ID Application — на чужом Mac"
+    echo "        сборка не запустится"
+    exit 1
+fi
+# Gatekeeper-проверка тем же способом, каким её сделает чужой Mac.
+if ! spctl -a -t exec -vv "$APP" 2>&1 | grep -q "accepted"; then
+    echo "ПРЕДУПРЕЖДЕНИЕ: spctl не принял сборку (до нотаризации это норма" \
+         "для Developer ID); после --notarize проверка обязана пройти"
+fi
+# Релиз не имеет права нести отладочный файловый ключ истории: сборка
+# Release с SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG протащила бы его
+# незаметно (ключ лежал бы плейнтекстом рядом с зашифрованной историей).
+# Без -q: grep -q выходит на первом совпадении, strings получает SIGPIPE,
+# и под set -o pipefail статус 141 превращал НАЙДЕННЫЙ ключ в «не найдено».
+if strings "$APP/Contents/MacOS/Aza" | grep "debug-history.key" > /dev/null; then
+    echo "ОШИБКА: в релизном бинарнике активен отладочный файловый ключ"
+    echo "        истории (debug-history.key) — сборка шла с условием DEBUG"
+    exit 1
+fi
 
 echo "== 4. DMG"
 mkdir -p "$DMG_DIR"

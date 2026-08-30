@@ -45,17 +45,14 @@ struct Manifest: Codable {
 }
 
 /// Загружает файл фильтра русских слов (по одному слову в строке).
-func loadRussianFilter(_ path: String?) -> Set<String> {
+/// Настроенный, но нечитаемый фильтр — ОШИБКА сборки, а не пустой набор:
+/// fail-open молча собирал словарь с русскими заимствованиями внутри.
+func loadRussianFilter(_ path: String?) throws -> Set<String> {
     guard let path else { return [] }
-    do {
-        let content = try String(contentsOfFile: path, encoding: .utf8)
-        let words = Set(content.split(separator: "\n").map(String.init))
-        print("→ Фильтр русских слов:", words.count, "слов из", path)
-        return words
-    } catch {
-        print("⚠️ Не удалось загрузить фильтр русских слов:", error.localizedDescription)
-        return []
-    }
+    let content = try String(contentsOfFile: path, encoding: .utf8)
+    let words = Set(content.split(separator: "\n").map(String.init))
+    print("→ Фильтр русских слов:", words.count, "слов из", path)
+    return words
 }
 
 switch arguments[1] {
@@ -126,15 +123,17 @@ case "build":
 
     let (entries, stats) = builder.finalize(
         minCount: config.minCount,
-        excludingRussian: loadRussianFilter(config.russianFilterPath),
+        excludingRussian: try loadRussianFilter(config.russianFilterPath),
         russianKeepMinCount: config.russianKeepMinCount
     )
     try FileManager.default.createDirectory(atPath: outputDir,
                                             withIntermediateDirectories: true)
 
     // Артефакт №1: словарь — слово \t частота \t флаг «только с заглавной».
+    // rounded(), как в фильтре finalize: truncate давал 49 в файле для
+    // частоты 49.5, прошедшей порог «50», — рассинхрон с FP-защитой движка.
     let tsv = entries
-        .map { "\($0.word)\t\(Int($0.count))\t\($0.capitalOnly ? 1 : 0)" }
+        .map { "\($0.word)\t\(Int($0.count.rounded()))\t\($0.capitalOnly ? 1 : 0)" }
         .joined(separator: "\n")
     try tsv.write(toFile: outputDir.appending("/lexicon.tsv"),
                   atomically: true, encoding: .utf8)
@@ -169,8 +168,16 @@ case "coverage":
     var i = 2
     while i < arguments.count {
         switch arguments[i] {
-        case "--lexicon": lexiconPath = arguments[i + 1]; i += 2
-        case "--eval": evalFiles.append(arguments[i + 1]); i += 2
+        case "--lexicon":
+            guard i + 1 < arguments.count else { usage() }
+            lexiconPath = arguments[i + 1]; i += 2
+        case "--eval":
+            // Все оставшиеся не-опции — файлы оценки: usage обещает
+            // «--eval file1 file2 …», а прежний разбор брал только первый.
+            i += 1
+            while i < arguments.count, !arguments[i].hasPrefix("--") {
+                evalFiles.append(arguments[i]); i += 1
+            }
         default: i += 1
         }
     }
@@ -178,14 +185,22 @@ case "coverage":
 
     let lexicon = try Coverage.loadLexicon(tsvPath: lexiconPath)
     print("Словарь: \(lexicon.count) слов. Порог go/no-go: ≥ 70%.")
+    var worst = 1.0
     for file in evalFiles {
         let text = try String(contentsOfFile: file, encoding: .utf8)
         let report = Coverage.measure(lexicon: lexicon, text: text)
+        worst = min(worst, report.ratio)
         let percent = ((report.ratio * 100) * 10).rounded() / 10
         print("""
         — \(file): узнано \(report.recognized)/\(report.totalTokens) (\(percent)%)
           Примеры неизвестных: \(report.unknownSample.prefix(10).joined(separator: ", "))
         """)
+    }
+    // Ненулевой выход ниже порога: go/no-go обязан быть виден автоматике
+    // (check.sh), а не только глазам в стандартном выводе.
+    if worst < 0.7 {
+        print("NO-GO: покрытие ниже 70%")
+        exit(1)
     }
 
 default:

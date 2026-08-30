@@ -783,18 +783,22 @@ private struct ClipboardIslandView: View {
         VStack(spacing: 0) {
             NotchRow(reservesNotch: store.hasNotch, notchWidth: store.notchWidth, height: 60, horizontalPadding: 28) {
                 HStack(spacing: 6) {
-                    SectionButton("История", width: 86, active: !store.showsFavorites,
+                    SectionButton("История", width: 86, active: store.section == .history,
                                   pillNS: sectionNS) {
-                        store.showsFavorites = false
+                        store.section = .history
                     }
-                    SectionButton("Избранное", width: 98, active: store.showsFavorites,
+                    SectionButton("Избранное", width: 98, active: store.section == .favorites,
                                   pillNS: sectionNS) {
-                        store.showsFavorites = true
+                        store.section = .favorites
+                    }
+                    SectionButton("Диктовка", width: 92, active: store.section == .transcripts,
+                                  pillNS: sectionNS) {
+                        store.section = .transcripts
                     }
                 }
                 // Таблетка перетекает между разделами, а не перескакивает.
                 .animation(.easeOut(duration: AzaMotion.compact),
-                           value: store.showsFavorites)
+                           value: store.section)
             } right: {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
@@ -846,7 +850,12 @@ private struct ClipboardIslandView: View {
         .focusable()
         .focusEffectDisabled()
         .focused($listFocused)
-        .onAppear { listFocused = true }
+        .onAppear {
+            listFocused = true
+            // При открытии сразу выделена последняя скопированная запись:
+            // Enter вставляет её без лишних движений (список — от новых).
+            store.selectedID = visibleEntries.first?.id
+        }
         .onKeyPress { press in
             // ⌘A + Delete — массовое удаление найденного (спец. §8.7).
             // Выделение живёт в этом виде: хранилищу знать о нём незачем.
@@ -902,11 +911,18 @@ private struct ClipboardIslandView: View {
             selectedIDs = []
             confirmMassDelete = false
         }
-        .onChange(of: visibleEntries.map(\.id)) { _, ids in
+        .onChange(of: visibleEntries.map(\.id)) { old, ids in
             selectedIDs = []
             confirmMassDelete = false
-            if let selectedID = store.selectedID, !ids.contains(selectedID) {
-                store.selectedID = nil
+            // Выделение не пропадает: удалённую запись сменяет соседняя
+            // (то же место в списке), а на пустом выделении берётся свежая.
+            if let selectedID = store.selectedID {
+                if !ids.contains(selectedID) {
+                    let index = old.firstIndex(of: selectedID) ?? 0
+                    store.selectedID = ids.indices.contains(index) ? ids[index] : ids.last
+                }
+            } else {
+                store.selectedID = ids.first
             }
         }
         .overlay(alignment: .top) {
@@ -1409,11 +1425,3 @@ private struct SectionButton: View {
     }
 }
 
-private struct QuietButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(configuration.isPressed ? AzaStyle.ink : AzaStyle.muted)
-            .contentShape(Rectangle())
-    }
-}

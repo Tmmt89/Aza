@@ -14,6 +14,10 @@ final class ChechenLexiconCoreTests: XCTestCase {
         // Цифры и время не склеиваются в слова и не порождают токенов с кириллицей.
         XCTAssertEqual(Tokenizer().tokens(in: "в 17:35"), ["в"])
         XCTAssertEqual(Tokenizer().tokens(in: "2024 шо"), ["шо"])
+        // Номер списка перед словом — НЕ палочка: скан через пробел рождал
+        // токен «1», а канонизация — мусорное слово «ӏ» (частота 1108).
+        XCTAssertEqual(Tokenizer().tokens(in: "1 шо"), ["шо"])
+        XCTAssertEqual(Tokenizer().tokens(in: "1 август"), ["август"])
     }
 
     func testLatinWordIsSingleToken() {
@@ -144,15 +148,4 @@ final class ChechenLexiconCoreTests: XCTestCase {
                                       text: "Г1ала бина дела ду.")
         XCTAssertEqual(report.ratio, 1.0, accuracy: 0.0001)
     }
-}
-
-private extension Double {
-    func rounded(toPlaces places: Int) -> Double {
-        let divisor = pow(10.0, Double(places))
-        return (self * divisor).rounded() / divisor
-    }
-}
-
-private extension String {
-    func appending(_ suffix: String) -> String { self + suffix }
 }

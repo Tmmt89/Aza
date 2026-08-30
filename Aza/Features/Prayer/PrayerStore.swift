@@ -1,6 +1,7 @@
 import Adhan
 import Combine
 import Foundation
+import UserNotifications
 
 /// Времена намаза для интерфейса: выбранный город, расписание на день,
 /// ближайший намаз и ЧЕСТНАЯ подпись источника (§4.3).
@@ -202,13 +203,6 @@ final class PrayerStore: ObservableObject {
         return "Расписание не покрывает сегодняшний день, а рассчитать нечем — выберите ближайший крупный город"
     }
 
-    /// Куда класть таблицы, если они появятся.
-    static var scheduleFolder: URL {
-        ClipboardStore.defaultStorageURL()
-            .deletingLastPathComponent()
-            .appendingPathComponent("prayer-schedules", isDirectory: true)
-    }
-
     /// Ближайший намаз: ищем в сегодняшнем дне, затем в завтрашнем —
     /// после иши сегодняшний список пуст.
     func nextPrayer(after now: Date = .now)
@@ -268,12 +262,21 @@ final class PrayerStore: ObservableObject {
             await previous?.value
             let outcome = await notifications.reschedule(days: snapshot, city: city, now: now)
             await notifications.logPending()
+            // Очередь может быть полной, а разрешения — не быть: система
+            // принимает запросы и без него, но в момент намаза молча их
+            // выбрасывает. Это главный источник «звука не было».
+            let auth = await notifications.authorizationStatus()
+            azaDebugLog("Aza: prayer notif authorization=\(auth.rawValue)")
             guard !Task.isCancelled else { return }
-            self.notificationIssue = outcome.isComplete
-                ? nil
-                : (outcome.scheduled == 0
-                   ? "Уведомления о намазе не поставлены — проверьте разрешение в Системных настройках"
-                   : "Часть уведомлений не поставлена (\(outcome.failed)) — расписание неполное")
+            if auth != .authorized {
+                self.notificationIssue = "Нет разрешения на уведомления — включите Aza в Системных настройках → Уведомления"
+            } else {
+                self.notificationIssue = outcome.isComplete
+                    ? nil
+                    : (outcome.scheduled == 0
+                       ? "Уведомления о намазе не поставлены — проверьте разрешение в Системных настройках"
+                       : "Часть уведомлений не поставлена (\(outcome.failed)) — расписание неполное")
+            }
         }
     }
 

@@ -53,7 +53,6 @@ enum AzaMotion {
     static let compact = 0.24
     static let expand = 0.32
 
-    static let reveal = Animation.timingCurve(0.22, 1, 0.36, 1, duration: expand)
 }
 
 /// Окно настроек с отключённым прижатием к экрану: для анимации ухода

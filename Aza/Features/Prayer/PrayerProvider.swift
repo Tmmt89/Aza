@@ -187,6 +187,15 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
             guard let data = boundedData(from: file),
                   let catalog = try? JSONDecoder().decode(PrayerCatalog.self, from: data),
                   !catalog.cities.isEmpty else { continue }
+            // Версия схемы и заявленный порядок намазов обязаны совпасть с
+            // контрактом: файл будущей версии или с другим порядком times
+            // показал бы времена под чужими именами.
+            guard catalog.schemaVersion == PrayerCatalog.supportedSchemaVersion,
+                  catalog.declaresSupportedOrder else {
+                azaDebugLog("Aza: prayer catalog rejected file=\(file.lastPathComponent) "
+                            + "reasons=schema-or-order")
+                continue
+            }
             // Источник, разрешённый только для сверки, в продукт не идёт:
             // иначе его времена показались бы как выверенная таблица.
             let reasons = Set(catalog.cities.compactMap(\.source.rejectionReason))

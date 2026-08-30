@@ -136,6 +136,10 @@ def read_govzalla_xlsx(path, source_name):
         times = [str(value)[:5] for value in row[3:9] if value is not None]
         if not valid_day(times):
             raise ValueError(f"Грозный: день {row[0]} не прошёл проверку: {times}")
+        # Повтор даты — испорченный файл, а не «возьмём последнюю строку»:
+        # молчаливая перезапись выбирала времена порядком строк в XLSX.
+        if (month, day) in found:
+            raise ValueError(f"{os.path.basename(path)}: дата {row[0]} встречается дважды")
         found[(month, day)] = times
 
     days = []
@@ -250,8 +254,12 @@ def main():
     catalog["completeCityCount"] = sum(1 for c in catalog["cities"]
                                        if c["coverageStatus"] == "complete")
     catalog["partialCityCount"] = catalog["cityCount"] - catalog["completeCityCount"]
-    io.open(catalog_path, "w", encoding="utf-8").write(
+    # Атомарная запись: обрыв на прямом write оставлял усечённый каталог,
+    # и приложение теряло ВСЕ расписания разом.
+    tmp_path = catalog_path + ".tmp"
+    io.open(tmp_path, "w", encoding="utf-8").write(
         json.dumps(catalog, ensure_ascii=False, separators=(",", ":")))
+    os.replace(tmp_path, catalog_path)
     print(f"\nзаписано: {catalog['cityCount']} городов")
     return 0
 

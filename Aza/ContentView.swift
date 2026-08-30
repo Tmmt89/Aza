@@ -41,6 +41,9 @@ struct ContentView: View {
                           ? "История на диске не читается этим ключом — она сохранена нетронутой"
                           : "Нет доступа к ключу истории — изменения не переживут перезапуск")
         }
+        if let store = clipboardStore, store.lastSaveFailed {
+            result.append("История не записалась на диск — последние изменения могут не пережить перезапуск")
+        }
         if clipboardHistoryEnabled, clipboardStore == nil {
             result.append("История загружается… (возможно, Keychain ждёт ответа в диалоге)")
         }
@@ -75,6 +78,14 @@ struct ContentView: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
+                }
+                // После иши ближайший намаз — завтрашний, и на границе
+                // покрытия таблицы он приходит из ДРУГОГО источника, чем
+                // подпись в шапке. Молчаливое смешивание запрещено (§4.3).
+                if let other = island.differingSourceLabel(for: next) {
+                    Text("источник: \(other)")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
                 }
             } else if let reason = island.prayerUnavailableReason {
                 Text(reason)

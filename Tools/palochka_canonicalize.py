@@ -15,7 +15,9 @@ FILES = [
     "Tools/BuildChechenLexicon/Sources/ChechenLexiconCore/Normalizer.swift",
     "docs/SPEC.md",
     "PRODUCT_SPEC.md",
-    "docs/PLAN-chechen.md",
+    # docs/PLAN-chechen.md ИСКЛЮЧЁН: §3.2 намеренно показывает заглавную
+    # U+04C0 в объяснении двух кодовых точек — слепая замена калечила
+    # документацию, оставляя подпись «U+04C0» рядом со строчным глифом.
     "docs/RESEARCH-layout-autocorrect.md",
     "docs/RESEARCH-features.md",
 ]

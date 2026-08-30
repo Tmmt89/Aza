@@ -107,6 +107,29 @@ final class ClipboardStoreTests: XCTestCase {
         XCTAssertEqual(ClipboardStore.historyState(for: key, at: url), .unreadable)
     }
 
+    /// Транскрипт диктовки помечается флагом, переживает диск, а повторная
+    /// диктовка текста, уже лежащего в истории, помечает существующую
+    /// запись; обычное копирование транскрипта флаг не снимает.
+    func testTranscriptFlagPersistsAndDedupMarks() throws {
+        let url = try TestFiles.directory().appendingPathComponent("history.bin")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = makeStore(at: url)
+        store.add(text: "диктовка", sourceAppBundleID: nil, sourceAppName: nil,
+                  isTranscript: true)
+        store.add(text: "копия", sourceAppBundleID: nil, sourceAppName: nil)
+        XCTAssertEqual(store.entries.map { $0.isTranscript == true }, [false, true])
+
+        // Дедуп: диктовка того же текста помечает существующую запись…
+        store.add(text: "копия", sourceAppBundleID: nil, sourceAppName: nil,
+                  isTranscript: true)
+        // …а копирование текста транскрипта флаг не снимает.
+        store.add(text: "диктовка", sourceAppBundleID: nil, sourceAppName: nil)
+        XCTAssertEqual(store.entries.map { $0.isTranscript == true }, [true, true])
+
+        let reopened = makeStore(at: url)
+        XCTAssertEqual(reopened.entries.map { $0.isTranscript == true }, [true, true])
+    }
+
     /// «Файла нет» и «не удалось проверить» — разные ответы. Второй не
     /// должен выглядеть как первый: на «нет файла» опирается решение
     /// перезаписать историю и удалить ключ.

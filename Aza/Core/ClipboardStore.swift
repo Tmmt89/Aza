@@ -21,6 +21,8 @@ struct ClipEntry: Codable, Equatable, Identifiable {
     var sourceAppName: String?
     /// Избранное: не удаляется автоочисткой по объёму и сроку.
     var isFavorite: Bool?
+    /// Транскрипт диктовки: живёт во вкладке «Диктовка», не в истории.
+    var isTranscript: Bool?
     var kind: Kind?
     /// RTF хранится инлайн — он мал; изображение живёт в отдельном
     /// зашифрованном blob-файле по имени id (см. blobURL).
@@ -73,6 +75,12 @@ final class ClipboardStore: ObservableObject {
     /// будут стёрты безвозвратно.
     private(set) var isUnreadable = false
 
+    /// Последняя ФАКТИЧЕСКАЯ запись на диск провалилась (диск полон, права):
+    /// мутация осталась только в памяти. Отдельно от isReadOnly — тот про
+    /// ключ и нечитаемость; transient-IO раньше молчал, и UI рапортовал
+    /// «удалено»/«в избранном», хотя диск не изменился.
+    @Published private(set) var lastSaveFailed = false
+
     /// Сессия без доступа к настоящему ключу или к существующей истории:
     /// изменения не переживут перезапуск. Показывается в меню.
     var isReadOnly: Bool { !keyIsPersistent || isUnreadable }
@@ -106,19 +114,6 @@ final class ClipboardStore: ObservableObject {
     ///   - maxEntries: локальный лимит для тестов;
     ///     в приложении используется статический `maxEntries`.
     private let instanceByteBudget: Int
-
-    /// Синхронный init: получает ключ прямо здесь. Keychain-диалог
-    /// заблокирует вызвавший поток — приложение этот путь не использует.
-    /// Приложение создаёт хранилище через init(preparedKey:) после
-    /// фонового obtainKey().
-    convenience init(storageURL: URL? = nil,
-                     maxEntries: Int = ClipboardStore.maxEntries,
-                     retentionDays: Int? = nil,
-                     byteBudget: Int = ClipboardStore.totalByteBudget) {
-        self.init(preparedKey: Self.obtainKey(),
-                  storageURL: storageURL, maxEntries: maxEntries,
-                  retentionDays: retentionDays, byteBudget: byteBudget)
-    }
 
     init(preparedKey: (key: SymmetricKey, persistent: Bool),
          storageURL: URL? = nil,
@@ -227,16 +222,21 @@ final class ClipboardStore: ObservableObject {
     /// «не пусто». `copiedAt` — момент копирования, если запись
     /// добавляется отложенно (диктовка персистится через 250 мс).
     func add(text: String, sourceAppBundleID: String?, sourceAppName: String?,
-             copiedAt: Date = Date()) {
+             copiedAt: Date = Date(), isTranscript: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, text.count <= Self.maxItemCharacters else { return }
+        // Повторная диктовка того же текста помечает существующую запись
+        // транскриптом; обратный дедуп (пользователь скопировал текст,
+        // равный транскрипту) флаг не снимает — запись остаётся во вкладке.
         if dedup(where: { $0.resolvedKind == .text && $0.text == text },
                  at: copiedAt,
                  sourceAppBundleID: sourceAppBundleID,
-                 sourceAppName: sourceAppName) { return }
+                 sourceAppName: sourceAppName,
+                 update: { if isTranscript { $0.isTranscript = true } }) { return }
         insertNew(ClipEntry(
             id: UUID(), text: text, createdAt: copiedAt,
             sourceAppBundleID: sourceAppBundleID, sourceAppName: sourceAppName,
+            isTranscript: isTranscript ? true : nil,
             byteSize: text.utf8.count
         ))
     }
@@ -524,8 +524,10 @@ final class ClipboardStore: ObservableObject {
             let payload = try JSONEncoder().encode(Payload(entries: entries))
             let sealed = try AES.GCM.seal(payload, using: key).combined!
             try sealed.write(to: storageURL, options: .atomic)
+            if lastSaveFailed { lastSaveFailed = false }
             return true
         } catch {
+            lastSaveFailed = true
             NSLog("Aza: clipboard save failed (%@)", error.localizedDescription)
             return false
         }
@@ -1233,21 +1235,6 @@ final class ClipboardStore: ObservableObject {
         } catch {
             return .unknown
         }
-    }
-
-    /// Можно ли безопасно расстаться с этим ключом.
-    ///
-    /// Только когда терять нечего: истории нет И нет резервной копии
-    /// нечитаемой истории. `doesNotOpen` сюда НЕ входит: AES-GCM не
-    /// отличает «не тот ключ» от «данные повреждены», и на испорченном
-    /// файле правильный ключ выглядел бы неподходящим.
-    ///
-    /// Проверка копии обязательна: без неё отсутствие основного файла
-    /// разрешало удалить ключ, которым зашифрована лежащая рядом копия, —
-    /// то есть единственный ключ к ней.
-    private nonisolated static func isSafeToDiscard(_ key: SymmetricKey) -> Bool {
-        guard historyState(for: key) == .absent else { return false }
-        return !backupExists()
     }
 
     private nonisolated static func addKeyItem(query: [String: Any], keyData: Data) -> OSStatus {

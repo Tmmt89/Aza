@@ -10,7 +10,21 @@ import UserNotifications
 /// укладываются в системный предел уведомления в 30 секунд, поэтому
 /// звучат целиком.
 @MainActor
-final class PrayerNotifications {
+final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
+
+    override init() {
+        super.init()
+        // Без делегата macOS МОЛЧА прячет баннер и звук, когда Aza —
+        // активное приложение (панель буфера держит ключевое окно):
+        // уведомление уходит в Центр, а намаз проходит беззвучно.
+        center.delegate = self
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification)
+        async -> UNNotificationPresentationOptions {
+        [.banner, .sound, .list]
+    }
 
     /// Чем звучит уведомление. Отделено от режима: «когда сработает» и
     /// «что прозвучит» — разные вопросы, и складывать их в один
@@ -118,8 +132,15 @@ final class PrayerNotifications {
         (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
     }
 
+    /// Текущий статус разрешения: center.add() принимает запросы и без
+    /// него, и в момент намаза система молча их выбрасывает — расписание
+    /// «стоит», а звука нет. Проверяется после каждого планирования.
     func authorizationStatus() async -> UNAuthorizationStatus {
-        await center.notificationSettings().authorizationStatus
+        let settings = await center.notificationSettings()
+        azaDebugLog("Aza: notif settings auth=\(settings.authorizationStatus.rawValue) "
+            + "alert=\(settings.alertSetting.rawValue) sound=\(settings.soundSetting.rawValue) "
+            + "style=\(settings.alertStyle.rawValue)")
+        return settings.authorizationStatus
     }
 
     /// Пересобирает расписание уведомлений: сначала добавляет нужные
@@ -208,6 +229,12 @@ final class PrayerNotifications {
             .min()
         let formatter = ISO8601DateFormatter()
         azaDebugLog("Aza: prayer notifications pending=\(pending.count) next=\(next.map(formatter.string(from:)) ?? "-")")
+        // Доставленные — ground truth: запрос, ушедший из pending, мог быть
+        // и показан, и молча выброшен; различить можно только здесь.
+        let delivered = await center.deliveredNotifications()
+            .filter { $0.request.identifier.hasPrefix(Self.identifierPrefix) }
+            .map { "\($0.request.identifier)@\(formatter.string(from: $0.date))" }
+        azaDebugLog("Aza: prayer notifications delivered=[\(delivered.joined(separator: ", "))]")
     }
 
     func cancelAll() async {

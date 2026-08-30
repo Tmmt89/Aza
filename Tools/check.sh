@@ -18,4 +18,10 @@ xcodebuild -project "$ROOT/Aza.xcodeproj" -scheme Aza \
 echo "== 3. Аудит палочки"
 python3 "$ROOT/Tools/palochka_audit.py" "$ROOT"
 
+echo "== 4. Синтаксис скриптов"
+# Скрипты рождают данные приложения и релизы — битый синтаксис не должен
+# ждать ручного запуска.
+python3 -m py_compile "$ROOT"/Tools/*.py
+bash -n "$ROOT"/Tools/*.sh
+
 echo "✔ Все проверки прошли — можно пушить"

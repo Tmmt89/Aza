@@ -71,12 +71,26 @@ enum TextInsertion {
     }
 
     static func insert(_ text: String, into element: AXUIElement) -> AXError {
+        let before = selectedRange(of: element)
         let directResult = AXUIElementSetAttributeValue(
             element,
             kAXSelectedTextAttribute as CFString,
             text as CFString
         )
-        guard directResult != .success else { return .success }
+        if directResult == .success {
+            // Chromium (Claude Desktop, webview) отвечает success, ничего
+            // не применив. Настоящая запись меняет выделение синхронно:
+            // вставка сдвигает каретку, замена схлопывает выделение
+            // (проверено живьём на TextEdit и Claude Desktop). Выделение
+            // не изменилось — это no-op: отдаём отказ, чтобы вызывающие
+            // ушли в свои ⌘V-фолбэки (текст у всех уже в буфере).
+            guard !text.isEmpty, let before,
+                  let after = selectedRange(of: element),
+                  after.location == before.location,
+                  after.length == before.length else { return .success }
+            azaDebugLog("Aza: insert fake success loc=\(before.location) len=\(before.length)")
+            return .cannotComplete
+        }
 
         guard isTextLike(element), postUnicode(text) else { return directResult }
         return .success
@@ -318,6 +332,16 @@ enum TextInsertion {
     /// выставляются явно: физически зажатые модификаторы (правая ⌥ в
     /// hold-режиме фраз) на посланное событие не переносятся.
     static func postPasteCommand() -> Bool {
+        // Защищённый ввод включён — фокус в парольном поле (системном или
+        // корректного приложения): слепой ⌘V туда запрещён. AX-слепые
+        // webview этот guard не задевает — они защищённый ввод не включают.
+        // Остаточный риск (кастомное парольное поле БЕЗ SecureEventInput в
+        // AX-слепом приложении) закрывается только полным fail-closed — это
+        // отключило бы webview-фолбэк целиком; решение за владельцем.
+        guard !IsSecureEventInputEnabled() else {
+            azaDebugLog("Aza: paste blocked — secure event input active")
+            return false
+        }
         guard let source = CGEventSource(stateID: .privateState),
               let keyDown = CGEvent(keyboardEventSource: source,
                                     virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),

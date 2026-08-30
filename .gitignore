@@ -25,3 +25,5 @@ Tools/BuildChechenLexicon/config.json
 build_rel/
 build_release/
 dist/
+build/
+Tools/BuildChechenLexicon/out_lexicon_new/

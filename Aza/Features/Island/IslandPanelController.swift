@@ -214,10 +214,6 @@ final class IslandPanelController {
         }
     }
 
-    private func hasNotch(on screen: NSScreen) -> Bool {
-        screen.auxiliaryTopLeftArea != nil && screen.auxiliaryTopRightArea != nil
-    }
-
     private func isInsideIsland(_ screenPoint: NSPoint) -> Bool {
         guard panel.frame.contains(screenPoint) else { return false }
         let localPoint = CGPoint(

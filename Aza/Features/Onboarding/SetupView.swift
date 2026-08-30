@@ -376,10 +376,19 @@ struct SetupView: View {
                     Text("Уведомления")
                         .font(AzaStyle.body)
                         .foregroundStyle(AzaStyle.ink)
-                    HelpDot(text: "Режим уведомления по каждому намазу отдельно: выключено, в момент наступления или напоминание заранее.")
+                    HelpDot(text: "Главный тумблер уведомлений о намазе; включение спрашивает разрешение системы. Режим по каждому намазу — за кнопкой «Настроить…».")
                     Spacer(minLength: 8)
+                    // Единственный путь, включающий уведомления (пишет
+                    // PrayerNotificationsEnabled и планирует расписание).
+                    // Раньше тумблера не было, и функция была невключаемой.
+                    Toggle(isOn: Binding(
+                        get: { model.prayer.notificationsEnabled },
+                        set: { on in Task { await model.prayer.setNotifications(enabled: on) } }
+                    )) { EmptyView() }
+                        .toggleStyle(AzaToggleStyle())
                     Button("Настроить…") { showPrayerNotifSheet = true }
                         .buttonStyle(AzaCapsuleButtonStyle())
+                        .disabled(!model.prayer.notificationsEnabled)
                 }
             }
         }
@@ -1139,7 +1148,9 @@ private struct DataSheet: View {
                 .disabled(busy)
                 Button("Удалить историю буфера") {
                     Task {
-                        await model.prayer.shutdownForCleanup()
+                        // Намаз здесь не глушится: удаление буфера его не
+                        // касается, а превентивный shutdown при СБОЕ удаления
+                        // оставлял приложение без напоминаний до перезапуска.
                         error = PrivacyCleanup.deleteClipboardHistory()
                     }
                 }

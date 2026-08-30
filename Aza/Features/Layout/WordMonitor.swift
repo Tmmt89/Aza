@@ -54,6 +54,9 @@ final class WordMonitor {
         }
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
+            // Без инвалидации mach-порт жил бы до конца процесса — утечка
+            // на каждом цикле stop/start (LatchStopKeys делает так же).
+            CFMachPortInvalidate(eventTap)
             self.eventTap = nil
         }
         currentWord = ""
@@ -119,12 +122,18 @@ final class WordMonitor {
               let corrected = onWordDecision?(single.word, single.delimiter) else {
             return Unmanaged.passUnretained(event)
         }
-        // Разделитель проглочен — поле содержит ровно набранное слово:
-        // стереть и напечатать исправление вместе с разделителем.
-        // ponytail: автодополнение поля (IDE) может успеть изменить текст
-        // под backspace-ами — режим включается осознанно, не по умолчанию.
-        _ = TextInsertion.retypeWord(typed: single.word, delimiter: "",
-                                     corrected: corrected + single.delimiter, tail: "")
+        // Слепая синтетика запрещена: клик в другое место того же приложения
+        // не сбрасывает currentWord, и backspace-ы стёрли бы чужой текст.
+        // retypeWord сверяет фокус (pid/окно/диапазон) и текст перед кареткой
+        // с набранным словом; сверка не прошла — событие проходит как есть,
+        // разделитель НЕ глотается, поле остаётся нетронутым.
+        guard let element = TextInsertion.focusedElement(),
+              !SecureFieldDetector.isSecure(element),
+              TextInsertion.retypeWord(typed: single.word, delimiter: "",
+                                       corrected: corrected + single.delimiter,
+                                       tail: "", verifying: element) else {
+            return Unmanaged.passUnretained(event)
+        }
         return nil
     }
 

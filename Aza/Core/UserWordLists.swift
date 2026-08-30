@@ -89,13 +89,24 @@ final class UserWordLists {
         save()
     }
 
+    /// Последняя запись на диск провалилась: исключение живёт только в
+    /// памяти и не переживёт перезапуск. Раньше сбой глотался молча, и
+    /// статус «в исключениях» врал.
+    private(set) var lastSaveFailed = false
+
     private func save() {
         guard !isUnreadable else { return }
         let payload = Payload(
             neverCorrect: neverCorrect.sorted(),
             confirmed: confirmed.sorted()
         )
-        guard let data = try? JSONEncoder().encode(payload) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(payload)
+            try data.write(to: fileURL, options: .atomic)
+            lastSaveFailed = false
+        } catch {
+            lastSaveFailed = true
+            NSLog("Aza: user-words save failed (%@)", error.localizedDescription)
+        }
     }
 }

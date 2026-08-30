@@ -25,11 +25,13 @@ func azaDebugLog(_ message: String) {
 /// and exposes status for the menu panel. Lives for the whole app lifetime.
 @MainActor
 final class GlobalHotKey: ObservableObject {
-    @Published private(set) var activationCount = 0
     @Published private(set) var registrationError: OSStatus?
-    @Published private(set) var insertionStatus = "Ожидает проверки вставки"
-    @Published private(set) var correctionCount = 0
-    @Published private(set) var correctionStatus = "Ожидает проверки раскладки"
+    // Диагностические поля без @Published: UI их не читает, а каждое
+    // исправление дёргало бы SwiftUI-инвалидацию впустую.
+    private(set) var activationCount = 0
+    private(set) var insertionStatus = "Ожидает проверки вставки"
+    private(set) var correctionCount = 0
+    private(set) var correctionStatus = "Ожидает проверки раскладки"
     @Published private(set) var inputMonitoringGranted = false
 
     private var hotKeyController: HotKeyController?
@@ -90,7 +92,13 @@ final class GlobalHotKey: ObservableObject {
         inputMonitoringGranted = CGPreflightListenEventAccess()
         // Диагностика цепочки коррекции в unified log (без содержимого ввода):
         // log stream --predicate 'process == "Aza"'
-        azaDebugLog("Aza: start inputMonitoring=\(inputMonitoringGranted ? 1 : 0) axTrusted=\(AXIsProcessTrusted() ? 1 : 0) lexicon=\(ChechenLexicon.shared.isAvailable ? 1 : 0) layoutTable=\(LayoutCorrectionEngine.isAvailable ? 1 : 0)")
+        // ChechenLexicon здесь НЕ трогаем: обращение в интерполяции парсило
+        // 1,4 МБ TSV синхронно в init (и в Release — аргумент вычисляется
+        // до #if DEBUG внутри azaDebugLog). Прогрев — после старта UI.
+        azaDebugLog("Aza: start inputMonitoring=\(inputMonitoringGranted ? 1 : 0) axTrusted=\(AXIsProcessTrusted() ? 1 : 0) layoutTable=\(LayoutCorrectionEngine.isAvailable ? 1 : 0)")
+        DispatchQueue.main.async {
+            azaDebugLog("Aza: lexicon=\(ChechenLexicon.shared.isAvailable ? 1 : 0)")
+        }
         if inputMonitoringGranted {
             monitor.start()
             startUndoMonitor()
@@ -142,8 +150,12 @@ final class GlobalHotKey: ObservableObject {
               event.modifierFlags.contains(.shift) else { return }
 
         let now = Date()
-        defer { lastRightShiftPress = now }
-        guard now.timeIntervalSince(lastRightShiftPress) < 0.7 else { return }
+        guard now.timeIntervalSince(lastRightShiftPress) < 0.7 else {
+            lastRightShiftPress = now
+            return
+        }
+        // Сброс окна БЕЗ defer: defer перезаписывал .distantPast обратно
+        // на now, и тройной тап срабатывал как два undo подряд.
         lastRightShiftPress = .distantPast
         undoLastCorrection()
     }
@@ -154,6 +166,13 @@ final class GlobalHotKey: ObservableObject {
     private func undoLastCorrection() {
         guard let last = lastCorrection else {
             correctionStatus = "Отменять нечего"
+            return
+        }
+        // Deny-list действует и на ручные пути: менеджер паролей нельзя
+        // трогать даже по явному жесту пользователя (инвариант §6).
+        if let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           ExcludedApps.isCorrectionDenied(bundleID: bundleID) {
+            correctionStatus = "В этом приложении Aza текст не трогает"
             return
         }
         guard let element = TextInsertion.focusedElement(),
@@ -193,7 +212,11 @@ final class GlobalHotKey: ObservableObject {
             // Пользователь передумал — подтверждение снимается.
             UserWordLists.shared.removeConfirmed(last.corrected)
             recentWords.removeAll()
-            correctionStatus = "Отменено: \(last.corrected) → \(last.original); в исключениях"
+            // Честный статус: сбой записи списка означает, что исключение
+            // не переживёт перезапуск.
+            correctionStatus = UserWordLists.shared.lastSaveFailed
+                ? "Отменено: \(last.corrected) → \(last.original); исключение НЕ сохранилось на диск"
+                : "Отменено: \(last.corrected) → \(last.original); в исключениях"
             lastCorrection = nil
         } else {
             // Текст изменился — контекст фразы больше не соответствует полю.
@@ -212,6 +235,14 @@ final class GlobalHotKey: ObservableObject {
             insertionStatus = "Разрешите Aza управлять компьютером"
             let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
             AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+            return
+        }
+
+        // Тот же deny-list, что у автоматики: ручной ⌘⇧A в менеджере
+        // паролей раньше обходил исключения.
+        if let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           ExcludedApps.isCorrectionDenied(bundleID: bundleID) {
+            insertionStatus = "В этом приложении Aza текст не трогает"
             return
         }
 

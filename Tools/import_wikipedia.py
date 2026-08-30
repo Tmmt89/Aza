@@ -31,8 +31,26 @@ if len(sys.argv) < 3:
 parquets = sys.argv[1:-1]
 out_path = Path(sys.argv[-1])
 
+# Буквы, которых нет ни в чеченской, ни в русской орфографии: строка с
+# ними — украинская/белорусская цитата. Такие строки выбрасываем ЦЕЛИКОМ:
+# глобальная нормализация І калечила их слова в псевдопалочку, и в словарь
+# попадали «український», «гравця», «сайтӏ», «профӏль». Фильтр по буквам
+# ловит не всё (украинское слово без маркерных букв пройдёт) — остаток
+# снимает FP-веттинг при пересборке.
+FOREIGN_MARKERS = set("їєґў")
+
+
+def drop_foreign_lines(text: str) -> str:
+    return "\n".join(
+        line for line in text.split("\n")
+        if not (set(line) & FOREIGN_MARKERS)
+    )
+
+
 articles = []
 for parquet_path in parquets:
+    if len(articles) >= MAX_ARTICLES:
+        break  # лимит достигнут — следующий шард не читаем вовсе
     table = pq.read_table(parquet_path)
     titles = table.column("title").to_pylist()
     texts = table.column("text").to_pylist()
@@ -43,7 +61,7 @@ for parquet_path in parquets:
             continue
         if not has_cyrillic(title):
             continue
-        articles.append(f"{title}\n{text.strip()}")
+        articles.append(f"{title}\n{drop_foreign_lines(text.strip())}")
 
 out_path.write_text("\n\n".join(articles) + "\n", encoding="utf-8")
 print(f"отобрано статей: {len(articles)}, записано в {out_path}")
