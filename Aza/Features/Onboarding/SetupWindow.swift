@@ -30,6 +30,19 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// стартовал бы с полдороги и сдвинул сохранённый кадр окна.
     private var isSlidingOut = false
 
+    // Диагностика «настройки открываются за краем экрана»: окно
+    // оказывалось на X≈1600 при центре 524, а код X не трогает вовсе —
+    // лог покажет, кто и когда его двигает.
+    func windowDidMove(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow else { return }
+        azaDebugLog("Aza: SetupWindow moved frame=\(w.frame)")
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow else { return }
+        azaDebugLog("Aza: SetupWindow resized frame=\(w.frame)")
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard !isSlidingOut else { return false }
         isSlidingOut = true
@@ -55,9 +68,20 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         model.refresh()
         if let window {
             NSApp.activate(ignoringOtherApps: true)
+            // AzaSlidingWindow отключает системный constrain (ради полёта
+            // за кромку), поэтому уехавший кадр никто не возвращает —
+            // окно «открывалось» целиком за краем экрана. Не на экране —
+            // в центр.
+            if let visible = (window.screen ?? NSScreen.main)?.visibleFrame,
+               !visible.contains(window.frame) {
+                azaDebugLog("Aza: SetupWindow off-screen frame=\(window.frame), recenter")
+                window.center()
+            }
             // Без slideIn: первый показ за кромкой замораживает у окна
             // кликабельную форму там же — все кнопки «не нажимаются».
             window.makeKeyAndOrderFront(nil)
+            resyncServerFrame(window)
+            azaDebugLog("Aza: SetupWindow shown frame=\(window.frame)")
             return
         }
         // Размер окна подгоняется под содержимое: настройки должны
@@ -87,9 +111,11 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         window.backgroundColor = NSColor(red: 14 / 255, green: 14 / 255,
                                          blue: 16 / 255, alpha: 1)
         window.appearance = NSAppearance(named: .darkAqua)
-        window.center()
         window.contentView = content
         window.setContentSize(size)
+        // center() после setContentSize: центровка по ещё не финальному
+        // кадру оставляла окно со смещением.
+        window.center()
         window.delegate = self
         self.window = window
         // Приложение живёт в меню-баре: без явной активации окно
@@ -97,6 +123,19 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         // Без slideIn (см. выше): показ сразу на месте.
         window.makeKeyAndOrderFront(nil)
+        resyncServerFrame(window)
+        azaDebugLog("Aza: SetupWindow shown frame=\(window.frame)")
+    }
+
+    /// Перетаскивание окна на этой macOS обрабатывает WindowServer, а
+    /// события до приложения не доходят (память aza-island-clicks) —
+    /// поверхность уезжает, модельный кадр застревает, и клики
+    /// пересылаются мимо. Сдвиг на 1 пт и обратно заставляет сервер
+    /// вернуть поверхность к модельному кадру (приём из slideIn).
+    private func resyncServerFrame(_ window: NSWindow) {
+        let frame = window.frame
+        window.setFrame(frame.offsetBy(dx: 0, dy: 1), display: false)
+        window.setFrame(frame, display: true)
     }
 }
 

@@ -428,7 +428,7 @@ private struct HomeIslandView: View {
                             // Иконку в строке меню можно скрыть, и тогда
                             // остров — единственное место выхода. Кнопка в
                             // углу, тихая: краснеет только под курсором.
-                            ExitButton()
+                            ExitButton(hovering: store.homeHoverZone == .exit)
                         }
                         .padding(.bottom, 8)
                         HStack(spacing: 8) {
@@ -450,6 +450,17 @@ private struct HomeIslandView: View {
                             .buttonStyle(.plain)
                             .disabled(locator.state == .locating)
                             .help("Определить город по геопозиции")
+                            // Реальный клик приходит нотификацией из
+                            // ручного хит-теста (зона .geo), не в Button.
+                            .onReceive(NotificationCenter.default
+                                .publisher(for: .azaLocateCity)) { _ in
+                                guard locator.state != .locating else { return }
+                                Task {
+                                    if let match = await locator.locate() {
+                                        store.prayer.selectedCityID = match.city.id
+                                    }
+                                }
+                            }
 
                             // Город кликабелен: настройки открываются сразу
                             // на разделе «Намаз» с выбором города.
@@ -516,15 +527,18 @@ private struct HomeIslandView: View {
                             // остров сам перейдёт в режим диктовки по
                             // состоянию контроллера. Раньше кнопка лишь
                             // переключала вид: волна и REC без записи.
-                            ActionButton("Диктовка", symbol: "mic") {
+                            ActionButton("Диктовка", symbol: "mic",
+                                         hovering: store.homeHoverZone == .dictation) {
                                 azaDebugLog("Aza: BUTTON Диктовка fired")
                                 store.dictation.startLatchedFromUI()
                             }
-                            ActionButton("Буфер", symbol: "clipboard") {
+                            ActionButton("Буфер", symbol: "clipboard",
+                                         hovering: store.homeHoverZone == .clipboard) {
                                 azaDebugLog("Aza: BUTTON Буфер fired")
                                 store.mode = .clipboard
                             }
-                            ActionButton("Настройки", symbol: "gearshape") {
+                            ActionButton("Настройки", symbol: "gearshape",
+                                         hovering: store.homeHoverZone == .settings) {
                                 azaDebugLog("Aza: BUTTON Настройки fired")
                                 // Остров — панель без фокуса, поэтому окно
                                 // настройки открывает и активирует само себя.
@@ -1363,13 +1377,15 @@ private struct EditPhrasesButton: View {
 private struct ActionButton: View {
     let title: String
     let symbol: String
+    // Hover приходит снаружи (IslandPanelController опрашивает курсор):
+    // .onHover в расширенной панели мёртв — mouseMoved до неё не доходит.
+    let hovering: Bool
     let action: () -> Void
 
-    @State private var hovering = false
-
-    init(_ title: String, symbol: String, action: @escaping () -> Void) {
+    init(_ title: String, symbol: String, hovering: Bool, action: @escaping () -> Void) {
         self.title = title
         self.symbol = symbol
+        self.hovering = hovering
         self.action = action
     }
 
@@ -1391,20 +1407,18 @@ private struct ActionButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
         .animation(.easeOut(duration: AzaMotion.micro), value: hovering)
     }
 }
 
 private struct ExitButton: View {
-    @State private var hovering = false
+    let hovering: Bool
 
     var body: some View {
         Button("Выход") { NSApp.terminate(nil) }
             .buttonStyle(.plain)
             .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(hovering ? AzaStyle.danger : AzaStyle.faint)
-            .onHover { hovering = $0 }
             .animation(.easeOut(duration: AzaMotion.micro), value: hovering)
     }
 }
@@ -1428,12 +1442,17 @@ private struct SectionButton: View {
     }
 
     var body: some View {
-        Button(title, action: action)
+        // Кадр и contentShape ВНУТРИ label: у Button(title) кликабелен
+        // только текст, клик по телу пилюли уходил в пустоту.
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(active ? Color.black
+                                 : hovering ? AzaStyle.ink : AzaStyle.muted)
+                .frame(width: width, height: 32)
+                .contentShape(Rectangle())
+        }
             .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(active ? Color.black
-                             : hovering ? AzaStyle.ink : AzaStyle.muted)
-            .frame(width: width, height: 32)
             .background {
                 if active {
                     Capsule().fill(AzaStyle.acid)

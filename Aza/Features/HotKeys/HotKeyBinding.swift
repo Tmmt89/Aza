@@ -66,6 +66,16 @@ struct HotKeyBinding: Codable, Equatable {
         Self.modifierFlagByKeyCode[UInt16(keyCode)] != nil && modifiers == 0
     }
 
+    /// Перевод CGEvent в Carbon-модификаторы (матчинг хоткеев в tap'е).
+    static func carbonModifiers(fromCG flags: CGEventFlags) -> UInt32 {
+        var result: UInt32 = 0
+        if flags.contains(.maskCommand) { result |= UInt32(cmdKey) }
+        if flags.contains(.maskShift) { result |= UInt32(shiftKey) }
+        if flags.contains(.maskAlternate) { result |= UInt32(optionKey) }
+        if flags.contains(.maskControl) { result |= UInt32(controlKey) }
+        return result
+    }
+
     /// Перевод NSEvent в Carbon-модификаторы.
     static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var result: UInt32 = 0

@@ -16,6 +16,9 @@ extension Notification.Name {
     /// Просьба открыть настройки на разделе «Фразы» (кнопка «Изменить»
     /// в панели фраз).
     static let azaShowPhraseSettings = Notification.Name("aza.showPhraseSettings")
+    /// Клик по гео-стрелке в home-острове: определить город по геопозиции
+    /// (клики до SwiftUI не доходят — команда идёт из ручного хит-теста).
+    static let azaLocateCity = Notification.Name("aza.locateCity")
 }
 
 struct SetupView: View {
@@ -226,8 +229,13 @@ struct SetupView: View {
                 Button("Готово") {
                     UserDefaults.standard.set(true, forKey: SetupWindowController.completedKey)
                     // performClose, а не close: закрытие идёт через делегата
-                    // окна — с анимацией ухода вверх.
-                    NSApp.keyWindow?.performClose(nil)
+                    // окна — с анимацией ухода вверх. Окно ищем по делегату,
+                    // а не через keyWindow: приложение может быть неактивным
+                    // (кооперативная активация на этой macOS не проходит),
+                    // и keyWindow == nil молча съедал закрытие.
+                    NSApp.windows
+                        .first { $0.delegate is SetupWindowController }?
+                        .performClose(nil)
                 }
                 .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
                 .keyboardShortcut(.defaultAction)

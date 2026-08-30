@@ -3,8 +3,43 @@ import Carbon.HIToolbox
 
 /// Registers one global hot key via Carbon with press AND release callbacks
 /// (release is what makes hold-to-talk possible). Owner must call stop().
+///
+/// Сами нажатия матчит CGEventTap острова через handleTapKey: Carbon-
+/// диспетчер process target на этой macOS мёртв — события гибнут между
+/// CG-очередью и приложением (см. память aza-island-clicks), его колбэк
+/// не вызывается. RegisterEventHotKey остаётся ради системной
+/// эксклюзивности сочетания и честной детекции конфликтов.
 @MainActor
 final class HotKeyController {
+    private static var active: [HotKeyController] = []
+
+    /// Вызов из CGEventTap. true — событие было хоткеем и обработано
+    /// (глотаем, как глотал Carbon). Автоповторы подавляются флагом
+    /// pressed. keyUp матчится по одной клавише среди нажатых:
+    /// модификаторы к моменту отпускания часто уже брошены, и точное
+    /// сравнение теряло бы release hold-хоткеев.
+    static func handleTapKey(keyCode: UInt32, carbonModifiers: UInt32,
+                             isDown: Bool) -> Bool {
+        var handled = false
+        for controller in active {
+            if isDown {
+                guard controller.keyCode == keyCode,
+                      controller.modifiers == carbonModifiers else { continue }
+                if !controller.pressed {
+                    controller.pressed = true
+                    controller.onPress()
+                }
+                handled = true
+            } else if controller.pressed, controller.keyCode == keyCode {
+                controller.pressed = false
+                controller.onRelease?()
+                handled = true
+            }
+        }
+        return handled
+    }
+
+    private var pressed = false
     private var hotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private let keyCode: UInt32
@@ -33,48 +68,9 @@ final class HotKeyController {
     }
 
     /// Returns nil on success, otherwise the failing OSStatus.
+    /// Carbon-обработчик не ставится — его диспетчер мёртв, нажатия
+    /// приходят из CGEventTap через handleTapKey.
     func register() -> OSStatus? {
-        var events = [
-            EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                          eventKind: UInt32(kEventHotKeyPressed)),
-            EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                          eventKind: UInt32(kEventHotKeyReleased)),
-        ]
-
-        let handlerStatus = InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, event, context in
-                guard let context, let event else { return OSStatus(eventNotHandledErr) }
-                var pressedID = EventHotKeyID()
-                GetEventParameter(event, EventParamName(kEventParamDirectObject),
-                                  EventParamType(typeEventHotKeyID), nil,
-                                  MemoryLayout<EventHotKeyID>.size, nil, &pressedID)
-                let kind = GetEventKind(event)
-                let controller = Unmanaged<HotKeyController>.fromOpaque(context).takeUnretainedValue()
-                // Обработчик получает события ВСЕХ хоткеев приложения.
-                // КРИТИЧНО: чужой хоткей обязан получить eventNotHandledErr —
-                // noErr означает «обработано», и Carbon не передаёт событие
-                // дальше по цепочке, из-за чего второй хоткей (диктовка)
-                // не срабатывал вовсе.
-                let handled = MainActor.assumeIsolated { () -> Bool in
-                    guard pressedID.id == controller.hotKeyID.id else { return false }
-                    if kind == UInt32(kEventHotKeyPressed) {
-                        controller.onPress()
-                    } else if kind == UInt32(kEventHotKeyReleased) {
-                        controller.onRelease?()
-                    }
-                    return true
-                }
-                return handled ? noErr : OSStatus(eventNotHandledErr)
-            },
-            events.count,
-            &events,
-            Unmanaged.passUnretained(self).toOpaque(),
-            &handler
-        )
-
-        guard handlerStatus == noErr else { return handlerStatus }
-
         let hotKeyStatus = RegisterEventHotKey(
             keyCode,
             modifiers,
@@ -83,16 +79,8 @@ final class HotKeyController {
             0,
             &hotKey
         )
-
-        guard hotKeyStatus == noErr else {
-            // Иначе установленный обработчик переживёт владельца и при
-            // следующем событии обратится к освобождённой памяти.
-            if let handler {
-                RemoveEventHandler(handler)
-                self.handler = nil
-            }
-            return hotKeyStatus
-        }
+        guard hotKeyStatus == noErr else { return hotKeyStatus }
+        Self.active.append(self)
         return nil
     }
 
@@ -105,6 +93,8 @@ final class HotKeyController {
             RemoveEventHandler(handler)
             self.handler = nil
         }
+        pressed = false
+        Self.active.removeAll { $0 === self }
     }
 }
 

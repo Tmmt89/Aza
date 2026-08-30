@@ -140,6 +140,12 @@ enum PrayerCountdownPhase: Equatable {
     }
 }
 
+/// Кликабельные зоны home-острова: ручной хит-тест живёт в
+/// IslandPanelController (AppKit роняет события расширенной панели).
+enum HomeZone {
+    case dictation, clipboard, settings, exit, city, geo
+}
+
 /// Состояние ВИДА острова: режим, выделение, видимость, запрос поиска.
 /// Данными владеет ClipboardStore, операциями — ClipboardCommands;
 /// синглтона намеренно нет — хранилище приходит асинхронно, поэтому
@@ -156,6 +162,10 @@ final class IslandStore: ObservableObject {
         }
     }
     @Published private(set) var isIslandVisible = true
+    /// Зона home-острова под курсором. Мышиные события до SwiftUI не
+    /// доходят (клики глотает CGEventTap, mouseMoved панель не получает),
+    /// поэтому hover-подсветку ведёт IslandPanelController опросом курсора.
+    @Published var homeHoverZone: HomeZone?
     @Published private(set) var prayerCountdownPhase: PrayerCountdownPhase = .hidden
     @Published var hasNotch = false
     /// Реальные размеры выреза этого экрана: у моделей они разные, а

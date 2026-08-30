@@ -41,6 +41,16 @@ final class IslandPanelController {
     private var hoverDismissTask: Task<Void, Never>?
     private var spaceObserver: NSObjectProtocol?
     private var clickTap: CFMachPort?
+    private var homeHoverTimer: Timer?
+    /// Идёт пересланный жест: down ушёл в окно, drag/up обязаны дойти
+    /// туда же, даже если курсор его покинул. Цель — панель (nil) или
+    /// обычное окно (настройки).
+    private var forwardingDrag = false
+    private weak var forwardTarget: NSWindow?
+    /// Счёт кликов для синтезированных событий: без него двойной клик
+    /// по карточке буфера (вставка) не распознаётся SwiftUI.
+    private var lastForwardDown: (time: TimeInterval, at: NSPoint) = (0, .zero)
+    private var forwardClickCount = 1
 
     /// Новая панель для каждого размера: входную форму окна WindowServer
     /// замораживает при ПЕРВОМ показе навсегда — ресайз, orderOut/Front,
@@ -94,6 +104,11 @@ final class IslandPanelController {
                 // поиска: у ключевой неактивирующей панели неактивного
                 // приложения клики глохнут.
                 self.transition(to: mode)
+                if mode == .home {
+                    self.startHomeHoverPoll()
+                } else {
+                    self.stopHomeHoverPoll()
+                }
                 self.panel.wantsKey = (mode == .clipboard)
                 if mode == .clipboard {
                     self.panel.makeKeyAndOrderFront(nil)
@@ -252,7 +267,11 @@ final class IslandPanelController {
     private func installClickTap() {
         let mask: CGEventMask = (1 << CGEventType.leftMouseDown.rawValue)
             | (1 << CGEventType.leftMouseUp.rawValue)
+            | (1 << CGEventType.leftMouseDragged.rawValue)
             | (1 << CGEventType.rightMouseDown.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
+            | (1 << CGEventType.scrollWheel.rawValue)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
             options: .defaultTap, eventsOfInterest: mask,
@@ -272,14 +291,34 @@ final class IslandPanelController {
                 // Cocoa — от нижнего левого. Переворот по главному экрану.
                 // Источник tap'a добавлен в main runloop — колбэк на
                 // главном потоке, доступ к MainActor-состоянию корректен.
+                // Клавиатура и скролл: AppKit приложению не доставляет
+                // ВООБЩЕ НИЧЕГО (см. память aza-island-clicks). Сначала
+                // хоткеи (Carbon-диспетчер мёртв, матчим здесь), потом
+                // пересылка в буфер/фразы/настройки.
+                if type == .keyDown || type == .keyUp || type == .scrollWheel {
+                    let handled = MainActor.assumeIsolated { () -> Bool in
+                        if type != .scrollWheel {
+                            let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
+                            let mods = HotKeyBinding.carbonModifiers(fromCG: event.flags)
+                            if HotKeyController.handleTapKey(
+                                keyCode: keyCode, carbonModifiers: mods,
+                                isDown: type == .keyDown
+                            ) { return true }
+                        }
+                        return controller.forwardKeyOrScrollIfNeeded(event, type: type)
+                    }
+                    return handled ? nil : Unmanaged.passUnretained(event)
+                }
                 let loc = event.location
+                let flags = event.flags
                 let consumed = MainActor.assumeIsolated {
-                    controller.handleClick(
+                    return controller.handleClick(
                         at: NSPoint(
                             x: loc.x,
                             y: (NSScreen.screens.first?.frame.maxY ?? 0) - loc.y
                         ),
-                        type: type
+                        type: type,
+                        flags: flags
                     )
                 }
                 // Открывающий клик по плашке глотается целиком: если он
@@ -314,10 +353,56 @@ final class IslandPanelController {
     /// на этой macOS AppKit молча роняет клики по расширенной панели
     /// (доходит только полоса меню-бара), поэтому SwiftUI-кнопкам
     /// события не достаются в принципе.
-    private func handleClick(at mouse: NSPoint, type: CGEventType) -> Bool {
+    private func handleClick(at mouse: NSPoint, type: CGEventType,
+                             flags: CGEventFlags = []) -> Bool {
         let inside = isInsideIsland(mouse)
+        // Диагностика жалобы «значок в меню-баре некликабелен»: фиксируем
+        // каждый клик по полосе меню-бара и решение tap'а по нему.
+        if type == .leftMouseDown,
+           mouse.y >= (NSScreen.screens.first?.frame.maxY ?? 0) - 24 {
+            azaDebugLog("Aza: menubar strip click x=\(Int(mouse.x)) inside=\(inside ? 1 : 0)")
+        }
+        // Пара к пересланному down: drag и up уходят в панель, даже если
+        // курсор уже вне острова — окно не должно остаться с «висящим»
+        // нажатием (жест обязан завершиться там, где начался).
+        if forwardingDrag {
+            switch type {
+            case .leftMouseDragged:
+                forwardClick(to: forwardTarget, at: mouse, type: type, flags: flags)
+                return true
+            case .leftMouseUp:
+                forwardingDrag = false
+                forwardClick(to: forwardTarget, at: mouse, type: type, flags: flags)
+                forwardTarget = nil
+                return true
+            default:
+                break
+            }
+        }
+        if type == .leftMouseDragged { return false }
+        // Окно настроек: AppKit ему клики тоже не доставляет — пересылка,
+        // как у панели. Титулбар (верхние 30 пт) не трогаем: нативные
+        // tracking-петли перетаскивания повисли бы без очереди событий.
+        if type == .leftMouseDown, !(inside && store.isIslandVisible),
+           let window = regularWindow(at: mouse),
+           mouse.y < window.frame.maxY - 30 {
+            if store.isIslandVisible { store.dismissIsland() }
+            forwardingDrag = true
+            forwardTarget = window
+            forwardClick(to: window, at: mouse, type: type, flags: flags)
+            return true
+        }
         let interactive = inside && store.isIslandVisible
             && (store.mode == .idle || store.mode == .home || store.mode == .dictation)
+        // Карточки буфера/фраз: ручных зон нет — down уходит в окно
+        // синтезированным NSEvent (drag и up дошлёт ветка forwardingDrag).
+        if inside, store.isIslandVisible,
+           store.mode == .clipboard || store.mode == .phrases,
+           type == .leftMouseDown {
+            forwardingDrag = true
+            forwardClick(at: mouse, type: type, flags: flags)
+            return true
+        }
         if type == .leftMouseUp {
             guard interactive else { return false }
             switch store.mode {
@@ -334,8 +419,16 @@ final class IslandPanelController {
             }
             return true
         }
-        // mouseDown по кликабельной зоне — глотаем (пара к up).
-        if type == .leftMouseDown, interactive { return true }
+        // mouseDown по кликабельной зоне — глотаем (пара к up); в home
+        // мимо зон down уходит в окно (drag/up дошлёт ветка forwardingDrag):
+        // прочие кликабельные места home работают через sendEvent.
+        if type == .leftMouseDown, interactive {
+            if store.mode == .home, homeZone(at: mouse) == nil {
+                forwardingDrag = true
+                forwardClick(at: mouse, type: type, flags: flags)
+            }
+            return true
+        }
         // mouseDown/rightMouseDown мимо острова — закрыть.
         if store.isIslandVisible, !inside {
             store.dismissIsland()
@@ -343,52 +436,216 @@ final class IslandPanelController {
         return false
     }
 
-    /// Ручной хит-тест кнопок home-острова по координатам клика.
+    /// Клавиатура (стрелки, поиск, Esc) и скролл для буфера: AppKit их
+    /// панели тоже не доставляет. Клавиши — только в режиме буфера при
+    /// ключевой панели и без ⌘ (⌘-сочетания — хоткеи, их глотать нельзя;
+    /// в фразах цифры — тоже хоткеи, там не трогаем). Скролл — когда
+    /// курсор над островом. Событие глотается, чтобы не утекло в фоновое
+    /// приложение.
+    private func forwardKeyOrScrollIfNeeded(_ cgEvent: CGEvent, type: CGEventType) -> Bool {
+        let target: NSWindow
+        if type == .scrollWheel {
+            let loc = cgEvent.location
+            let point = NSPoint(x: loc.x,
+                                y: (NSScreen.screens.first?.frame.maxY ?? 0) - loc.y)
+            if store.isIslandVisible,
+               store.mode == .clipboard || store.mode == .phrases,
+               isInsideIsland(point) {
+                target = panel
+            } else if let window = regularWindow(at: point) {
+                // Скролл страницы настроек — окну под курсором.
+                target = window
+            } else {
+                return false
+            }
+        } else if store.isIslandVisible, store.mode == .clipboard, panel.isKeyWindow {
+            // ⌘-сочетания — хоткеи, не глотаем; исключение — ⌘A
+            // (выделить все карточки), она живёт в панели.
+            if cgEvent.flags.contains(.maskCommand) {
+                let keycode = cgEvent.getIntegerValueField(.keyboardEventKeycode)
+                guard keycode == 0 else { return false } // kVK_ANSI_A
+            }
+            target = panel
+        } else if NSApp.isActive, let key = NSApp.keyWindow, key !== panel,
+                  key.isVisible {
+            // Печать в настройках: приложение активно, окно ключевое —
+            // клавиши по назначению (⌘-правки текста включительно;
+            // хоткеи уже перехвачены выше).
+            target = key
+        } else {
+            return false
+        }
+        guard let event = NSEvent(cgEvent: cgEvent) else { return false }
+        let windowNumber = target.windowNumber
+        Task { @MainActor [weak target] in
+            guard let target, target.windowNumber == windowNumber else { return }
+            target.sendEvent(event)
+        }
+        return true
+    }
+
+    /// Видимое титулованное окно приложения под точкой (настройки).
+    /// Панели острова и служебные окна (статус-бар) не считаются: у их
+    /// AppKit-контролов нативные tracking-петли, которым без живой
+    /// очереди событий нельзя доверять клик.
+    private func regularWindow(at point: NSPoint) -> NSWindow? {
+        NSApp.windows.first {
+            $0 !== panel && $0.isVisible && $0.styleMask.contains(.titled)
+                && $0.frame.contains(point)
+        }
+    }
+
+    /// Досылка проглоченного tap'ом клика в панель вручную: AppKit сам
+    /// события расширенной панели роняет, но panel.sendEvent честно
+    /// прогоняет hitTest и жмёт SwiftUI-кнопки. Асинхронно — из колбэка
+    /// CGEventTap звать sendEvent нельзя: реентерабельная обработка UI
+    /// клинит SwiftUI-мост событий (вчерашние «глохнут кнопки и значок»).
+    private func forwardClick(to explicitTarget: NSWindow? = nil,
+                              at mouse: NSPoint, type: CGEventType,
+                              flags: CGEventFlags = []) {
+        let target = explicitTarget ?? panel
+        let evType: NSEvent.EventType
+        switch type {
+        case .leftMouseDown: evType = .leftMouseDown
+        case .leftMouseDragged: evType = .leftMouseDragged
+        default: evType = .leftMouseUp
+        }
+        // Двойной клик по карточке — «вставить»: SwiftUI различает его
+        // только по clickCount, таймер и радиус — как системные.
+        if type == .leftMouseDown {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastForwardDown.time < NSEvent.doubleClickInterval,
+               abs(mouse.x - lastForwardDown.at.x) < 4,
+               abs(mouse.y - lastForwardDown.at.y) < 4 {
+                forwardClickCount += 1
+            } else {
+                forwardClickCount = 1
+            }
+            lastForwardDown = (now, mouse)
+        }
+        var mods: NSEvent.ModifierFlags = []
+        if flags.contains(.maskShift) { mods.insert(.shift) }
+        if flags.contains(.maskAlternate) { mods.insert(.option) }
+        if flags.contains(.maskControl) { mods.insert(.control) }
+        if flags.contains(.maskCommand) { mods.insert(.command) }
+        let local = target.convertPoint(fromScreen: mouse)
+        let windowNumber = target.windowNumber
+        let clickCount = forwardClickCount
+        if explicitTarget != nil {
+            // Обычное окно (настройки): AppKit-контролы (Picker(.segmented) →
+            // NSSegmentedControl) на sendEvent(down) уходят в нативную
+            // tracking-петлю и ждут mouseUp из очереди событий, а Task на
+            // main actor в tracking-mode не выполняется (main queue не
+            // дренируется) — главный поток висел навсегда, всё приложение
+            // «тормозило». postEvent кладёт событие в ту самую очередь,
+            // которую читают и главный цикл, и tracking-петля; он не
+            // обрабатывает UI реентерабельно, поэтому из tap-колбэка
+            // (main thread) его звать можно и НУЖНО синхронно.
+            guard let event = NSEvent.mouseEvent(
+                with: evType, location: local, modifierFlags: mods,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: windowNumber, context: nil,
+                eventNumber: 0, clickCount: clickCount, pressure: 1
+            ) else { return }
+            NSApp.postEvent(event, atStart: false)
+            return
+        }
+        Task { @MainActor [weak target] in
+            // Панель могла пересоздаться между down и up — устаревшее
+            // событие в новое окно не шлём.
+            guard let target, target.windowNumber == windowNumber,
+                  let event = NSEvent.mouseEvent(
+                      with: evType, location: local, modifierFlags: mods,
+                      timestamp: ProcessInfo.processInfo.systemUptime,
+                      windowNumber: windowNumber, context: nil,
+                      eventNumber: 0, clickCount: clickCount, pressure: 1
+                  ) else { return }
+            target.sendEvent(event)
+        }
+    }
+
+    /// Ручной хит-тест кнопок home-острова по координатам курсора.
     /// ponytail: зоны сняты с макета и привязаны к правому краю панели;
     /// поменяется вёрстка HomeIslandView — сдвинуть зоны. Гео-кнопка
     /// живёт внутри вью (CityLocator) и отсюда недоступна — её клик
     /// открывает настройки намаза, как и город.
-    private func performHomeAction(at mouse: NSPoint) {
+    private func homeZone(at mouse: NSPoint) -> HomeZone? {
         let frame = panel.frame
         // Локальные координаты от ВЕРХНЕГО левого угла панели.
         let x = mouse.x - frame.minX
         let y = frame.maxY - mouse.y
         let w = frame.width
-        azaDebugLog("Aza: home click local=(\(Int(x)), \(Int(y))) width=\(Int(w))")
         // Нижний ряд кнопок правой карточки: Диктовка · Буфер · Настройки.
         if (140...205).contains(y) {
             switch w - x {
-            case 235...320:
-                azaDebugLog("Aza: home action Диктовка")
-                store.dictation.startLatchedFromUI()
-                return
-            case 155..<235:
-                azaDebugLog("Aza: home action Буфер")
-                store.mode = .clipboard
-                return
-            case 75..<155:
-                azaDebugLog("Aza: home action Настройки")
-                store.dismissIsland()
-                store.openSetup()
-                return
+            case 235...320: return .dictation
+            case 155..<235: return .clipboard
+            case 75..<155: return .settings
             default: break
             }
         }
         // Верхняя строка карточки: «Выход» в правом углу.
-        if (52...88).contains(y), (30...110).contains(w - x) {
+        if (52...88).contains(y), (30...110).contains(w - x) { return .exit }
+        // Строка местоположения: гео-стрелка слева от имени города.
+        if (80...112).contains(y), (292...334).contains(w - x) { return .geo }
+        if (80...112).contains(y), (150...290).contains(w - x) { return .city }
+        return nil
+    }
+
+    private func performHomeAction(at mouse: NSPoint) {
+        let frame = panel.frame
+        azaDebugLog("Aza: home click local=(\(Int(mouse.x - frame.minX)), \(Int(frame.maxY - mouse.y))) width=\(Int(frame.width))")
+        switch homeZone(at: mouse) {
+        case .dictation:
+            azaDebugLog("Aza: home action Диктовка")
+            store.dictation.startLatchedFromUI()
+        case .clipboard:
+            azaDebugLog("Aza: home action Буфер")
+            store.mode = .clipboard
+        case .settings:
+            azaDebugLog("Aza: home action Настройки")
+            store.dismissIsland()
+            store.openSetup()
+        case .exit:
             azaDebugLog("Aza: home action Выход")
             NSApp.terminate(nil)
-            return
-        }
-        // Строка местоположения: гео-стрелка и имя города → настройки
-        // намаза с выбором города.
-        if (80...112).contains(y), (150...290).contains(w - x) {
+        case .city:
             azaDebugLog("Aza: home action город")
             store.dismissIsland()
             store.openSetup()
             NotificationCenter.default.post(name: .azaShowPrayerSettings, object: nil)
-            return
+        case .geo:
+            azaDebugLog("Aza: home action геопозиция")
+            // CityLocator живёт внутри HomeIslandView — команда уходит
+            // нотификацией, вью запускает locate() сама.
+            NotificationCenter.default.post(name: .azaLocateCity, object: nil)
+        case nil:
+            break
         }
+    }
+
+    /// Hover-подсветка кнопок home: mouseMoved до панели не доходит
+    /// (AppKit роняет события расширенной панели), поэтому курсор
+    /// опрашивается таймером — только пока home открыт.
+    /// ponytail: опрос 60 мс вместо событийной модели — событий нет физически.
+    private func startHomeHoverPoll() {
+        stopHomeHoverPoll()
+        let timer = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.store.mode == .home else { return }
+                let mouse = NSEvent.mouseLocation
+                let zone = self.isInsideIsland(mouse) ? self.homeZone(at: mouse) : nil
+                if self.store.homeHoverZone != zone { self.store.homeHoverZone = zone }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        homeHoverTimer = timer
+    }
+
+    private func stopHomeHoverPoll() {
+        homeHoverTimer?.invalidate()
+        homeHoverTimer = nil
+        if store.homeHoverZone != nil { store.homeHoverZone = nil }
     }
 
     private func handleMouseMoved(at mouse: NSPoint) {
