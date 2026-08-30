@@ -141,6 +141,9 @@ struct AzaApp: App {
         setupModel.rebindClipboardHotKey = { [weak islandStore] in
             islandStore?.rebindClipboardHotKey()
         }
+        setupModel.clearClipboardHistory = { [weak islandStore] in
+            islandStore?.commands.clearAll()
+        }
         setupModel.rebindPhrasesHotKey = { [weak islandStore] in
             islandStore?.rebindPhrasesHotKey()
         }

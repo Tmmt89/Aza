@@ -250,12 +250,20 @@ final class PrayerStore: ObservableObject {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = city.timeZone
         var days: [(date: Date, times: DayPrayerTimes)] = []
+        // Дни горизонта без расписания (кончилось покрытие таблицы у города
+        // без координат) обязаны попасть в notificationIssue: молча выпавший
+        // день — та же «тихая потеря напоминания», что и сбой center.add.
+        var missingDays = 0
         for offset in 0..<PrayerNotifications.horizonDays {
-            guard let date = calendar.date(byAdding: .day, value: offset, to: now),
-                  let times = times(for: city, on: date) else { continue }
+            guard let date = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
+            guard let times = times(for: city, on: date) else {
+                missingDays += 1
+                continue
+            }
             days.append((date, times))
         }
         let snapshot = days
+        let missing = missingDays
         let previous = schedulingTask
         schedulingTask = Task { [notifications] in
             // Ждём предыдущую пересборку, а не бежим с ней наперегонки.
@@ -270,12 +278,14 @@ final class PrayerStore: ObservableObject {
             guard !Task.isCancelled else { return }
             if auth != .authorized {
                 self.notificationIssue = "Нет разрешения на уведомления — включите Aza в Системных настройках → Уведомления"
+            } else if !outcome.isComplete {
+                self.notificationIssue = outcome.scheduled == 0
+                    ? "Уведомления о намазе не поставлены — проверьте разрешение в Системных настройках"
+                    : "Часть уведомлений не поставлена (\(outcome.failed)) — расписание неполное"
+            } else if missing > 0, PrayerNotifications.anyModeEnabled {
+                self.notificationIssue = "Нет расписания на \(missing) дн. из \(PrayerNotifications.horizonDays) — уведомления на эти дни не поставлены"
             } else {
-                self.notificationIssue = outcome.isComplete
-                    ? nil
-                    : (outcome.scheduled == 0
-                       ? "Уведомления о намазе не поставлены — проверьте разрешение в Системных настройках"
-                       : "Часть уведомлений не поставлена (\(outcome.failed)) — расписание неполное")
+                self.notificationIssue = nil
             }
         }
     }

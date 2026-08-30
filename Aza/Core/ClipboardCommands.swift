@@ -122,7 +122,10 @@ final class ClipboardCommands: ObservableObject {
             // каретке — двойная вставка хуже пропущенной.
             guard let caretBefore else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
-                if TextInsertion.caretPosition(of: element) == caretBefore {
+                // За вторые 180 мс фокус тоже мог уехать: ⌘V летит в ТЕКУЩЕЕ
+                // поле, сверяем приложение и secure заново (как диктовка).
+                if TextInsertion.caretPosition(of: element) == caretBefore,
+                   TextInsertion.focusSafeForPaste(targetPid: targetPid) {
                     _ = TextInsertion.postPasteCommand()
                 }
             }
@@ -150,7 +153,17 @@ final class ClipboardCommands: ObservableObject {
     }
 
     func clearAll() {
-        store?.clearAll()
+        // Хранилище открывается асинхронно (ключ из связки): пока его нет,
+        // молчаливый no-op с рапортом об успехе — ложь пользователю.
+        guard let store else {
+            status = "История ещё загружается — попробуйте через секунду"
+            return
+        }
+        // Окно «Отменить» гасим до очистки: restore() вернул бы удалённую
+        // запись в якобы пустую историю.
+        pendingUndo.forEach { store.finalizeDelete($0) }
+        pendingUndo = []
+        store.clearAll()
         status = "История очищена (избранное сохранено)"
     }
 

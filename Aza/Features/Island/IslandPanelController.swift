@@ -21,9 +21,17 @@ final class IslandPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// Панель неактивирующая, поэтому приложение при клике не активируется и
+/// КАЖДЫЙ клик для macOS — «первый по неактивному приложению»: без этого
+/// override система не доносит mouseDown до вью, и тапы по острову
+/// (открыть большой режим, кнопки внутри) не срабатывают вовсе.
+private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 @MainActor
 final class IslandPanelController {
-    private let panel: IslandPanel
+    private var panel: IslandPanel
     private let store: IslandStore
     private var modeObservation: AnyCancellable?
     private var visibilityObservation: AnyCancellable?
@@ -31,11 +39,17 @@ final class IslandPanelController {
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
     private var hoverDismissTask: Task<Void, Never>?
+    private var spaceObserver: NSObjectProtocol?
+    private var clickTap: CFMachPort?
 
-    init(store: IslandStore) {
-        self.store = store
-        panel = IslandPanel(
-            contentRect: NSRect(origin: .zero, size: store.mode.size(hasNotch: false)),
+    /// Новая панель для каждого размера: входную форму окна WindowServer
+    /// замораживает при ПЕРВОМ показе навсегда — ресайз, orderOut/Front,
+    /// invalidateShadow её не обновляют. Панель, показанную 534×32, клики
+    /// ниже этой полосы не находят никогда, поэтому расширенные режимы
+    /// живут в СВЕЖЕМ окне, созданном сразу финальным кадром.
+    private static func makePanel(frame: NSRect, store: IslandStore) -> IslandPanel {
+        let panel = IslandPanel(
+            contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -43,11 +57,28 @@ final class IslandPanelController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+        // .screenSaver: остров обязан быть выше системных оверлеев полосы
+        // меню-бара и невидимых окон Electron-приложений (VS Code, ChatGPT
+        // держат прозрачное окно 65 пт во всю ширину верха). Так же
+        // поступают notch-приложения (boring.notch, NotchNook).
+        panel.level = .screenSaver
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isMovable = false
         panel.hidesOnDeactivate = false
-        panel.contentView = NSHostingView(rootView: IslandRootView(store: store))
+        let hosting = FirstMouseHostingView(rootView: IslandRootView(store: store))
+        // SwiftUI не управляет кадром окна: его подгонка размера дралась
+        // с анимацией slideIn и оставляла модельный кадр за кромкой.
+        hosting.sizingOptions = []
+        panel.contentView = hosting
+        return panel
+    }
+
+    init(store: IslandStore) {
+        self.store = store
+        panel = Self.makePanel(
+            frame: NSRect(origin: .zero, size: store.mode.size(hasNotch: false)),
+            store: store
+        )
 
         modeObservation = store.$mode
             .removeDuplicates()
@@ -56,13 +87,20 @@ final class IslandPanelController {
                     self?.hoverDismissTask?.cancel()
                     self?.hoverDismissTask = nil
                 }
-                self?.panel.wantsKey = (mode == .clipboard)
+                guard let self else { return }
+                // Сначала transition (может ПЕРЕСОЗДАТЬ панель под новый
+                // размер), потом ключевой статус — уже у актуального окна.
+                // Ключевой панель становится только в режиме буфера ради
+                // поиска: у ключевой неактивирующей панели неактивного
+                // приложения клики глохнут.
+                self.transition(to: mode)
+                self.panel.wantsKey = (mode == .clipboard)
                 if mode == .clipboard {
-                    self?.panel.makeKeyAndOrderFront(nil)
-                } else if self?.panel.isKeyWindow == true {
-                    self?.panel.resignKey()
+                    self.panel.makeKeyAndOrderFront(nil)
+                } else if self.panel.isKeyWindow {
+                    self.panel.resignKey()
                 }
-                self?.transition(to: mode)
+                azaDebugLog("Aza: island mode=\(mode) frame=\(self.panel.frame) key=\(self.panel.isKeyWindow ? 1 : 0)")
             }
 
         visibilityObservation = store.$isIslandVisible
@@ -71,12 +109,37 @@ final class IslandPanelController {
                 self?.setVisible(visible, animated: true)
             }
 
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak store] _ in
-            guard let store else { return }
-            Task { @MainActor in store.updateIslandPresence() }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // Курсор покоится на плашке — событий mouseMoved нет, и
+                // 3-секундная выдержка прятала остров прямо из-под мыши
+                // (пользователь целился кликнуть, а панель исчезала).
+                // Тик продлевает видимость, пока курсор внутри силуэта.
+                if self.store.mode == .idle, self.store.isIslandVisible,
+                   self.panel.isVisible, self.isInsideIsland(NSEvent.mouseLocation) {
+                    self.store.revealCompactIsland()
+                }
+                self.store.updateIslandPresence()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         presenceTimer = timer
+
+        // Панель, показанная на полноэкранном пространстве, «усыновляется»
+        // им (баг macOS): .canJoinAllSpaces перестаёт действовать, и остров
+        // виден только там. Повторный orderFront на каждой смене Space
+        // возвращает панель на текущее пространство.
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.panel.isVisible else { return }
+                self.panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+                self.panel.orderFrontRegardless()
+            }
+        }
         installEventMonitors()
     }
 
@@ -121,17 +184,27 @@ final class IslandPanelController {
             ?? NSScreen.main ?? NSScreen.screens.first
     }
 
-    /// Смена режима — один жест, без промежуточных фаз: кадр панели
-    /// сразу ставится финальным за кромкой (контент к этому моменту уже
-    /// в новом облике — морф в IslandRootView отключён), и новая панель
-    /// целиком опускается из выреза поверх прежней. Подъём старой и
-    /// морф старого кадра давали кашу из трёх дерущихся анимаций.
+    /// Смена режима НЕ анимирует окно (анимация ломала доставку кликов) и
+    /// пересоздаёт экранную поверхность: входная область окна у
+    /// WindowServer замораживается на кадре первого показа, и без
+    /// orderOut/orderFront клики доходили только в полосу бывшей
+    /// компактной плашки (32 пт сверху), кнопки ниже были глухи.
+    /// Смена размера = НОВОЕ окно (см. makePanel): у прежнего входная
+    /// форма для кликов навсегда заморожена по кадру первого показа.
+    /// Окно не анимируется — кадр сразу финальный (анимация ломала
+    /// доставку кликов), одинаковый размер оставляет старое окно.
     private func transition(to mode: IslandMode) {
+        let oldSize = panel.frame.size
         resize(for: mode)
-        guard panel.isVisible,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        else { return }
-        panel.slideIn()
+        let target = panel.frame
+        guard target.size != oldSize else { return }
+        let old = panel
+        let fresh = Self.makePanel(frame: target, store: store)
+        panel = fresh
+        if old.isVisible {
+            fresh.orderFrontRegardless()
+        }
+        old.orderOut(nil)
     }
 
     /// Кадр всегда ставится мгновенно: единственная анимация панели —
@@ -158,7 +231,9 @@ final class IslandPanelController {
     }
 
     private func installEventMonitors() {
-        let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .rightMouseDown]
+        // Клики обрабатывает CGEventTap (installClickTap) — мониторам
+        // остаётся только движение курсора для hover-логики.
+        let events: NSEvent.EventTypeMask = [.mouseMoved]
         globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] event in
             Task { @MainActor in self?.handle(event) }
         }
@@ -166,18 +241,153 @@ final class IslandPanelController {
             Task { @MainActor in self?.handle(event) }
             return event
         }
+        installClickTap()
+    }
+
+    /// Открытие/закрытие острова кликом ловит CGEventTap, а не
+    /// NSEvent-мониторы или SwiftUI-жесты: tap видит каждый клик в HID-
+    /// потоке независимо от того, кому WindowServer доставил событие, —
+    /// глобальный монитор не видит кликов по собственным окнам, а жест в
+    /// неключевой неактивирующей панели хрупок (first mouse).
+    private func installClickTap() {
+        let mask: CGEventMask = (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.leftMouseUp.rawValue)
+            | (1 << CGEventType.rightMouseDown.rawValue)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap, place: .headInsertEventTap,
+            options: .defaultTap, eventsOfInterest: mask,
+            callback: { _, type, event, info in
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let info {
+                        let controller = Unmanaged<IslandPanelController>
+                            .fromOpaque(info).takeUnretainedValue()
+                        Task { @MainActor in controller.reenableClickTap() }
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+                guard let info else { return Unmanaged.passUnretained(event) }
+                let controller = Unmanaged<IslandPanelController>
+                    .fromOpaque(info).takeUnretainedValue()
+                // CG-координаты — от верхнего левого угла главного экрана;
+                // Cocoa — от нижнего левого. Переворот по главному экрану.
+                // Источник tap'a добавлен в main runloop — колбэк на
+                // главном потоке, доступ к MainActor-состоянию корректен.
+                let loc = event.location
+                let consumed = MainActor.assumeIsolated {
+                    controller.handleClick(
+                        at: NSPoint(
+                            x: loc.x,
+                            y: (NSScreen.screens.first?.frame.maxY ?? 0) - loc.y
+                        ),
+                        type: type
+                    )
+                }
+                // Открывающий клик по плашке глотается целиком: если он
+                // дойдёт до окна, перестройка острова (.id(mode)) убьёт
+                // вью посреди обработки клика, и SwiftUI-мост событий
+                // приложения клинит — глохнут и кнопки, и значок меню.
+                return consumed ? nil : Unmanaged.passUnretained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            azaDebugLog("Aza: island click tap FAILED (нет Accessibility?)")
+            return
+        }
+        clickTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        azaDebugLog("Aza: island click tap installed")
+    }
+
+    private func reenableClickTap() {
+        if let clickTap { CGEvent.tapEnable(tap: clickTap, enable: true) }
     }
 
     private func handle(_ event: NSEvent) {
-        let mouse = NSEvent.mouseLocation
-        switch event.type {
-        case .mouseMoved:
-            handleMouseMoved(at: mouse)
-        case .leftMouseDown, .rightMouseDown:
-            guard store.isIslandVisible, !isInsideIsland(mouse) else { return }
+        guard event.type == .mouseMoved else { return }
+        handleMouseMoved(at: NSEvent.mouseLocation)
+    }
+
+    /// Возвращает true, если событие нужно ПРОГЛОТИТЬ (не пускать в
+    /// приложение): клики по острову обрабатываются здесь целиком —
+    /// на этой macOS AppKit молча роняет клики по расширенной панели
+    /// (доходит только полоса меню-бара), поэтому SwiftUI-кнопкам
+    /// события не достаются в принципе.
+    private func handleClick(at mouse: NSPoint, type: CGEventType) -> Bool {
+        let inside = isInsideIsland(mouse)
+        let interactive = inside && store.isIslandVisible
+            && (store.mode == .idle || store.mode == .home || store.mode == .dictation)
+        if type == .leftMouseUp {
+            guard interactive else { return false }
+            switch store.mode {
+            case .idle:
+                azaDebugLog("Aza: island click -> home")
+                store.mode = .home
+            case .dictation:
+                // Вся плашка записи — одна кнопка «стоп»: целиться в
+                // квадратик на полоске в 32 пт не нужно.
+                azaDebugLog("Aza: island click -> stop dictation")
+                store.dictation.stopFromUI()
+            default:
+                performHomeAction(at: mouse)
+            }
+            return true
+        }
+        // mouseDown по кликабельной зоне — глотаем (пара к up).
+        if type == .leftMouseDown, interactive { return true }
+        // mouseDown/rightMouseDown мимо острова — закрыть.
+        if store.isIslandVisible, !inside {
             store.dismissIsland()
-        default:
-            break
+        }
+        return false
+    }
+
+    /// Ручной хит-тест кнопок home-острова по координатам клика.
+    /// ponytail: зоны сняты с макета и привязаны к правому краю панели;
+    /// поменяется вёрстка HomeIslandView — сдвинуть зоны. Гео-кнопка
+    /// живёт внутри вью (CityLocator) и отсюда недоступна — её клик
+    /// открывает настройки намаза, как и город.
+    private func performHomeAction(at mouse: NSPoint) {
+        let frame = panel.frame
+        // Локальные координаты от ВЕРХНЕГО левого угла панели.
+        let x = mouse.x - frame.minX
+        let y = frame.maxY - mouse.y
+        let w = frame.width
+        azaDebugLog("Aza: home click local=(\(Int(x)), \(Int(y))) width=\(Int(w))")
+        // Нижний ряд кнопок правой карточки: Диктовка · Буфер · Настройки.
+        if (140...205).contains(y) {
+            switch w - x {
+            case 235...320:
+                azaDebugLog("Aza: home action Диктовка")
+                store.dictation.startLatchedFromUI()
+                return
+            case 155..<235:
+                azaDebugLog("Aza: home action Буфер")
+                store.mode = .clipboard
+                return
+            case 75..<155:
+                azaDebugLog("Aza: home action Настройки")
+                store.dismissIsland()
+                store.openSetup()
+                return
+            default: break
+            }
+        }
+        // Верхняя строка карточки: «Выход» в правом углу.
+        if (52...88).contains(y), (30...110).contains(w - x) {
+            azaDebugLog("Aza: home action Выход")
+            NSApp.terminate(nil)
+            return
+        }
+        // Строка местоположения: гео-стрелка и имя города → настройки
+        // намаза с выбором города.
+        if (80...112).contains(y), (150...290).contains(w - x) {
+            azaDebugLog("Aza: home action город")
+            store.dismissIsland()
+            store.openSetup()
+            NotificationCenter.default.post(name: .azaShowPrayerSettings, object: nil)
+            return
         }
     }
 
@@ -215,17 +425,14 @@ final class IslandPanelController {
     }
 
     private func isInsideIsland(_ screenPoint: NSPoint) -> Bool {
-        guard panel.frame.contains(screenPoint) else { return false }
-        let localPoint = CGPoint(
-            x: screenPoint.x - panel.frame.minX,
-            y: panel.frame.maxY - screenPoint.y
-        )
-        return IslandSilhouette(
-            shoulder: store.mode.shoulder,
-            bottomRadius: store.mode.bottomRadius
-        )
-            .path(in: CGRect(origin: .zero, size: panel.frame.size))
-            .contains(localPoint)
+        // Прямоугольник кадра, а не силуэт: «плечи» выреза — мёртвые зоны
+        // в несколько пикселей, промах по которым читался как клик мимо
+        // острова и закрывал его. +1 пт сверху — у кромки экрана курсор
+        // репортится ровно на границе, а NSRect.contains верхнюю грань
+        // исключает (та же поправка, что в hoverRect).
+        var rect = panel.frame
+        rect.size.height += 1
+        return rect.contains(screenPoint)
     }
 }
 

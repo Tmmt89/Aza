@@ -50,6 +50,22 @@ struct HotKeyBinding: Codable, Equatable {
         modifiers & UInt32(cmdKey | shiftKey | optionKey | controlKey) != 0
     }
 
+    /// Клавиши-модификаторы: keyCode → флаг NSEvent. Такие клавиши не дают
+    /// keyDown и не регистрируются через Carbon — ловятся монитором
+    /// flagsChanged (ModifierKeyMonitor). Лево/право различимы по keyCode.
+    static let modifierFlagByKeyCode: [UInt16: NSEvent.ModifierFlags] = [
+        UInt16(kVK_Function): .function,
+        UInt16(kVK_Control): .control, UInt16(kVK_RightControl): .control,
+        UInt16(kVK_Option): .option, UInt16(kVK_RightOption): .option,
+        UInt16(kVK_Shift): .shift, UInt16(kVK_RightShift): .shift,
+        UInt16(kVK_Command): .command, UInt16(kVK_RightCommand): .command,
+    ]
+
+    /// Одиночная клавиша-модификатор (Fn, ⌃, ⌥, ⇧, ⌘).
+    var isModifierOnly: Bool {
+        Self.modifierFlagByKeyCode[UInt16(keyCode)] != nil && modifiers == 0
+    }
+
     /// Перевод NSEvent в Carbon-модификаторы.
     static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var result: UInt32 = 0
@@ -74,6 +90,11 @@ struct HotKeyBinding: Codable, Equatable {
             kVK_ANSI_4: "4", kVK_ANSI_5: "5", kVK_ANSI_6: "6", kVK_ANSI_7: "7",
             kVK_ANSI_8: "8", kVK_ANSI_9: "9",
             kVK_Space: "Space", kVK_Return: "↩", kVK_Escape: "Esc", kVK_Tab: "⇥",
+            kVK_Function: "🌐 fn",
+            kVK_Control: "левый ⌃", kVK_RightControl: "правый ⌃",
+            kVK_Option: "левая ⌥", kVK_RightOption: "правая ⌥",
+            kVK_Shift: "левый ⇧", kVK_RightShift: "правый ⇧",
+            kVK_Command: "левый ⌘", kVK_RightCommand: "правый ⌘",
             kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4",
             kVK_F5: "F5", kVK_F6: "F6", kVK_F7: "F7", kVK_F8: "F8",
             kVK_F9: "F9", kVK_F10: "F10", kVK_F11: "F11", kVK_F12: "F12",

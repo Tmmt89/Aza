@@ -1,23 +1,23 @@
 {
-  "builtAtISO8601" : "2026-08-25T23:16:07Z",
+  "builtAtISO8601" : "2026-08-30T19:56:40Z",
   "datasetRevisions" : {
-    "dosham-classic" : "laamxo-dosham@bb08cf1c-ce-ru-headwords",
+    "dosham-classic" : "laamxo-dosham@bb08cf1c-ce-ru-headwords-word1only",
     "nmd" : "NM-development\/nmd-ce-ru-171k-v0@aa2910a0-ce-column",
     "parallel" : "lingtrain-chechen-russian@296c9a27-heldout-every50",
-    "wikipedia" : "wikimedia-wikipedia-20231101.ce@b04c8d1c-filtered-cyr-title-12000"
+    "wikipedia" : "wikimedia-wikipedia-20231101.ce@b04c8d1c-filtered-cyr-title-12000-noforeign"
   },
   "minCount" : 2,
   "stats" : {
-    "droppedBelowMinCount" : 55323,
-    "droppedCharset" : 5454,
-    "droppedRussianFilter" : 1029,
-    "keptWords" : 63601,
+    "droppedBelowMinCount" : 83919,
+    "droppedCharset" : 10901,
+    "droppedRussianFilter" : 1461,
+    "keptWords" : 71260,
     "minCount" : 2,
     "perSourceRawTokens" : {
-      "dosham-classic" : 19965,
-      "nmd" : 1542460,
+      "dosham-classic" : 15735,
+      "nmd" : 1542456,
       "parallel" : 651820,
-      "wikipedia" : 1647900
+      "wikipedia" : 2268959
     },
     "rescuedFromRussianFilter" : [
       "адам",
@@ -26,11 +26,10 @@
       "бен",
       "бо",
       "большая",
+      "большой",
       "ван",
-      "вас",
       "ваша",
       "вина",
-      "власти",
       "во",
       "вон",
       "гора",
@@ -45,25 +44,25 @@
       "ди",
       "дин",
       "до",
+      "жизнь",
       "за",
-      "команда",
+      "из",
+      "история",
+      "книга",
       "ла",
       "лора",
       "ма",
       "миллион",
-      "мира",
       "на",
-      "над",
-      "об",
-      "под",
-      "при",
-      "русские",
+      "наука",
+      "по",
       "сан",
       "со",
       "там",
       "те",
-      "тренер",
-      "университет",
+      "температура",
+      "том",
+      "фильм",
       "хан",
       "ханна",
       "центр",
@@ -72,9 +71,9 @@
     ],
     "scalingFactors" : {
       "dosham-classic" : 1,
-      "nmd" : 0.5007773297200576,
+      "nmd" : 0.5193444740076865,
       "parallel" : 1,
-      "wikipedia" : 0.7031030402330238
+      "wikipedia" : 0.529581627521696
     }
   },
   "toolVersion" : "1.0"

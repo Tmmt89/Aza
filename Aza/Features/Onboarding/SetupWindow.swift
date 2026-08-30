@@ -48,18 +48,16 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        azaDebugLog("Aza: SetupWindow.show, existing=\(window == nil ? 0 : 1)")
         // Профиль по умолчанию считаем ДО показа: переключатель должен
         // сразу стоять на скачанной или рекомендованной модели.
         DictationController.seedDefaultProfileIfNeeded()
         model.refresh()
         if let window {
             NSApp.activate(ignoringOtherApps: true)
-            if window.isVisible {
-                window.makeKeyAndOrderFront(nil)
-            } else {
-                window.slideIn()
-                window.makeKey()
-            }
+            // Без slideIn: первый показ за кромкой замораживает у окна
+            // кликабельную форму там же — все кнопки «не нажимаются».
+            window.makeKeyAndOrderFront(nil)
             return
         }
         // Размер окна подгоняется под содержимое: настройки должны
@@ -97,8 +95,8 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         // Приложение живёт в меню-баре: без явной активации окно
         // откроется без фокуса, и кнопки будут «не нажиматься».
         NSApp.activate(ignoringOtherApps: true)
-        window.slideIn()
-        window.makeKey()
+        // Без slideIn (см. выше): показ сразу на месте.
+        window.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -120,6 +118,9 @@ final class SetupModel: ObservableObject {
     /// IslandStore, замыкания подставляются в AzaApp.
     var rebindClipboardHotKey: () -> Void = {}
     var rebindPhrasesHotKey: () -> Void = {}
+    /// «Очистить историю» (§8.7): избранное сохраняется. Историей владеет
+    /// IslandStore — замыкание подставляется в AzaApp, как ребинды выше.
+    var clearClipboardHistory: () -> Void = {}
     private var cancellables: Set<AnyCancellable> = []
 
     init(prayer: PrayerStore, dictation: DictationController) {

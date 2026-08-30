@@ -1,8 +1,10 @@
 /// Разбиение текста на слова.
 ///
-/// Правило: граница слова — не-буква, но цифра 1 внутри кириллического слова
-/// границей НЕ считается (это подмена палочки). Латинские I и l — буквы,
-/// поэтому они и так остаются внутри слов естественным образом.
+/// Правило: граница слова — не-буква, но подмена палочки (1, I, l, укр. і)
+/// границей НЕ считается, если приклеивается к кириллице. Подмены-буквы
+/// проверяются ДО isLetter: иначе чистые I/l-раны (римские II, III, «Il»)
+/// становились бы токенами и канонизировались в мусорные «ӏӏ»/«ӏӏӏ» —
+/// тот же класс, что дал «ӏ» с частотой 1108 в поставленном словаре.
 public struct Tokenizer {
     public init() {}
 
@@ -19,9 +21,15 @@ public struct Tokenizer {
         }
 
         for (i, c) in chars.enumerated() {
-            if c.isLetter {
-                current.append(c)
-            } else if Palochka.isSubstitution(c), attaches(at: i, chars: chars, current: current) {
+            if Palochka.isSubstitution(c) {
+                if attaches(at: i, chars: chars, current: current) {
+                    current.append(c)
+                } else if c.isLetter, continuesLatin(at: i, chars: chars, current: current) {
+                    current.append(c)
+                } else {
+                    flush()
+                }
+            } else if c.isLetter {
                 current.append(c)
             } else {
                 flush()
@@ -42,5 +50,17 @@ public struct Tokenizer {
         if current.contains(where: Palochka.isCyrillic) { return true }
         let j = index + 1
         return j < chars.count && Palochka.isCyrillic(chars[j])
+    }
+
+    /// I/l продолжают ЛАТИНСКОЕ слово (hello, world): сосед — латинская
+    /// буква, НЕ являющаяся подменой. «Il»/«II»/«III» так не спасаются —
+    /// их соседи сами подмены, и токен из одних подмен не рождается.
+    private func continuesLatin(at index: Int, chars: [Character], current: [Character]) -> Bool {
+        func plainLatin(_ c: Character) -> Bool {
+            Palochka.isLatinLetter(c) && !Palochka.isSubstitution(c)
+        }
+        if let last = current.last, plainLatin(last) { return true }
+        let j = index + 1
+        return j < chars.count && plainLatin(chars[j])
     }
 }

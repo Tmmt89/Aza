@@ -142,16 +142,28 @@ enum PrivacyCleanup {
     /// Приложение завершается только при полном успехе: удалить ключ,
     /// оставив нечитаемую историю, хуже, чем не удалить ничего.
     static func deleteClipboardHistory() -> String? {
-        ClipboardStore.maintenanceSuspended = true
-        if let failure = removeAll([
-            "clipboard-history.bin", "clipboard-history.blobs",
-            "clipboard-history.unreadable.bin",
-        ]) {
-            return failure
+        resumingOnFailure {
+            if let failure = removeAll([
+                "clipboard-history.bin", "clipboard-history.blobs",
+                "clipboard-history.unreadable.bin",
+            ]) {
+                return failure
+            }
+            if let failure = removeMatching(prefixes: keyArtifactPrefixes) { return failure }
+            return deleteKeychainKey()
         }
-        if let failure = removeMatching(prefixes: keyArtifactPrefixes) { return failure }
-        if let failure = deleteKeychainKey() { return failure }
-        quit()
+    }
+
+    /// Обслуживание хранилища замирает только на время удаления: при ошибке
+    /// флаг обязан вернуться, иначе история до перезапуска молча копилась бы
+    /// лишь в памяти (save() выходит по guard, не поднимая lastSaveFailed).
+    /// На успехе флаг остаётся до quit(): сброс дал бы завершению приложения
+    /// записать свежеудалённую историю обратно.
+    private static func resumingOnFailure(_ body: () -> String?) -> String? {
+        ClipboardStore.maintenanceSuspended = true
+        guard let failure = body() else { quit() }
+        ClipboardStore.maintenanceSuspended = false
+        return failure
     }
 
     /// Модели восстановимы загрузкой, поэтому выход не нужен. Вызывающий
@@ -169,29 +181,30 @@ enum PrivacyCleanup {
 
     /// Всё, кроме самой папки и файла блокировки.
     static func deleteEverything() -> String? {
-        ClipboardStore.maintenanceSuspended = true
-        if let failure = removeAll([
-            "clipboard-history.bin", "clipboard-history.blobs",
-            "clipboard-history.unreadable.bin", "user-words.json",
-            "phrases.json", "huggingface", "prayer-schedules",
-        ]) {
-            return failure
+        resumingOnFailure {
+            if let failure = removeAll([
+                "clipboard-history.bin", "clipboard-history.blobs",
+                "clipboard-history.unreadable.bin", "user-words.json",
+                "phrases.json", "huggingface", "prayer-schedules",
+            ]) {
+                return failure
+            }
+            // Карантин фраз нумеруется — убираем по префиксу, как ключи.
+            if let failure = removeMatching(prefixes: keyArtifactPrefixes
+                + ["phrases.unreadable"]) { return failure }
+            if let failure = deleteKeychainKey() { return failure }
+            let center = UNUserNotificationCenter.current()
+            center.removeAllPendingNotificationRequests()
+            // Уже показанные уведомления — тоже данные Aza (город, времена):
+            // «удалить всё» убирает их из Центра уведомлений.
+            center.removeAllDeliveredNotifications()
+            // Настройки удаляем последними и сразу выходим: обычное завершение
+            // успело бы записать @AppStorage обратно.
+            UserDefaults.standard.removePersistentDomain(
+                forName: Bundle.main.bundleIdentifier ?? "com.tmmt.Aza")
+            UserDefaults.standard.synchronize()
+            return nil
         }
-        // Карантин фраз нумеруется — убираем по префиксу, как ключи.
-        if let failure = removeMatching(prefixes: keyArtifactPrefixes
-            + ["phrases.unreadable"]) { return failure }
-        if let failure = deleteKeychainKey() { return failure }
-        let center = UNUserNotificationCenter.current()
-        center.removeAllPendingNotificationRequests()
-        // Уже показанные уведомления — тоже данные Aza (город, времена):
-        // «удалить всё» убирает их из Центра уведомлений.
-        center.removeAllDeliveredNotifications()
-        // Настройки удаляем последними и сразу выходим: обычное завершение
-        // успело бы записать @AppStorage обратно.
-        UserDefaults.standard.removePersistentDomain(
-            forName: Bundle.main.bundleIdentifier ?? "com.tmmt.Aza")
-        UserDefaults.standard.synchronize()
-        quit()
     }
 
     /// Возвращает описание первой ошибки. Отсутствующий файл ошибкой не

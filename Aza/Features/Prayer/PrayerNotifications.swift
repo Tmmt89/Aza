@@ -115,6 +115,12 @@ final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
         return mode
     }
 
+    /// Хотя бы один намаз реально уведомляется. Когда всё выключено,
+    /// пустой план — норма, а не «расписание неполное».
+    static var anyModeEnabled: Bool {
+        PrayerKind.allCases.contains { mode(for: $0) != .off }
+    }
+
     static var reminderMinutes: Int {
         let stored = UserDefaults.standard.integer(forKey: reminderMinutesKey)
         return stored > 0 ? stored : 10

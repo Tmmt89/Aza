@@ -1,3 +1,4 @@
+import AppKit
 import Carbon.HIToolbox
 
 /// Registers one global hot key via Carbon with press AND release callbacks
@@ -104,5 +105,70 @@ final class HotKeyController {
             RemoveEventHandler(handler)
             self.handler = nil
         }
+    }
+}
+
+/// Одиночная клавиша-модификатор (Fn, ⌃, ⌥, ⇧, ⌘) как хоткей. Модификаторы
+/// не дают keyDown и Carbon их не регистрирует, поэтому слушаем flagsChanged —
+/// тот же механизм, что у правой ⌥ в IslandStore. Глобальный монитор
+/// молчит без Accessibility (приложение и так его запрашивает).
+@MainActor
+final class ModifierKeyMonitor {
+    private var monitors: [Any] = []
+    private var held = false
+    private let keyCode: UInt16
+    private let flag: NSEvent.ModifierFlags
+    private let onPress: () -> Void
+    private let onRelease: (() -> Void)?
+
+    /// nil, если keyCode — не клавиша-модификатор.
+    init?(keyCode: UInt16, onPress: @escaping () -> Void,
+          onRelease: (() -> Void)? = nil) {
+        guard let flag = HotKeyBinding.modifierFlagByKeyCode[keyCode] else { return nil }
+        self.keyCode = keyCode
+        self.flag = flag
+        self.onPress = onPress
+        self.onRelease = onRelease
+    }
+
+    func register() {
+        guard monitors.isEmpty else { return }
+        let handle: (NSEvent) -> Void = { [weak self] event in
+            MainActor.assumeIsolated { self?.handle(event) }
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(
+            matching: .flagsChanged, handler: handle) {
+            monitors.append(global)
+        } else {
+            azaDebugLog("Aza: fn global monitor install FAILED (нет Accessibility?)")
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(
+            matching: .flagsChanged, handler: { handle($0); return $0 }) {
+            monitors.append(local)
+        }
+    }
+
+    private func handle(_ event: NSEvent) {
+        guard event.keyCode == keyCode else { return }
+        // Caps Lock — состояние, а не удерживаемый модификатор (см.
+        // правую ⌥ в IslandStore).
+        let flags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting(.capsLock)
+        if !held {
+            // Нажатие засчитываем только «в одиночку»: ⌃ внутри ⌘⌃-комбо
+            // не должен запускать диктовку.
+            guard flags == flag else { return }
+            held = true
+            onPress()
+        } else if !flags.contains(flag) {
+            held = false
+            onRelease?()
+        }
+    }
+
+    func stop() {
+        monitors.forEach { NSEvent.removeMonitor($0) }
+        monitors = []
     }
 }

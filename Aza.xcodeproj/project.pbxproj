@@ -29,6 +29,7 @@
 		BBBB00000000000000000213 /* Aza/Resources/tone-chime.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000113 /* Aza/Resources/tone-chime.caf */; };
 		BBBB00000000000000000214 /* Aza/Resources/tone-twotone.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000114 /* Aza/Resources/tone-twotone.caf */; };
 		BBBB00000000000000000215 /* Aza/Resources/tone-warm.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000115 /* Aza/Resources/tone-warm.caf */; };
+		BBBB00000000000000000241 /* Aza/Core/SecureFieldDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000141 /* Aza/Core/SecureFieldDetector.swift */; };
 		BBBB00000000000000000221 /* Aza/Resources/adhan-1.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000121 /* Aza/Resources/adhan-1.caf */; };
 		BBBB00000000000000000222 /* Aza/Resources/adhan-2.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000122 /* Aza/Resources/adhan-2.caf */; };
 		BBBB00000000000000000223 /* Aza/Resources/adhan-3.caf in Resources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000123 /* Aza/Resources/adhan-3.caf */; };
@@ -70,6 +71,7 @@
 		BBBB00000000000000000113 /* Aza/Resources/tone-chime.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-chime.caf"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000114 /* Aza/Resources/tone-twotone.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-twotone.caf"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000115 /* Aza/Resources/tone-warm.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/tone-warm.caf"; sourceTree = SOURCE_ROOT; };
+		BBBB00000000000000000141 /* Aza/Core/SecureFieldDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/SecureFieldDetector.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000121 /* Aza/Resources/adhan-1.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/adhan-1.caf"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000122 /* Aza/Resources/adhan-2.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/adhan-2.caf"; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000123 /* Aza/Resources/adhan-3.caf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Aza/Resources/adhan-3.caf"; sourceTree = SOURCE_ROOT; };
@@ -140,6 +142,7 @@
 				BBBB0000000000000000010F /* Aza/Features/Phrases/PhraseStore.swift */,
 				BBBB00000000000000000106 /* Aza/Core/ExcludedApps.swift */,
 				BBBB00000000000000000107 /* Aza/Core/TextInsertion.swift */,
+				BBBB00000000000000000141 /* Aza/Core/SecureFieldDetector.swift */,
 				BBBB00000000000000000108 /* Aza/Features/Layout/LayoutCorrectionEngine.swift */,
 				BBBB00000000000000000109 /* Aza/Features/Island/PrayerSchedule.swift */,
 				BBBB0000000000000000010A /* Aza/Features/Prayer/PrayerProvider.swift */,
@@ -299,6 +302,7 @@
 				BBBB00000000000000000205 /* Aza/Core/UserWordLists.swift in Sources */,
 				BBBB00000000000000000206 /* Aza/Core/ExcludedApps.swift in Sources */,
 				BBBB00000000000000000207 /* Aza/Core/TextInsertion.swift in Sources */,
+				BBBB00000000000000000241 /* Aza/Core/SecureFieldDetector.swift in Sources */,
 				BBBB00000000000000000208 /* Aza/Features/Layout/LayoutCorrectionEngine.swift in Sources */,
 				BBBB00000000000000000209 /* Aza/Features/Island/PrayerSchedule.swift in Sources */,
 				BBBB0000000000000000020A /* Aza/Features/Prayer/PrayerProvider.swift in Sources */,

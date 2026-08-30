@@ -57,6 +57,25 @@ final class LayoutCorrectionEngineTests: XCTestCase {
         ], correctedWord: "меня"))
     }
 
+    func testRussianContextRemapRespectsAmbiguityAbstention() {
+        // Фикс аудита 29.08: бэквард-контекст не имеет права ретроактивно
+        // обойти воздержание прямого пути («vfkj» может быть чеченским
+        // «хало»). Обычное русское слово при этом ремапится.
+        let saved = UserDefaults.standard.object(
+            forKey: ChechenAutocorrect.ambiguityStorageKey)
+        defer { UserDefaults.standard.set(saved, forKey: ChechenAutocorrect.ambiguityStorageKey) }
+        ChechenAutocorrect.isAmbiguityAbstentionEnabled = true
+        XCTAssertNil(LayoutCorrectionEngine.russianContextRemap(for: "vfkj"))
+        XCTAssertEqual(LayoutCorrectionEngine.russianContextRemap(for: "ghbdtn"), "привет")
+    }
+
+    func testOneEditMatchGuardsLatinization() {
+        // «мало» в одной правке от частотного чеченского «хало» — улика
+        // неоднозначности; короче четырёх букв предохранитель молчит.
+        XCTAssertTrue(ChechenLexicon.shared.hasOneEditMatch(of: "мало"))
+        XCTAssertFalse(ChechenLexicon.shared.hasOneEditMatch(of: "код"))
+    }
+
     func testPalochkaHypothesisAndAmbiguityAbstention() {
         XCTAssertEqual(LayoutCorrectionEngine.normalizedPalochka("1алам"), "ӏалам")
         XCTAssertTrue(LayoutCorrectionEngine.firstKeyAlternativeIsChechen(

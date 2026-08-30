@@ -46,6 +46,7 @@ struct SetupView: View {
     /// Сброс фраз требует второго нажатия: молчаливая потеря правок —
     /// ловушка.
     @State private var confirmPhraseReset = false
+    @State private var confirmHistoryClear = false
     /// Ошибка удаления модели; заодно любое изменение перечитывает
     /// isModelCached с диска при перерисовке.
     @State private var modelDeleteError: String?
@@ -490,7 +491,7 @@ struct SetupView: View {
     // распознаётся (язык, свои слова, модель), и в конце — чем звучит.
     private var dictationCard: some View {
         card("Диктовка") {
-            HotKeyRecorder(title: "Клавиша", binding: $dictationHotKey) { binding in
+            HotKeyRecorder(title: "Клавиша", binding: $dictationHotKey, allowModifierKeys: true) { binding in
                 binding.save(HotKeyBinding.dictationKey)
                 model.dictation.rebindHotKey()
             }
@@ -587,6 +588,9 @@ struct SetupView: View {
                     model.dictation.downloadSelectedModel()
                 }
                 .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                // Скачивание обнуляет модель в памяти — во время диктовки
+                // нельзя, как и удаление (guard дублируется в контроллере).
+                .disabled(model.dictation.state != .idle)
             }
             divider
             HStack {
@@ -835,6 +839,24 @@ struct SetupView: View {
                 .onChange(of: copySound) { _, sound in
                     IslandStore.playCopySound(sound)
                 }
+            }
+            divider
+            HStack {
+                if confirmHistoryClear {
+                    Text("Избранное останется")
+                        .font(AzaStyle.caption)
+                        .foregroundStyle(AzaStyle.warning)
+                }
+                Spacer(minLength: 8)
+                // §8.7: очистка истории с подтверждением, как сброс фраз.
+                Button(confirmHistoryClear ? "Точно очистить" : "Очистить историю") {
+                    if confirmHistoryClear {
+                        model.clearClipboardHistory()
+                    }
+                    confirmHistoryClear.toggle()
+                }
+                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.warning,
+                                                   prominent: confirmHistoryClear))
             }
         }
     }

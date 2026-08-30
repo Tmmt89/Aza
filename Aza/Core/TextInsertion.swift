@@ -326,6 +326,20 @@ enum TextInsertion {
         ) == .success
     }
 
+    /// Перепроверка перед ОТЛОЖЕННЫМ синтетическим ⌘V: за задержку фокус
+    /// мог уехать в другое приложение или в защищённое поле, не поднимающее
+    /// SecureEventInput (guard в postPasteCommand его не поймал бы).
+    /// targetPid == nil — цель неизвестна (фронтмостом была сама Aza),
+    /// сверяем только secure. Эталон паттерна — диктовка (аудит 30.08).
+    static func focusSafeForPaste(targetPid: pid_t?) -> Bool {
+        let focused = focusedElement()
+        if let focused, SecureFieldDetector.isSecure(focused) { return false }
+        guard let targetPid else { return true }
+        let pidNow = focused.flatMap(processID(of:))
+            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        return pidNow == targetPid
+    }
+
     /// Синтетический ⌘V — последний рубеж для приложений, чьё AX-дерево не
     /// принимает ни прямую запись, ни синтетический юникод (Electron до
     /// пробуждения). Текст обязан уже лежать в буфере обмена. Флаги события

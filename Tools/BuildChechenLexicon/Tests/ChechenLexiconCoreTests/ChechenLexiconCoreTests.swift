@@ -24,6 +24,15 @@ final class ChechenLexiconCoreTests: XCTestCase {
         XCTAssertEqual(Tokenizer().tokens(in: "hello world"), ["hello", "world"])
     }
 
+    func testPureSubstitutionRunsDoNotFormWords() {
+        // Римские цифры и I/l-раны не приклеены к кириллице — не токены:
+        // иначе канонизация рождала бы мусорные «ӏӏ»/«ӏӏӏ» (найдены в
+        // поставленном словаре, аудит 30.08). Палочка в начале слова и
+        // внутри слова остаётся словом.
+        XCTAssertEqual(Tokenizer().tokens(in: "II дара III Il"), ["дара"])
+        XCTAssertEqual(Tokenizer().tokens(in: "Iаьржа гIала"), ["Iаьржа", "гIала"])
+    }
+
     // MARK: Нормализация палочки
 
     func testCanonicalReplacesAllSubstitutions() {
@@ -95,6 +104,22 @@ final class ChechenLexiconCoreTests: XCTestCase {
                                        texts: ["Москва Москва со"])
         let (entries, _) = builder.finalize(minCount: 2)
         XCTAssertEqual(entries.first { $0.word == "москва" }?.capitalOnly, true)
+    }
+
+    func testPalochkaOnlyWordsFilteredOut() {
+        // «ӏ»/«ӏӏ» словами не бывают (палочка лишь модифицирует согласную
+        // или открывает слово), а однобуквенный союз «а» — легитимен.
+        XCTAssertFalse(LexiconBuilder.isValidWord(String(Palochka.character)))
+        XCTAssertFalse(LexiconBuilder.isValidWord(
+            String(repeating: Palochka.character, count: 2)))
+        XCTAssertTrue(LexiconBuilder.isValidWord("а"))
+        XCTAssertTrue(LexiconBuilder.isValidWord("г\(Palochka.character)ала"))
+        // Знаки и изолированная «ы» — OCR-осколки, не слова; внутри
+        // слова те же буквы легитимны (къона).
+        XCTAssertFalse(LexiconBuilder.isValidWord("ь"))
+        XCTAssertFalse(LexiconBuilder.isValidWord("ъ"))
+        XCTAssertFalse(LexiconBuilder.isValidWord("ы"))
+        XCTAssertTrue(LexiconBuilder.isValidWord("къона"))
     }
 
     func testLatinWordsFilteredOut() {

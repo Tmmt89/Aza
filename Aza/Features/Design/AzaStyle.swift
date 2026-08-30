@@ -84,11 +84,20 @@ extension NSWindow {
         }
         setFrame(target.offsetBy(dx: 0, dy: offscreenLift), display: false)
         orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { context in
+        NSAnimationContext.runAnimationGroup({ context in
             context.duration = AzaMotion.expand
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
             animator().setFrame(target, display: true)
-        }
+        }, completionHandler: {
+            MainActor.assumeIsolated {
+                // Прерванная анимация оставляет модельный кадр за кромкой
+                // (окно видно, а клики летят «мимо») — финал закрепляется
+                // явно. Тот же прямоугольник AppKit ест как no-op, поэтому
+                // сдвиг на 1 пт и обратно.
+                self.setFrame(target.offsetBy(dx: 0, dy: 1), display: false)
+                self.setFrame(target, display: true)
+            }
+        })
     }
 
     func slideOut(completion: @escaping @MainActor () -> Void) {

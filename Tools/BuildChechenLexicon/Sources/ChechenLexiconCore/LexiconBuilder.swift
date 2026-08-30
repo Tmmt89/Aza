@@ -103,8 +103,17 @@ public final class LexiconBuilder {
 
     /// Слово годится в словарь, только если состоит из кириллицы
     /// (палочка U+04C0 входит). Латиница, цифры, знаки — отбраковка.
+    /// Слово из одних палочек («ӏ», «ӏӏ») словом не бывает: палочка лишь
+    /// модифицирует согласную или открывает слово перед гласной. Фильтр
+    /// длины не годится — однобуквенные союзы («а») легитимны, но знаки
+    /// ь/ъ и изолированная «ы» словами не бывают нигде (OCR-осколки).
+    /// ponytail: остальной однобуквенный хвост (м, ш, в…) — шум корпуса
+    /// в обоих артефактах; полная курация — за владельцем (allowlist).
     public static func isValidWord(_ word: String) -> Bool {
-        !word.isEmpty && word.allSatisfy(Palochka.isCyrillic)
+        guard !word.isEmpty, word.allSatisfy(Palochka.isCyrillic),
+              !word.allSatisfy({ Palochka.isAnyPalochka($0) }) else { return false }
+        if word.count == 1, "ьъы".contains(word) { return false }
+        return true
     }
 
     public func finalize(minCount: Int = 2,

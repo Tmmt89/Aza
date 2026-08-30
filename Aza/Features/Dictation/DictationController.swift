@@ -37,6 +37,10 @@ final class DictationController: ObservableObject {
     /// Явная загрузка выбранной модели по кнопке (§5.4): пользователь
     /// видит, что качается и сколько осталось.
     func downloadSelectedModel() {
+        // Во время записи/распознавания обнулять whisper нельзя: prepareModel
+        // тут же вышел бы по своему guard state == .idle, и живая диктовка
+        // осталась бы без модели (кнопка задизейблена, guard — второй рубеж).
+        guard state == .idle else { return }
         suppressPrewarm = false
         // В памяти может лежать ДРУГОЙ профиль — тогда prepareModel
         // молча выходил по guard whisper == nil, и кнопка не работала.
@@ -163,6 +167,9 @@ final class DictationController: ObservableObject {
     }
 
     private var hotKey: HotKeyController?
+    /// Одиночный модификатор (Fn, ⌃, ⌥…) идёт мимо Carbon — через
+    /// монитор flagsChanged.
+    private var fnMonitor: ModifierKeyMonitor?
     private var whisper: WhisperKit?
     private var audio: AudioProcessor?
     private var failsafeTimer: Timer?
@@ -287,7 +294,7 @@ final class DictationController: ObservableObject {
     }
 
     func start() {
-        guard hotKey == nil else { return }
+        guard hotKey == nil, fnMonitor == nil else { return }
         // Прогрев: модель поднимается в память ~8 секунд, и без него
         // ПЕРВОЕ нажатие уходит в ожидание, а пользователь видит «ничего
         // не происходит». Греем только когда доступ к микрофону уже есть —
@@ -303,8 +310,26 @@ final class DictationController: ObservableObject {
             // клавиши во время прогрева сразу пишет звук.
             self?.prepareModel(ownsState: false)
         }
+        installHotKey()
+    }
+
+    /// Регистрация текущего сочетания: Carbon для обычных клавиш,
+    /// монитор flagsChanged для одиночного модификатора (Fn, ⌃, ⌥…).
+    private func installHotKey() {
         let binding = HotKeyBinding.load(HotKeyBinding.dictationKey,
                                          fallback: .dictationDefault)
+        if binding.isModifierOnly,
+           let monitor = ModifierKeyMonitor(
+               keyCode: UInt16(binding.keyCode),
+               onPress: { [weak self] in self?.keyDown() },
+               onRelease: { [weak self] in self?.keyUp() }
+           ) {
+            monitor.register()
+            fnMonitor = monitor
+            status = "Диктовка: удерживайте \(binding.display)"
+            azaDebugLog("Aza: dictation modifier monitor installed \(binding.display)")
+            return
+        }
         let controller = HotKeyController(
             keyCode: binding.keyCode,
             modifiers: binding.modifiers,
@@ -493,6 +518,8 @@ final class DictationController: ObservableObject {
     func stop() {
         hotKey?.stop()
         hotKey = nil
+        fnMonitor?.stop()
+        fnMonitor = nil
         cancelRecording()
     }
 
@@ -500,22 +527,9 @@ final class DictationController: ObservableObject {
     func rebindHotKey() {
         hotKey?.stop()
         hotKey = nil
-        let binding = HotKeyBinding.load(HotKeyBinding.dictationKey,
-                                         fallback: .dictationDefault)
-        let controller = HotKeyController(
-            keyCode: binding.keyCode, modifiers: binding.modifiers, id: 2,
-            onPress: { [weak self] in self?.keyDown() },
-            onRelease: { [weak self] in self?.keyUp() }
-        )
-        hotKey = controller
-        if controller.register() != nil {
-            status = "Сочетание \(binding.display) занято другой программой"
-            azaDebugLog("Aza: dictation rebind FAILED \(binding.display)")
-            hotKey = nil
-        } else {
-            status = "Диктовка: удерживайте \(binding.display)"
-            azaDebugLog("Aza: dictation hotkey rebound to \(binding.display)")
-        }
+        fnMonitor?.stop()
+        fnMonitor = nil
+        installHotKey()
     }
 
     // MARK: Жизненный цикл записи
@@ -1466,9 +1480,10 @@ final class DictationController: ObservableObject {
         }
         azaDebugLog("Aza: dictation done lang=\(language) len=\(text.count)")
 
-        // Транскрипт живёт во вкладке «Диктовка», а не в буфере: буфер
-        // ниже используется лишь как ТРАНСПОРТ для ⌘V-фолбэков и после
-        // вставки возвращается к прежнему содержимому.
+        // Транскрипт живёт во вкладке «Диктовка»; при успешной вставке
+        // буфер ниже используется лишь как ТРАНСПОРТ для ⌘V-фолбэков и
+        // возвращается к прежнему содержимому. Если вставлять некуда —
+        // транскрипт остаётся в буфере настоящей копией (guard ниже).
         // Персист истории — вне ВСЕХ путей вставки, включая отложенный
         // ⌘V-добив на 180 мс: AES + запись на главном потоке не должны
         // задержать и его. Планируется здесь (до любых ранних выходов —
@@ -1497,9 +1512,16 @@ final class DictationController: ObservableObject {
         azaDebugLog("Aza: dictation insert target=\(element == nil ? 0 : 1) current=\(current == nil ? 0 : 1) sameApp=\(sameApp ? 1 : 0)")
 
         guard sameApp else {
-            // Вставлять некуда — буфер не трогаем вовсе: транскрипт уже
-            // едет в свою вкладку отложенным персистом выше.
-            status = "Транскрипт во вкладке «Диктовка»: \(text.prefix(60))"
+            // Вставлять некуда — кладём транскрипт в буфер ОБЫЧНОЙ записью
+            // (без TransientType и без возврата): правило для пользователя
+            // одно — текст либо уже в поле, либо в ⌘V. Прежнее содержимое
+            // буфера не теряется — оно уже в истории Aza. Монитор запись
+            // пропускает: транскрипт едет во вкладку персистом выше,
+            // дубль в общей истории не нужен.
+            let pasteboard = NSPasteboard.general
+            PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            status = "Скопировано — нажмите ⌘V: \(text.prefix(60))"
             applyPendingProfileChange()
             return
         }

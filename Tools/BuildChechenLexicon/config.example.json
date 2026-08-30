@@ -14,7 +14,7 @@
     {
       "id": "dosham-classic",
       "url": "datasets/dosham_words.txt",
-      "revision": "laamxo-dosham@bb08cf1c-ce-ru-headwords",
+      "revision": "laamxo-dosham@bb08cf1c-ce-ru-headwords-word1only",
       "columnIndex": null,
       "hasHeader": false,
       "maxShare": 0.35,
@@ -23,10 +23,10 @@
     {
       "id": "wikipedia",
       "url": "datasets/wikipedia_corpus.txt",
-      "revision": "wikimedia-wikipedia-20231101.ce@b04c8d1c-filtered-cyr-title-12000",
+      "revision": "wikimedia-wikipedia-20231101.ce@b04c8d1c-filtered-cyr-title-12000-noforeign",
       "columnIndex": null,
       "hasHeader": false,
-      "maxShare": 0.3
+      "maxShare": 0.45
     },
     {
       "id": "nmd",
@@ -34,7 +34,7 @@
       "revision": "NM-development/nmd-ce-ru-171k-v0@aa2910a0-ce-column",
       "columnIndex": null,
       "hasHeader": false,
-      "maxShare": 0.2
+      "maxShare": 0.3
     }
   ]
 }

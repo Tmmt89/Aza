@@ -465,10 +465,16 @@ final class IslandStore: ObservableObject {
         // прячем приложение, чтобы фокус вернулся в поле пользователя, —
         // и даём системе время на переключение, как делает буфер.
         let appWasActive = NSApp.isActive
+        // Цель — приложение, активное до скрытия наших окон (как в буфере):
+        // отложенный ⌘V-фолбэк не должен улететь туда, куда пользователь
+        // успел переключиться. Фронтмост — сама Aza: цель неизвестна, nil.
+        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let targetPid = frontPid == ProcessInfo.processInfo.processIdentifier
+            ? nil : frontPid
         if appWasActive { NSApp.hide(nil) }
         azaDebugLog("Aza: insertPhrase index=\(index) appWasActive=\(appWasActive ? 1 : 0)")
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(140)) {
-            Self.attemptPhraseInsertion(text, retriesLeft: 2)
+            Self.attemptPhraseInsertion(text, retriesLeft: 2, targetPid: targetPid)
         }
     }
 
@@ -476,7 +482,8 @@ final class IslandStore: ObservableObject {
     /// доступности асинхронно после пробуждения, и первая попытка часто
     /// не находит поле. Не вышло — фраза кладётся в буфер и вставляется
     /// синтетическим ⌘V: это работает там, где AX бессилен.
-    private static func attemptPhraseInsertion(_ text: String, retriesLeft: Int) {
+    private static func attemptPhraseInsertion(_ text: String, retriesLeft: Int,
+                                               targetPid: pid_t?) {
         if let element = TextInsertion.focusedElement() {
             guard !SecureFieldDetector.isSecure(element) else {
                 azaDebugLog("Aza: insertPhrase secure field, aborting")
@@ -497,7 +504,7 @@ final class IslandStore: ObservableObject {
                         // вставка хуже пропущенной.
                         guard caretAfter == caretBefore else { return }
                         azaDebugLog("Aza: insertPhrase caret unmoved, paste fallback")
-                        pastePhrase(text)
+                        pastePhrase(text, targetPid: targetPid)
                     }
                     return
                 }
@@ -506,15 +513,23 @@ final class IslandStore: ObservableObject {
         guard retriesLeft == 0 else {
             azaDebugLog("Aza: insertPhrase field not ready, retries left \(retriesLeft)")
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(220)) {
-                attemptPhraseInsertion(text, retriesLeft: retriesLeft - 1)
+                attemptPhraseInsertion(text, retriesLeft: retriesLeft - 1,
+                                       targetPid: targetPid)
             }
             return
         }
-        pastePhrase(text)
+        pastePhrase(text, targetPid: targetPid)
     }
 
     /// Последний рубеж: фраза в системный буфер + синтетический ⌘V.
-    private static func pastePhrase(_ text: String) {
+    /// Единая точка всех ⌘V острова: сюда стекаются и ретраи, и фолбэк
+    /// неподвижной каретки, поэтому сверка фокуса живёт именно здесь —
+    /// к моменту вызова прошло от 140 мс до ~1 с после хоткея.
+    private static func pastePhrase(_ text: String, targetPid: pid_t?) {
+        guard TextInsertion.focusSafeForPaste(targetPid: targetPid) else {
+            azaDebugLog("Aza: insertPhrase paste fallback blocked — focus moved or secure")
+            return
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -636,6 +651,9 @@ final class IslandStore: ObservableObject {
     }
 
     func dismissIsland() {
+        // Диктовку кликом мимо острова не сворачиваем: панель живёт,
+        // пока запись не завершится сама (dictation.$state → .idle).
+        guard mode != .dictation else { return }
         mode = .idle
         hideCompactIsland()
     }

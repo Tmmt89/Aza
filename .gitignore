@@ -27,3 +27,5 @@ build_release/
 dist/
 build/
 Tools/BuildChechenLexicon/out_lexicon_new/
+Tools/BuildChechenLexicon/out_lexicon_calibrated/
+Tools/BuildChechenLexicon/out_lexicon_new/

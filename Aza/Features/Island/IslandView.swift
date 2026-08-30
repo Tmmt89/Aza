@@ -5,6 +5,10 @@ import SwiftUI
 struct IslandRootView: View {
     @ObservedObject var store: IslandStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// «Выезд» при смене режима: окно анимировать нельзя (ломает доставку
+    /// кликов — см. IslandPanelController.transition), поэтому из-за
+    /// кромки опускается сам контент внутри уже финального кадра.
+    @State private var slideOffset: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -204,7 +208,10 @@ private struct IdleIslandView: View {
             .animation(.easeInOut(duration: 0.25), value: store.recentCopy?.id)
         }
         .contentShape(Rectangle())
-        .onTapGesture { store.mode = .home }
+        // Тап открывает home через CGEventTap в IslandPanelController, а
+        // не SwiftUI-жестом: жест на этой вью запускал mouse-tracking,
+        // который смена режима (.id(mode)) убивала посреди клика вместе
+        // с вью — после этого AppKit переставал доставлять окну клики.
         .accessibilityHint("Открыть Aza")
     }
 
@@ -510,10 +517,15 @@ private struct HomeIslandView: View {
                             // состоянию контроллера. Раньше кнопка лишь
                             // переключала вид: волна и REC без записи.
                             ActionButton("Диктовка", symbol: "mic") {
+                                azaDebugLog("Aza: BUTTON Диктовка fired")
                                 store.dictation.startLatchedFromUI()
                             }
-                            ActionButton("Буфер", symbol: "clipboard") { store.mode = .clipboard }
+                            ActionButton("Буфер", symbol: "clipboard") {
+                                azaDebugLog("Aza: BUTTON Буфер fired")
+                                store.mode = .clipboard
+                            }
                             ActionButton("Настройки", symbol: "gearshape") {
+                                azaDebugLog("Aza: BUTTON Настройки fired")
                                 // Остров — панель без фокуса, поэтому окно
                                 // настройки открывает и активирует само себя.
                                 store.dismissIsland()
@@ -745,6 +757,9 @@ private struct WaveformView: View {
                           ? AzaStyle.danger
                           : AzaStyle.danger.opacity(0.45))
                     .frame(width: 4, height: heights[index])
+                    // Неоновое свечение каждого бара: тень цвета записи
+                    // дышит вместе с анимацией высоты (идея из ClickUp).
+                    .shadow(color: AzaStyle.danger.opacity(0.25), radius: 3)
                     .scaleEffect(y: reduceMotion || animates ? 1 : 0.45)
                     .animation(
                         reduceMotion
@@ -757,6 +772,14 @@ private struct WaveformView: View {
             }
         }
         .frame(width: 58, height: 26)
+        // Мягкая задняя подсветка позади волны — размытое пятно цвета
+        // записи, как у ClickUp: волна будто светится изнутри острова.
+        .background(
+            Ellipse()
+                .fill(AzaStyle.danger.opacity(0.1))
+                .blur(radius: 14)
+                .scaleEffect(x: 1.5, y: 1.9)
+        )
         .onAppear { animates = !reduceMotion }
         .onChange(of: reduceMotion) { _, value in animates = !value }
     }
