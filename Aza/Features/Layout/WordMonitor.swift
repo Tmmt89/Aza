@@ -86,7 +86,7 @@ final class WordMonitor {
                 guard let refcon else { return Unmanaged.passUnretained(cgEvent) }
                 let monitor = Unmanaged<WordMonitor>.fromOpaque(refcon).takeUnretainedValue()
                 // Источник тапа стоит на главном runloop — колбэк главный.
-                return MainActor.assumeIsolated {
+                return azaAssumeMainUnchecked {
                     monitor.handleTap(type: type, event: cgEvent)
                 }
             },

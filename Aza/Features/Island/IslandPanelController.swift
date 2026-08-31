@@ -51,6 +51,13 @@ final class IslandPanelController {
     /// по карточке буфера (вставка) не распознаётся SwiftUI.
     private var lastForwardDown: (time: TimeInterval, at: NSPoint) = (0, .zero)
     private var forwardClickCount = 1
+    /// Логический фокус для клавиатуры: приложение никогда не активируется
+    /// (активирующий клик роняет тот же AppKit, что и все события), поэтому
+    /// NSApp.isActive/keyWindow — вечно пустые. Фокус ведёт tap: окно
+    /// последнего пересланного клика; сбрасывается кликом мимо окон
+    /// приложения и сменой фронтмост-приложения (⌘Tab, Spotlight).
+    private weak var focusWindow: NSWindow?
+    private var appActivationObserver: NSObjectProtocol?
 
     /// Новая панель для каждого размера: входную форму окна WindowServer
     /// замораживает при ПЕРВОМ показе навсегда — ресайз, orderOut/Front,
@@ -153,6 +160,26 @@ final class IslandPanelController {
                 guard let self, self.panel.isVisible else { return }
                 self.panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
                 self.panel.orderFrontRegardless()
+            }
+        }
+        // Смена активного приложения (⌘Tab, Spotlight, клик в другое окно
+        // через Dock) — пользователь ушёл: клавиши больше не наши.
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { note in
+            // Собственная активация (SetupWindow.show зовёт activate) —
+            // не уход: фокус не сбрасываем.
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+            guard app?.processIdentifier != ProcessInfo.processInfo.processIdentifier
+            else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let focus = self.focusWindow, focus.isKeyWindow {
+                    focus.resignKey()
+                }
+                self.focusWindow = nil
             }
         }
         installEventMonitors()
@@ -271,6 +298,7 @@ final class IslandPanelController {
             | (1 << CGEventType.rightMouseDown.rawValue)
             | (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.keyUp.rawValue)
+            | (1 << CGEventType.flagsChanged.rawValue)
             | (1 << CGEventType.scrollWheel.rawValue)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
@@ -295,9 +323,10 @@ final class IslandPanelController {
                 // ВООБЩЕ НИЧЕГО (см. память aza-island-clicks). Сначала
                 // хоткеи (Carbon-диспетчер мёртв, матчим здесь), потом
                 // пересылка в буфер/фразы/настройки.
-                if type == .keyDown || type == .keyUp || type == .scrollWheel {
-                    let handled = MainActor.assumeIsolated { () -> Bool in
-                        if type != .scrollWheel {
+                if type == .keyDown || type == .keyUp || type == .scrollWheel
+                    || type == .flagsChanged {
+                    let handled = azaAssumeMainUnchecked { () -> Bool in
+                        if type == .keyDown || type == .keyUp {
                             let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
                             let mods = HotKeyBinding.carbonModifiers(fromCG: event.flags)
                             if HotKeyController.handleTapKey(
@@ -311,7 +340,7 @@ final class IslandPanelController {
                 }
                 let loc = event.location
                 let flags = event.flags
-                let consumed = MainActor.assumeIsolated {
+                let consumed = azaAssumeMainUnchecked {
                     return controller.handleClick(
                         at: NSPoint(
                             x: loc.x,
@@ -380,13 +409,18 @@ final class IslandPanelController {
             }
         }
         if type == .leftMouseDragged { return false }
-        // Окно настроек: AppKit ему клики тоже не доставляет — пересылка,
-        // как у панели. Титулбар (верхние 30 пт) не трогаем: нативные
+        // Окно настроек и его шторки/поповеры: AppKit им клики тоже не
+        // доставляет — пересылка, как у панели. Титулбар (верхние 30 пт)
+        // верхнеуровневого титулованного окна не трогаем: нативные
         // tracking-петли перетаскивания повисли бы без очереди событий.
         if type == .leftMouseDown, !(inside && store.isIslandVisible),
-           let window = regularWindow(at: mouse),
-           mouse.y < window.frame.maxY - 30 {
+           let window = forwardableWindow(at: mouse),
+           !(window.parent == nil && window.styleMask.contains(.titled)
+             && mouse.y >= window.frame.maxY - 30) {
             if store.isIslandVisible { store.dismissIsland() }
+            // Фокус — ДО пересылки: down диспетчеризуется из очереди
+            // позже, к этому моменту key-вид и адрес клавиш уже назначены.
+            assignFocus(window)
             forwardingDrag = true
             forwardTarget = window
             forwardClick(to: window, at: mouse, type: type, flags: flags)
@@ -429,7 +463,12 @@ final class IslandPanelController {
             }
             return true
         }
-        // mouseDown/rightMouseDown мимо острова — закрыть.
+        // mouseDown/rightMouseDown мимо острова и окон приложения:
+        // закрыть остров, отдать клавиатурный фокус (и снять key-вид).
+        if type == .leftMouseDown || type == .rightMouseDown {
+            if let focus = focusWindow, focus.isKeyWindow { focus.resignKey() }
+            focusWindow = nil
+        }
         if store.isIslandVisible, !inside {
             store.dismissIsland()
         }
@@ -443,6 +482,17 @@ final class IslandPanelController {
     /// курсор над островом. Событие глотается, чтобы не утекло в фоновое
     /// приложение.
     private func forwardKeyOrScrollIfNeeded(_ cgEvent: CGEvent, type: CGEventType) -> Bool {
+        if type == .flagsChanged {
+            // Модификаторы рекордеру хоткея (fn/⌃/⌥ пишутся на
+            // отпускании) — и НИКОГДА не глотаем: ⌘ из ⌘Tab и прочие
+            // системные жесты должны жить.
+            if let focus = keyForwardTarget(),
+               let event = NSEvent(cgEvent: cgEvent),
+               let responder = focus.firstResponder, responder !== focus {
+                Task { @MainActor in responder.flagsChanged(with: event) }
+            }
+            return false
+        }
         let target: NSWindow
         if type == .scrollWheel {
             let loc = cgEvent.location
@@ -452,9 +502,20 @@ final class IslandPanelController {
                store.mode == .clipboard || store.mode == .phrases,
                isInsideIsland(point) {
                 target = panel
-            } else if let window = regularWindow(at: point) {
-                // Скролл страницы настроек — окну под курсором.
-                target = window
+            } else if let window = forwardableWindow(at: point) {
+                // Скролл настроек/поповера — вью под курсором напрямую:
+                // sendEvent маршрутизирует по locationInWindow, а у события
+                // из CGEvent координаты экранные — hitTest уходил мимо.
+                // Скроллу важны только дельты, не позиция.
+                guard let event = NSEvent(cgEvent: cgEvent) else { return false }
+                let local = window.convertPoint(fromScreen: point)
+                let windowNumber = window.windowNumber
+                Task { @MainActor [weak window] in
+                    guard let window, window.windowNumber == windowNumber,
+                          let view = window.contentView?.hitTest(local) else { return }
+                    view.scrollWheel(with: event)
+                }
+                return true
             } else {
                 return false
             }
@@ -466,12 +527,38 @@ final class IslandPanelController {
                 guard keycode == 0 else { return false } // kVK_ANSI_A
             }
             target = panel
-        } else if NSApp.isActive, let key = NSApp.keyWindow, key !== panel,
-                  key.isVisible {
-            // Печать в настройках: приложение активно, окно ключевое —
-            // клавиши по назначению (⌘-правки текста включительно;
-            // хоткеи уже перехвачены выше).
-            target = key
+        } else if let focus = keyForwardTarget(), focusIsTopmost(focus) {
+            // Фокус мог протухнуть: настройки остались открыты, но их
+            // накрыло чужое окно — клавиши (и особенно ⌘Q) тогда не
+            // наши, пусть идут системе (та же дыра, что у мыши).
+            // Печать в настройках/шторках/поповерах: NSApp.isActive здесь
+            // не бывает true (AppKit роняет и активирующий клик), фокус
+            // ведёт tap — окно последнего пересланного клика или его
+            // верхний child (поповер поиска города забирает ввод сразу
+            // при открытии, клика внутрь не требуется).
+            // ⌘-сочетания системные, не глотаем; исключения: ⌘W —
+            // закрыть окно/шторку, ⌘Q — выйти из Aza (фокус наш — quit
+            // чужого приложения был бы сюрпризом), ⌘, — настройки уже
+            // открыты, правки текста и ⌘./⌘Return/⌘Delete.
+            if cgEvent.flags.contains(.maskCommand) {
+                let keycode = cgEvent.getIntegerValueField(.keyboardEventKeycode)
+                switch keycode {
+                case 13: // kVK_ANSI_W
+                    if type == .keyDown { focus.performClose(nil) }
+                    return true
+                case 12: // kVK_ANSI_Q
+                    if type == .keyDown { NSApp.terminate(nil) }
+                    return true
+                case 43: // kVK_ANSI_Comma — настройки уже перед глазами
+                    return true
+                // 0=A 6=Z 7=X 8=C 9=V 47=«.» 36=Return 51=Delete
+                case 0, 6, 7, 8, 9, 47, 36, 51:
+                    break
+                default:
+                    return false
+                }
+            }
+            target = focus
         } else {
             return false
         }
@@ -479,20 +566,144 @@ final class IslandPanelController {
         let windowNumber = target.windowNumber
         Task { @MainActor [weak target] in
             guard let target, target.windowNumber == windowNumber else { return }
-            target.sendEvent(event)
+            // Клавиши — напрямую firstResponder'у: по-настоящему key окно
+            // не бывает (система отклоняет makeKey у неактивного
+            // приложения), а не-key окну sendEvent клавиши молча роняет.
+            // becomeKey даёт только ВИД. Input context неактивного
+            // приложения без activate() глотает вставку (TSM).
+            // Панель буфера живёт старым путём sendEvent — он работает.
+            if type == .scrollWheel || target === panel {
+                target.sendEvent(event)
+            } else if let responder = target.firstResponder, responder !== target {
+                (responder as? NSView)?.inputContext?.activate()
+                if event.type == .keyUp {
+                    responder.keyUp(with: event)
+                } else if event.modifierFlags.contains(.command) {
+                    // ⌘-команды: сперва эквиваленты окна (кнопки со
+                    // .keyboardShortcut), затем текстовые команды поля —
+                    // меню-путь NSApp у неактивного приложения мёртв.
+                    if target.performKeyEquivalent(with: event) { return }
+                    let sel: Selector? = switch event.keyCode {
+                    case 0: #selector(NSText.selectAll(_:))
+                    case 6: Selector(("undo:"))
+                    case 7: #selector(NSText.cut(_:))
+                    case 8: #selector(NSText.copy(_:))
+                    case 9: #selector(NSText.paste(_:))
+                    default: nil
+                    }
+                    if let sel {
+                        responder.tryToPerform(sel, with: nil)
+                    } else {
+                        responder.keyDown(with: event)
+                    }
+                } else {
+                    // Вне текстового поля Return/Esc — сперва кнопке по
+                    // умолчанию (.keyboardShortcut), как сделал бы AppKit.
+                    if !(responder is NSTextView),
+                       target.performKeyEquivalent(with: event) { return }
+                    responder.keyDown(with: event)
+                }
+            } else if event.type == .keyDown,
+                      target.performKeyEquivalent(with: event) {
+                // Return/Esc без фокусного поля — кнопке по умолчанию.
+            } else {
+                target.sendEvent(event)
+            }
         }
         return true
     }
 
-    /// Видимое титулованное окно приложения под точкой (настройки).
-    /// Панели острова и служебные окна (статус-бар) не считаются: у их
-    /// AppKit-контролов нативные tracking-петли, которым без живой
-    /// очереди событий нельзя доверять клик.
-    private func regularWindow(at point: NSPoint) -> NSWindow? {
-        NSApp.windows.first {
-            $0 !== panel && $0.isVisible && $0.styleMask.contains(.titled)
-                && $0.frame.contains(point)
+    /// Куда слать клавиши: открытая поверх фокусного окна шторка или
+    /// поповер забирают ввод сами (автофокус поиска города), клик внутрь
+    /// им не нужен. Приоритет: in-process key-окно из связки фокусного →
+    /// шторка → верхний child → само фокусное окно.
+    private func keyForwardTarget() -> NSWindow? {
+        guard let focus = focusWindow, focus.isVisible else { return nil }
+        // Child всегда важнее базового окна: открытый поповер/шторка
+        // модальны по смыслу, ввод — им.
+        let target = focus.attachedSheet?.isVisible == true
+            ? focus.attachedSheet!
+            : focus.childWindows?.last(where: { $0.isVisible }) ?? focus
+        if !target.isKeyWindow { target.becomeKey() }
+        return target
+    }
+
+    /// Окно клавиатурного фокуса всё ещё верхнее (по центру своего
+    /// кадра)? Частичное перекрытие терпим — важно не красть ввод у
+    /// окна, целиком накрывшего наше.
+    private func focusIsTopmost(_ window: NSWindow) -> Bool {
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        return isTopmostRegularWindow(window, atCG: CGPoint(
+            x: center.x,
+            y: (NSScreen.screens.first?.frame.maxY ?? 0) - center.y
+        ))
+    }
+
+    /// Назначить окну клавиатурный фокус и key-ВИД. Настоящим key-окном
+    /// стать нельзя (система отклоняет makeKey у вечно неактивного
+    /// приложения), а без key-вида AppKit рисует контролы блёкло и не
+    /// показывает рамку фокуса и каретку полей — «окно как неактивное».
+    /// becomeKey() включает key-вид принудительно; доставку клавиш это не
+    /// меняет — их всё равно несёт tap напрямую респондеру.
+    private func assignFocus(_ window: NSWindow) {
+        if let old = focusWindow, old !== window, old.isKeyWindow {
+            old.resignKey()
         }
+        focusWindow = window
+        if !window.isKeyWindow { window.becomeKey() }
+    }
+
+    /// Наше окно под точкой ЗАКРЫТО чужим? Tap видит только окна Aza, и
+    /// без этой проверки клик по браузеру, лежащему ПОВЕРХ забытых
+    /// настроек, крался бы невидимой Aza (дыра в чужом окне). Обход
+    /// CGWindowList front-to-back по обычному слою: первым содержащее
+    /// точку окно должно быть нашим.
+    private func isTopmostRegularWindow(_ window: NSWindow, atCG cgPoint: CGPoint) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
+        else { return true }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        for info in list {
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let b = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0,
+                         width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+                    .contains(cgPoint)
+            else { continue }
+            guard let owner = info[kCGWindowOwnerPID as String] as? Int32,
+                  owner == pid,
+                  let number = info[kCGWindowNumber as String] as? Int
+            else { return false }
+            return number == window.windowNumber
+        }
+        return true
+    }
+
+    /// ВЕРХНЕЕ окно приложения под точкой, которому можно пересылать
+    /// события: настройки (титулованное) и их child-окна — шторки .sheet
+    /// и поповеры (нетитулованные, у них есть parent). Обход по z-порядку
+    /// (windowNumbers — front-to-back), иначе клик по шторке уходил в
+    /// затемнённого родителя. Панель острова, окна меню (события получают
+    /// нативно, NSApp их не резолвит) и значок меню-бара (нет parent, не
+    /// титулован — tracking-петле NSButton форвард доверять нельзя) —
+    /// исключены.
+    private func forwardableWindow(at point: NSPoint) -> NSWindow? {
+        guard let numbers = NSWindow.windowNumbers(options: []) else { return nil }
+        for number in numbers {
+            guard let w = NSApp.window(withWindowNumber: number.intValue),
+                  w !== panel, w.isVisible, w.frame.contains(point),
+                  w.parent != nil || w.styleMask.contains(.titled)
+            else { continue }
+            // Чужое окно поверх нашего — событие не наше.
+            let cg = CGPoint(
+                x: point.x,
+                y: (NSScreen.screens.first?.frame.maxY ?? 0) - point.y
+            )
+            guard isTopmostRegularWindow(w, atCG: cg) else { return nil }
+            return w
+        }
+        return nil
     }
 
     /// Досылка проглоченного tap'ом клика в панель вручную: AppKit сам

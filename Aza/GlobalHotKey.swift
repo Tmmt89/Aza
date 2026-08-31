@@ -21,6 +21,19 @@ func azaDebugLog(_ message: String) {
 #endif
 }
 
+/// MainActor.assumeIsolated для колбэков CGEventTap. Штатный assumeIsolated
+/// падал SIGSEGV (31.08, swift_task_isCurrentExecutor → getObjectType по
+/// мусорному адресу): колбэк tap'а выполняется реентерабельно внутри
+/// вложенных tracking-петель, где TLS «текущий executor» рантайма
+/// оказывается мусорным, и его проверка разыменовывает мусор. Поток
+/// проверяем сами — источники всех tap'ов стоят на главном runloop.
+func azaAssumeMainUnchecked<T>(_ body: @MainActor () -> T) -> T {
+    precondition(Thread.isMainThread, "tap callback вне главного потока")
+    return withoutActuallyEscaping(body) { escaping in
+        unsafeBitCast(escaping, to: (() -> T).self)()
+    }
+}
+
 /// Coordinator: wires the hot key, the word monitor and text insertion together
 /// and exposes status for the menu panel. Lives for the whole app lifetime.
 @MainActor

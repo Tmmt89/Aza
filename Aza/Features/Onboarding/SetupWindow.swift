@@ -80,6 +80,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             // Без slideIn: первый показ за кромкой замораживает у окна
             // кликабельную форму там же — все кнопки «не нажимаются».
             window.makeKeyAndOrderFront(nil)
+            forceKeyAppearance(window)
             resyncServerFrame(window)
             azaDebugLog("Aza: SetupWindow shown frame=\(window.frame)")
             return
@@ -123,8 +124,20 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         // Без slideIn (см. выше): показ сразу на месте.
         window.makeKeyAndOrderFront(nil)
+        forceKeyAppearance(window)
         resyncServerFrame(window)
         azaDebugLog("Aza: SetupWindow shown frame=\(window.frame)")
+    }
+
+    /// Система отклоняет makeKey у вечно неактивного приложения (AppKit
+    /// роняет и активирующий клик — память aza-island-clicks), и окно
+    /// рисуется блёкло: серые контролы, ни рамки фокуса, ни каретки.
+    /// becomeKey() принудительно включает key-вид с самого показа.
+    /// becomeKey зовётся безусловно: AzaSlidingWindow всегда отвечает
+    /// isKeyWindow=true, и с проверкой жизненный цикл key-окна (нотификации,
+    /// первый responder) не запускался бы вовсе.
+    private func forceKeyAppearance(_ window: NSWindow) {
+        window.becomeKey()
     }
 
     /// Перетаскивание окна на этой macOS обрабатывает WindowServer, а

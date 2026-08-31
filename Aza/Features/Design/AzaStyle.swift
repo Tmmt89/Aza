@@ -62,6 +62,13 @@ final class AzaSlidingWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }
+
+    /// Приложение никогда не активируется по-настоящему (AppKit роняет
+    /// и активирующий клик — память aza-island-clicks), система отклоняет
+    /// makeKey, и AppKit рисовал окно «неактивным»: блеклые контролы, ни
+    /// рамки фокуса, ни каретки в полях. Принудительный key-статус
+    /// возвращает живой вид; события всё равно доставляет CGEventTap.
+    override var isKeyWindow: Bool { true }
 }
 
 /// Появление и уход окон в одном жесте продукта: окно опускается из-за

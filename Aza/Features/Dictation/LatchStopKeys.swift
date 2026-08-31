@@ -29,7 +29,7 @@ final class LatchStopKeys {
                 let keys = Unmanaged<LatchStopKeys>.fromOpaque(info).takeUnretainedValue()
                 // Источник тапа добавлен в main run loop — колбэк приходит
                 // на главном потоке.
-                return MainActor.assumeIsolated {
+                return azaAssumeMainUnchecked {
                     keys.handle(type: type, event: event)
                 }
             },
