@@ -59,6 +59,47 @@ final class PrayerTests: XCTestCase {
         XCTAssertNil(ScheduleTablePrayerProvider(catalog: malformed).times(on: date, city: grozny))
     }
 
+    /// Регрессия 02.09: кэш `today` пережил полночь (Mac спал), все его
+    /// времена оказались в прошлом, и nextPrayer прыгал на послезавтра —
+    /// «через 25 часов» при намазе через час. Ближайший намаз обязан
+    /// считаться от `now`, без оглядки на какой-либо кэш.
+    func testNextPrayerBeforeFajrPicksTodayNotDayAfterTomorrow() throws {
+        let source = PrayerSource(name: "ДУМ ЧР", url: "https://example.org/schedule.xlsx", sha256: "fixture")
+        let city = CityPrayerSchedule(
+            id: grozny.id, name: grozny.name, timeZone: grozny.timeZoneID,
+            coverageStatus: "partial", coverageStart: "2026-09-01", coverageEnd: "2026-09-03",
+            releaseStatus: "test", source: source,
+            days: [
+                .init(date: "2026-09-01", times: ["04:02", "05:16", "12:30", "15:45", "18:37", "20:06"]),
+                .init(date: "2026-09-02", times: ["04:04", "05:17", "12:30", "15:44", "18:36", "20:04"]),
+                .init(date: "2026-09-03", times: ["04:05", "05:18", "12:30", "15:44", "18:34", "20:02"]),
+            ]
+        )
+        let catalog = PrayerCatalog(
+            schemaVersion: 1, year: 2026, cityCount: 1,
+            completeCityCount: 0, partialCityCount: 1, cities: [city], sourceLabel: "ДУМ ЧР"
+        )
+        let table = ScheduleTablePrayerProvider(catalog: catalog)
+        let calculated = CalculatedPrayerProvider()
+
+        // 03:02 ночи 2 сентября: до сегодняшнего фаджра час.
+        let beforeFajr = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 9, day: 2, hour: 3, minute: 2)))
+        let next = try XCTUnwrap(PrayerStore.nextPrayer(
+            after: beforeFajr, for: grozny, table: table, calculated: calculated))
+        XCTAssertEqual(next.kind, .fajr)
+        XCTAssertEqual(grozny.formattedTime(next.date), "04:04")
+        XCTAssertEqual(next.date.timeIntervalSince(beforeFajr), 62 * 60)
+
+        // После иши ближайший — завтрашний фаджр.
+        let afterIsha = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 9, day: 2, hour: 21)))
+        let tomorrow = try XCTUnwrap(PrayerStore.nextPrayer(
+            after: afterIsha, for: grozny, table: table, calculated: calculated))
+        XCTAssertEqual(tomorrow.kind, .fajr)
+        XCTAssertEqual(grozny.formattedTime(tomorrow.date), "04:05")
+    }
+
     func testHighLatitudeCaveatAndCityTimezoneFormatting() throws {
         let spb = PrayerCity(
             id: "spb", name: "Санкт-Петербург", latitude: 59.9311, longitude: 30.3609,

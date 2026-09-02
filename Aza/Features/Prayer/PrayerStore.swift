@@ -1,4 +1,5 @@
 import Adhan
+import AppKit
 import Combine
 import Foundation
 import UserNotifications
@@ -147,6 +148,7 @@ final class PrayerStore: ObservableObject {
     private var table: ScheduleTablePrayerProvider?
     private var rolloverTimer: Timer?
     private var settingsRestored = false
+    private var systemObservers: [NSObjectProtocol] = []
 
     init() {
         table = ScheduleTablePrayerProvider.userProvided()
@@ -157,6 +159,24 @@ final class PrayerStore: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.loadPersistedCity()
         }
+        // Полуночный Timer не тикает, пока Mac спит, — 02.09 кэш `today`
+        // так и остался вчерашним. Системные сигналы приходят и в полночь,
+        // и после пробуждения, и при переводе часов; refresh идемпотентен,
+        // лишний вызов безвреден.
+        let onMain: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refresh()
+                self?.scheduleRollover()
+            }
+        }
+        systemObservers = [
+            NotificationCenter.default.addObserver(
+                forName: .NSCalendarDayChanged, object: nil,
+                queue: .main, using: onMain),
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil,
+                queue: .main, using: onMain),
+        ]
     }
 
     /// Восстанавливает выбор города из настроек. Города не подставляем
@@ -205,15 +225,31 @@ final class PrayerStore: ObservableObject {
 
     /// Ближайший намаз: ищем в сегодняшнем дне, затем в завтрашнем —
     /// после иши сегодняшний список пуст.
+    ///
+    /// Считаем от `now`, а НЕ от кэша `today`: пропущенный полуночный
+    /// refresh (Mac спал в полночь) оставлял в кэше вчерашний день, все
+    /// его времена были в прошлом, и отсчёт прыгал сразу на послезавтра —
+    /// «через 25 часов» при намазе через час.
     func nextPrayer(after now: Date = .now)
         -> (kind: PrayerKind, date: Date, source: PrayerTimesSource)? {
-        if let upcoming = today?.occurrences.first(where: { $0.date > now }) {
+        guard let city = selectedCity else { return nil }
+        return Self.nextPrayer(after: now, for: city,
+                               table: table, calculated: calculated)
+    }
+
+    static func nextPrayer(after now: Date, for city: PrayerCity,
+                           table: ScheduleTablePrayerProvider?,
+                           calculated: CalculatedPrayerProvider)
+        -> (kind: PrayerKind, date: Date, source: PrayerTimesSource)? {
+        for offset in 0...1 {
+            guard let day = city.calendar.date(byAdding: .day, value: offset, to: now),
+                  let times = preferredTimes(for: city, on: day,
+                                             table: table, calculated: calculated),
+                  let upcoming = times.occurrences.first(where: { $0.date > now })
+            else { continue }
             return upcoming
         }
-        guard let city = selectedCity,
-              let tomorrow = city.calendar.date(byAdding: .day, value: 1, to: now),
-              let times = times(for: city, on: tomorrow) else { return nil }
-        return times.occurrences.first { $0.date > now }
+        return nil
     }
 
     func refresh(now: Date = .now) {
