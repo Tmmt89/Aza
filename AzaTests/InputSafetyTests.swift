@@ -6,6 +6,61 @@ import XCTest
 
 @MainActor
 final class InputSafetyTests: XCTestCase {
+    func testWhisperLanguageAndShortcutAfterRemovingChechen() {
+        let key = DictationController.languageStorageKey
+        let previous = UserDefaults.standard.object(forKey: key)
+        UserDefaults.standard.set("ce", forKey: key)
+        XCTAssertEqual(DictationController.preferredLanguage, "auto")
+        XCTAssertNil(Bundle.main.url(forResource: "omni-asr", withExtension: "py"))
+        XCTAssertNil(Bundle.main.url(forResource: "omni-requirements", withExtension: "txt"))
+        let dictation = DictationController(clipboardStore: { nil },
+                                           microphoneAuthorization: { .authorized })
+        defer {
+            // Cancel preparation before queued audio/model tasks can run.
+            dictation.stop()
+            dictation.unloadModel()
+            UserDefaults.standard.set(previous, forKey: key)
+        }
+        UserDefaults.standard.set("en", forKey: key)
+        dictation.shortcutPressed()
+        XCTAssertEqual(dictation.state, .preparingRecording)
+        XCTAssertEqual(dictation.activeLanguage, "en")
+        UserDefaults.standard.set("ru", forKey: key)
+        XCTAssertEqual(dictation.activeLanguage, "en", "Language belongs to the current recording")
+        dictation.shortcutReleased()
+        XCTAssertEqual(dictation.state, .idle)
+        dictation.shortcutPressed()
+        XCTAssertTrue(dictation.isLatched, "A quick second press still latches Whisper")
+        XCTAssertEqual(dictation.activeLanguage, "ru")
+        dictation.shortcutReleased()
+        XCTAssertEqual(dictation.state, .preparingRecording)
+        dictation.shortcutPressed()
+        XCTAssertEqual(dictation.state, .idle)
+        XCTAssertFalse(dictation.isLatched)
+    }
+
+    func testDictationShortcutRestoresWorkingBindingAfterRegistrationFailure() {
+        let key = HotKeyBinding.dictationKey
+        let previous = UserDefaults.standard.object(forKey: key)
+        let dictation = DictationController(clipboardStore: { nil }, accessibilityTrusted: { false })
+        defer {
+            dictation.stop()
+            UserDefaults.standard.set(previous, forKey: key)
+        }
+        let binding = HotKeyBinding(keyCode: UInt32(kVK_F18),
+                                    modifiers: UInt32(cmdKey | controlKey | optionKey | shiftKey))
+        binding.save(key)
+        XCTAssertNil(dictation.rebindHotKey())
+        let fn = HotKeyBinding(keyCode: UInt32(kVK_Function), modifiers: 0)
+        XCTAssertNotNil(fn.save(key, registering: dictation.rebindHotKey))
+        XCTAssertEqual(HotKeyBinding.load(key, fallback: .dictationDefault), binding)
+        XCTAssertNil(dictation.hotKeyError)
+        let probe = HotKeyController(keyCode: binding.keyCode, modifiers: binding.modifiers,
+                                     id: 0x7ffa, onPress: {})
+        defer { probe.stop() }
+        XCTAssertEqual(probe.register(), OSStatus(eventHotKeyExistsErr))
+    }
+
     func testStoppedHotKeyDropsQueuedCallbacksEvenAfterReregistering() {
         let code = UInt32(kVK_F17)
         let modifiers = UInt32(cmdKey | controlKey | optionKey | shiftKey)

@@ -10,7 +10,6 @@
 		CF0600000000000000000005 /* IslandPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0600000000000000000006 /* IslandPanel.swift */; };
 		CF0600000000000000000001 /* IslandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0600000000000000000002 /* IslandStore.swift */; };
 		CF0600000000000000000003 /* ClipboardCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0600000000000000000004 /* ClipboardCommands.swift */; };
-		CECE00000000000000000001 /* OmniASR.swift in Sources */ = {isa = PBXBuildFile; fileRef = CECE00000000000000000002 /* OmniASR.swift */; };
 		CF0500000000000000000001 /* HotKeyRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0500000000000000000002 /* HotKeyRecorder.swift */; };
 		CF05AA042A7D4E10B1B40101 /* MenuBarDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF05AA042A7D4E10B1B40102 /* MenuBarDisplay.swift */; };
 		BBBB00000000000000000247 /* OnboardingProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB00000000000000000147 /* OnboardingProgress.swift */; };
@@ -69,7 +68,6 @@
 		CF0600000000000000000006 /* IslandPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Island/IslandPanel.swift; sourceTree = SOURCE_ROOT; };
 		CF0600000000000000000002 /* IslandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Island/IslandStore.swift; sourceTree = SOURCE_ROOT; };
 		CF0600000000000000000004 /* ClipboardCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ClipboardCommands.swift; sourceTree = SOURCE_ROOT; };
-		CECE00000000000000000002 /* OmniASR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Dictation/OmniASR.swift; sourceTree = SOURCE_ROOT; };
 		CF0500000000000000000002 /* HotKeyRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/HotKeys/HotKeyRecorder.swift; sourceTree = SOURCE_ROOT; };
 		CF05AA042A7D4E10B1B40102 /* MenuBarDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Prayer/MenuBarDisplay.swift; sourceTree = SOURCE_ROOT; };
 		BBBB00000000000000000147 /* OnboardingProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Onboarding/OnboardingProgress.swift; sourceTree = SOURCE_ROOT; };
@@ -175,7 +173,6 @@
 				BBBB0000000000000000014B /* MacCapabilities.swift */,
 				BBBB0000000000000000014A /* LatchStopKeys.swift */,
 				BBBB00000000000000000149 /* DictationController.swift */,
-				CECE00000000000000000002 /* OmniASR.swift */,
 				BBBB00000000000000000148 /* CityLocator.swift */,
 				BBBB00000000000000000102 /* Aza/Core/ChechenLexicon.swift */,
 				BBBB00000000000000000103 /* Aza/Core/ChechenAutocorrect.swift */,
@@ -351,7 +348,6 @@
 				BBBB0000000000000000024B /* MacCapabilities.swift in Sources */,
 				BBBB0000000000000000024A /* LatchStopKeys.swift in Sources */,
 				BBBB00000000000000000249 /* DictationController.swift in Sources */,
-				CECE00000000000000000001 /* OmniASR.swift in Sources */,
 				BBBB00000000000000000248 /* CityLocator.swift in Sources */,
 				BBBB00000000000000000245 /* PasteboardMonitor.swift in Sources */,
 				BBBB00000000000000000201 /* Aza/Core/ClipboardStore.swift in Sources */,

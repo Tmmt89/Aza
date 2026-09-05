@@ -64,10 +64,6 @@ enum PrivacyCleanup {
                 Item(id: "words", title: "Слова-исключения",
                      bytes: size(of: "user-words.json")),
             ]
-            if let omni = size(of: "OmniASR") {
-                items.append(Item(id: "omni-asr", title: "Чеченская модель и компоненты распознавания",
-                                  bytes: omni))
-            }
             if let phrases = size(of: "phrases.json") {
                 items.append(Item(id: "phrases",
                                   title: "Изменённые фразы быстрой вставки",
@@ -129,8 +125,7 @@ enum PrivacyCleanup {
     /// скачаться и при запуске — прогрев идёт сам, если микрофон разрешён.
     static let outboundTraffic = """
         Whisper скачивается с Hugging Face по кнопке или при первой диктовке. \
-        Чеченская модель и её компоненты скачиваются с серверов Meta, GitHub и PyPI \
-        только по кнопке «Скачать». Буфер, аудио, транскрипты, \
+        Буфер, аудио, транскрипты, \
         набранные слова и координаты не отправляются никуда.
         """
 
@@ -175,10 +170,9 @@ enum PrivacyCleanup {
     /// обязан сперва выгрузить модель из памяти (DictationController),
     /// иначе в ней останется ссылка на исчезнувшие файлы.
     static func deleteModels() -> String? {
+        // Учитываем и файлы удалённого движка из прежних версий.
         removeAll(["huggingface", "OmniASR"])
     }
-
-    static func deleteOmniModel() -> String? { remove("OmniASR") }
 
     /// Одна модель по варианту WhisperKit — остальные остаются на диске.
     /// Общий токенизатор не трогаем: он мал и нужен другим моделям.

@@ -15,18 +15,6 @@ import WhisperKit
 @MainActor
 final class DictationController: ObservableObject {
 
-    enum Engine: CaseIterable {
-        case whisper, omni
-
-        var bindingKey: String { self == .whisper ? HotKeyBinding.dictationKey : HotKeyBinding.omniDictationKey }
-        var binding: HotKeyBinding {
-            HotKeyBinding.load(bindingKey, fallback: self == .whisper ? .dictationDefault : .omniDictationDefault)
-        }
-        var language: String {
-            self == .omni ? "ce" : (DictationController.preferredLanguage == "ce" ? "auto" : DictationController.preferredLanguage)
-        }
-    }
-
     enum State: Equatable {
         case idle
         case loadingModel(String)
@@ -44,71 +32,13 @@ final class DictationController: ObservableObject {
     }
     @Published private(set) var status = "Диктовка: удерживайте сочетание"
     @Published private(set) var hotKeyError: String?
-    @Published private(set) var omniHotKeyError: String?
     /// Начало текущей записи — для таймера в острове.
     @Published private(set) var recordingStartedAt: Date?
     /// Доля загрузки модели 0…1 — для полосы прогресса в настройках.
     @Published private(set) var downloadProgress: Double?
-    @Published private(set) var isInstallingOmni = false
-    private let omni: OmniASR
-    private var omniInstallTask: Task<Void, Never>?
-    // One recording keeps its engine/language even if defaults change during an await.
+    // Язык фиксируется в начале записи, даже если настройки меняются во время await.
     private var recordingLanguage = "auto"
-    private var recordingOmniVariant = OmniASR.Variant.ctc
-
-    var canChangeEngine: Bool { state == .idle && !isLoadingModel && !isInstallingOmni && session.canStart }
-
-    func downloadOmniModel() {
-        guard canChangeEngine else { return }
-        let variant = OmniASR.preferredVariant
-        isInstallingOmni = true
-        state = .loadingModel("OmniASR")
-        status = "Скачиваю чеченскую модель…"
-        cancelWarmup()
-        whisper = nil
-        loadedProfile = nil
-        omniInstallTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                self.isInstallingOmni = false
-                self.omniInstallTask = nil
-                self.downloadProgress = nil
-                self.state = .idle
-                self.applyPendingProfileChange()
-            }
-            await self.drainWarmup()
-            do {
-                try Task.checkCancellation()
-                try await self.omni.install(variant) { status, progress in
-                    guard !Task.isCancelled else { return }
-                    self.status = status
-                    self.downloadProgress = progress
-                }
-                self.status = "Чеченская модель скачана — удерживайте \(Engine.omni.binding.display)"
-            } catch {
-                self.status = Task.isCancelled ? "Загрузка чеченской модели отменена"
-                    : "Не удалось скачать чеченскую модель: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    func cancelOmniDownload() {
-        omniInstallTask?.cancel()
-        if isInstallingOmni { omni.cancel() }
-    }
-
-    func deleteOmniModel() async -> String? {
-        await performModelDeletion {
-            omni.cancel()
-            await drainWarmup()
-            return PrivacyCleanup.deleteOmniModel()
-        }
-    }
-
-    func languageChanged() {
-        pendingProfileChange = true
-        applyPendingProfileChange()
-    }
+    var canChangeSettings: Bool { state == .idle && !isLoadingModel && session.canStart }
 
     /// Явная загрузка выбранной модели по кнопке (§5.4): пользователь
     /// видит, что качается и сколько осталось.
@@ -116,7 +46,7 @@ final class DictationController: ObservableObject {
         // Во время записи/распознавания обнулять whisper нельзя: prepareModel
         // тут же вышел бы по своему guard state == .idle, и живая диктовка
         // осталась бы без модели (кнопка задизейблена, guard — второй рубеж).
-        guard canChangeEngine, Self.preferredLanguage != "ce" else { return }
+        guard canChangeSettings else { return }
         suppressPrewarm = false
         // В памяти может лежать ДРУГОЙ профиль — тогда prepareModel
         // молча выходил по guard whisper == nil, и кнопка не работала.
@@ -223,7 +153,7 @@ final class DictationController: ObservableObject {
     static let languageStorageKey = "DictationLanguage"
     static var preferredLanguage: String {
         let language = UserDefaults.standard.string(forKey: languageStorageKey) ?? "auto"
-        return ["auto", "ru", "en", "ce"].contains(language) ? language : "auto"
+        return ["auto", "ru", "en"].contains(language) ? language : "auto"
     }
 
     /// Предохранитель §5.1: максимум 30 минут на одну запись.
@@ -243,10 +173,10 @@ final class DictationController: ObservableObject {
         return directory
     }
 
-    private var hotKeys: [Engine: HotKeyController] = [:]
+    private var hotKey: HotKeyController?
     /// Одиночный модификатор (Fn, ⌃, ⌥…) идёт мимо Carbon — через
     /// монитор flagsChanged.
-    private var modifierMonitors: [Engine: ModifierKeyMonitor] = [:]
+    private var modifierMonitor: ModifierKeyMonitor?
     private var whisper: WhisperKit?
     private var audio: AudioProcessor?
     private var failsafeTimer: Timer?
@@ -325,7 +255,7 @@ final class DictationController: ObservableObject {
     private var recordingStartID: UUID?
     private var prayerPauseID: UUID?
 
-    var canDeleteModels: Bool { state == .idle && !isInstallingOmni && session.canStart }
+    var canDeleteModels: Bool { state == .idle && session.canStart }
     /// Для острова: экран распознавания показывает «Загружаю модель…»
     /// вместо «Распознаю…», пока звук ждёт модель.
     @Published private(set) var isAwaitingModel = false
@@ -344,7 +274,6 @@ final class DictationController: ObservableObject {
         didSet { updateLatchStopKeys() }
     }
     private var lastPressAt = Date.distantPast
-    private var lastPressEngine: Engine?
     /// Второе нажатие в пределах этого окна включает фиксацию.
     private static let doubleTapWindow: TimeInterval = 0.5
     /// Пробел/Enter как стоп зафиксированной записи (§5.1): тап живёт
@@ -367,7 +296,7 @@ final class DictationController: ObservableObject {
     func startLatchedFromUI() {
         guard state == .idle else { return }
         isLatched = true
-        shortcutPressed(Self.preferredLanguage == "ce" ? .omni : .whisper)
+        shortcutPressed()
         // Запись не началась (нет модели, нет доступа) — фиксация не должна
         // тихо доживать до следующего обычного удержания клавиши.
         if state != .recording && state != .preparingRecording { isLatched = false }
@@ -377,7 +306,6 @@ final class DictationController: ObservableObject {
     private let prayer: PrayerStore?
 
     init(clipboardStore: @escaping () -> ClipboardStore?, prayer: PrayerStore? = nil,
-         omni: OmniASR? = nil,
          microphoneAuthorization: @escaping () -> AVAuthorizationStatus = {
              AVCaptureDevice.authorizationStatus(for: .audio)
          },
@@ -385,7 +313,6 @@ final class DictationController: ObservableObject {
              await AVCaptureDevice.requestAccess(for: .audio)
          }, accessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }) {
         self.clipboardStore = clipboardStore
-        self.omni = omni ?? OmniASR()
         self.prayer = prayer
         self.microphoneAuthorization = microphoneAuthorization
         self.accessibilityTrusted = accessibilityTrusted
@@ -412,7 +339,7 @@ final class DictationController: ObservableObject {
     }
 
     func start() {
-        guard hotKeys.isEmpty, modifierMonitors.isEmpty else { return }
+        guard hotKey == nil, modifierMonitor == nil else { return }
         if sessionObservers.isEmpty {
             let center = DistributedNotificationCenter.default()
             let sessionInfo = CGSessionCopyCurrentDictionary() as? [String: Any]
@@ -439,7 +366,6 @@ final class DictationController: ObservableObject {
         // Как PrayerStore: UserDefaults надёжно виден только на следующем
         // витке main loop, иначе сохранённый профиль мог читаться как balanced.
         DispatchQueue.main.async { [weak self] in
-            guard Self.preferredLanguage != "ce" else { return }
             guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
             // Греем ТОЛЬКО уже скачанную модель: иначе удаление моделей
             // оборачивается новой загрузкой при следующем запуске.
@@ -448,25 +374,20 @@ final class DictationController: ObservableObject {
             // клавиши во время прогрева сразу пишет звук.
             self?.prepareModel(ownsState: false)
         }
-        for engine in Engine.allCases { installHotKey(for: engine) }
+        installHotKey()
     }
 
     /// Регистрация текущего сочетания: Carbon для обычных клавиш,
     /// монитор flagsChanged для одиночного модификатора (Fn, ⌃, ⌥…).
     @discardableResult
-    private func installHotKey(for engine: Engine) -> OSStatus? {
-        let binding = engine.binding
+    private func installHotKey() -> OSStatus? {
+        let binding = HotKeyBinding.load(HotKeyBinding.dictationKey, fallback: .dictationDefault)
         func report(_ problem: String?) {
-            if engine == .whisper { hotKeyError = problem } else { omniHotKeyError = problem }
+            hotKeyError = problem
             if let problem { status = problem }
         }
         report(nil)
-        // При старте сохраняем работающее прежнее назначение Whisper,
-        // даже если оно пересеклось с новым сочетанием OmniASR по умолчанию.
-        let other: Engine = engine == .whisper ? .omni : .whisper
-        let conflict = (hotKeys[other] != nil || modifierMonitors[other] != nil)
-            ? binding.dictationConflict(for: engine.bindingKey) : nil
-        if let problem = binding.phraseSelectionConflict(for: engine.bindingKey) ?? conflict {
+        if let problem = binding.phraseSelectionConflict(for: HotKeyBinding.dictationKey) {
             report(problem)
             return OSStatus(eventHotKeyExistsErr)
         }
@@ -474,23 +395,23 @@ final class DictationController: ObservableObject {
         if binding.isModifierOnly,
            let monitor = ModifierKeyMonitor(
                keyCode: UInt16(binding.keyCode),
-               onPress: { [weak self] in self?.shortcutPressed(engine) },
-               onRelease: { [weak self] in self?.shortcutReleased(engine) }
+               onPress: { [weak self] in self?.shortcutPressed() },
+               onRelease: { [weak self] in self?.shortcutReleased() }
            ) {
             registrationStatus = monitor.register(accessibilityGranted: accessibilityTrusted())
-            if registrationStatus == nil { modifierMonitors[engine] = monitor }
+            if registrationStatus == nil { modifierMonitor = monitor }
         } else {
             let controller = HotKeyController(
                 keyCode: binding.keyCode, modifiers: binding.modifiers,
-                id: engine == .whisper ? 2 : 5,
-                onPress: { [weak self] in self?.shortcutPressed(engine) },
-                onRelease: { [weak self] in self?.shortcutReleased(engine) })
+                id: 2,
+                onPress: { [weak self] in self?.shortcutPressed() },
+                onRelease: { [weak self] in self?.shortcutReleased() })
             registrationStatus = controller.register()
-            if registrationStatus == nil { hotKeys[engine] = controller }
+            if registrationStatus == nil { hotKey = controller }
         }
         if let error = registrationStatus { report(binding.registrationError(error)) }
-        else if hotKeyError == nil, omniHotKeyError == nil {
-            status = "Whisper: \(Engine.whisper.binding.display) · OmniASR: \(Engine.omni.binding.display)"
+        else {
+            status = "Диктовка: удерживайте \(binding.display)"
         }
         return registrationStatus
     }
@@ -511,16 +432,7 @@ final class DictationController: ObservableObject {
         // сброс pendingProfileChange здесь оставил бы старый профиль
         // активным навсегда. Завершение загрузки вызовет нас снова.
         guard pendingProfileChange, state == .idle, !isLoadingModel,
-              !isInstallingOmni, session.canStart else { return }
-        if Self.preferredLanguage == "ce" {
-            pendingProfileChange = false
-            cancelWarmup()
-            whisper = nil
-            loadedProfile = nil
-            status = omni.isInstalled(OmniASR.preferredVariant) ? "Чеченская диктовка готова"
-                : "Скачайте чеченскую модель в настройках диктовки"
-            return
-        }
+              session.canStart else { return }
         guard loadedProfile != Self.preferredProfile else {
             pendingProfileChange = false
             return
@@ -717,12 +629,11 @@ final class DictationController: ObservableObject {
     }
 
     func stop() {
-        cancelOmniDownload()
         cancelRecording()
-        hotKeys.values.forEach { $0.stop() }
-        hotKeys = [:]
-        modifierMonitors.values.forEach { $0.stop() }
-        modifierMonitors = [:]
+        hotKey?.stop()
+        hotKey = nil
+        modifierMonitor?.stop()
+        modifierMonitor = nil
         for observer in sessionObservers {
             DistributedNotificationCenter.default().removeObserver(observer)
         }
@@ -731,29 +642,23 @@ final class DictationController: ObservableObject {
 
     /// Перерегистрация после смены сочетания в настройках.
     @discardableResult
-    func rebindHotKey() -> OSStatus? { rebindHotKey(for: .whisper) }
-
-    @discardableResult
-    func rebindHotKey(for engine: Engine) -> OSStatus? {
+    func rebindHotKey() -> OSStatus? {
         guard state == .idle else { return OSStatus(eventNotHandledErr) }
-        hotKeys.removeValue(forKey: engine)?.stop()
-        modifierMonitors.removeValue(forKey: engine)?.stop()
-        return installHotKey(for: engine)
+        hotKey?.stop()
+        hotKey = nil
+        modifierMonitor?.stop()
+        modifierMonitor = nil
+        return installHotKey()
     }
 
     // MARK: Жизненный цикл записи
 
-    func shortcutPressed(_ engine: Engine) {
+    func shortcutPressed() {
         azaDebugLog("Aza: dictation keyDown state=\(state) latched=\(isLatched ? 1 : 0)")
-        guard session.canStart, !isRequestingMicrophone, !isInstallingOmni else {
+        guard session.canStart, !isRequestingMicrophone else {
             lastPressAt = .distantPast
             isLatched = false
             return
-        }
-
-        // Чужая клавиша не останавливает и не фиксирует текущую запись.
-        if state == .recording || state == .preparingRecording {
-            guard (recordingLanguage == "ce") == (engine == .omni) else { return }
         }
 
         // Нажатие во время зафиксированной записи останавливает её
@@ -775,9 +680,8 @@ final class DictationController: ObservableObject {
         }
 
         let now = Date()
-        let isDoubleTap = lastPressEngine == engine && now.timeIntervalSince(lastPressAt) < Self.doubleTapWindow
+        let isDoubleTap = now.timeIntervalSince(lastPressAt) < Self.doubleTapWindow
         lastPressAt = now
-        lastPressEngine = engine
 
         // Второе быстрое нажатие включает фиксацию. Проверяем по ВРЕМЕНИ,
         // а не по состоянию: короткое первое нажатие успевает и начать,
@@ -793,14 +697,6 @@ final class DictationController: ObservableObject {
         }
 
         guard state == .idle else { return }
-
-        if engine == .omni {
-            guard omni.isInstalled(OmniASR.preferredVariant) else {
-                isLatched = false
-                status = "Сначала нажмите «Скачать» для \(OmniASR.preferredVariant.modelName) в настройках диктовки"
-                return
-            }
-        }
 
         let authorization = microphoneAuthorization()
         azaDebugLog("Aza: dictation mic auth=\(authorization.rawValue) model=\(whisper == nil ? 0 : 1)")
@@ -824,19 +720,9 @@ final class DictationController: ObservableObject {
         // параллельно: нажатие не должно уходить в пустое ожидание.
         // Если запись кончится раньше загрузки, звук подождёт модель
         // (pendingSamples), остров покажет «Загружаю модель…».
-        recordingLanguage = engine.language
+        recordingLanguage = Self.preferredLanguage
         if recordingLanguage != "auto" { activeLanguage = recordingLanguage }
-        else if activeLanguage == "ce" { activeLanguage = "ru" }
-        if engine == .omni {
-            recordingOmniVariant = OmniASR.preferredVariant
-            cancelWarmup()
-            whisper = nil
-            loadedProfile = nil
-            if isLoadingModel {
-                discardCurrentLoad = true
-                loadTask?.cancel()
-            }
-        } else if whisper == nil {
+        if whisper == nil {
             suppressPrewarm = false
             prepareModel(ownsState: false, language: recordingLanguage)
         }
@@ -1113,9 +999,8 @@ final class DictationController: ObservableObject {
         // Одна загрузка за раз: прогрев при старте и нажатие клавиши
         // не должны запустить её дважды.
         guard whisper == nil, !isLoadingModel else { return }
-        guard !suppressPrewarm, !isInstallingOmni, session.canStart else { return }
+        guard !suppressPrewarm, session.canStart else { return }
         let language = requestedLanguage ?? (state == .idle ? Self.preferredLanguage : recordingLanguage)
-        guard language != "ce" else { return }
         if ownsState {
             // Явная загрузка (кнопка в настройках) занимает состояние —
             // только из покоя. Фоновая (ownsState: false) состояния не
@@ -1448,8 +1333,7 @@ final class DictationController: ObservableObject {
         audio = processor
         // Копия звука для стрима собирается прямо из колбэка записи —
         // читать processor.audioSamples во время записи нельзя (гонка).
-        let buffer = (whisper != nil && recordingLanguage != "ce"
-                      && Self.streamingEnabled && recordingLanguage != "auto")
+        let buffer = (whisper != nil && Self.streamingEnabled && recordingLanguage != "auto")
             ? StreamBuffer() : nil
         // Колбэк устанавливается после запуска движка. Первые сэмплы
         // остаются только в audioSamples: finishRecording сохраняет их
@@ -1496,7 +1380,6 @@ final class DictationController: ObservableObject {
 
     private func cancelRecording() {
         session.invalidate()
-        if !isInstallingOmni { omni.cancel() }
         cancelPendingRecording()
         if let transcribeTask {
             transcribeTask.cancel()
@@ -1526,11 +1409,11 @@ final class DictationController: ObservableObject {
         if state == .recording || state == .transcribing { state = .idle }
     }
 
-    func shortcutReleased(_ engine: Engine) {
+    func shortcutReleased() {
         azaDebugLog("Aza: dictation keyUp state=\(state) latched=\(isLatched ? 1 : 0)")
         // В режиме фиксации отпускание клавиши ничего не значит — запись
         // остановит следующее нажатие.
-        guard !isLatched, (recordingLanguage == "ce") == (engine == .omni) else { return }
+        guard !isLatched else { return }
         if cancelPendingRecording() { return }
         finishRecording()
     }
@@ -1596,12 +1479,6 @@ final class DictationController: ObservableObject {
         let pid = targetAppPid
         targetElement = nil
         targetAppPid = nil
-
-        if recordingLanguage == "ce" {
-            stopStreaming()
-            transcribeOmni(samples: samples, element: element, targetPid: pid)
-            return
-        }
 
         // Модель ещё греется (запись шла параллельно загрузке): звук
         // ждёт её, остров показывает «Загружаю модель…» без волны —
@@ -1759,49 +1636,6 @@ final class DictationController: ObservableObject {
         }
     }
 
-    private func transcribeOmni(samples: [Float], element: AXUIElement?, targetPid: pid_t?) {
-        let generation = session.generation
-        let variant = recordingOmniVariant
-        let loading = loadTask
-        cancelWarmup()
-        whisper = nil
-        loadedProfile = nil
-        let predecessors = retiredWarmups
-        retiredWarmups = []
-        status = "Готовлю модель чеченского…"
-        isAwaitingModel = true
-        transcribeTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                if self.session.generation == generation {
-                    self.transcribeTask = nil
-                    self.isAwaitingModel = false
-                }
-            }
-            // Cancelled Whisper work can retain its model until its final await completes.
-            await loading?.value
-            for task in predecessors { await task.value }
-            guard !Task.isCancelled, self.session.accepts(generation) else { return }
-            do {
-                let text = try await self.omni.transcribe(samples, variant: variant) { status, _ in
-                    guard !Task.isCancelled, self.session.accepts(generation) else { return }
-                    self.status = status
-                    self.isAwaitingModel = status.hasPrefix("Готовлю")
-                }
-                guard !Task.isCancelled, self.session.accepts(generation) else { return }
-                self.activeLanguage = "ce"
-                // Russian/English filler and Whisper-confidence filters do not apply to Chechen.
-                self.finish(text: text, language: "ce", element: element,
-                            targetPid: targetPid, generation: generation)
-            } catch {
-                guard !Task.isCancelled, self.session.accepts(generation) else { return }
-                self.state = .idle
-                self.status = "Не удалось распознать чеченскую речь: \(error.localizedDescription)"
-                self.applyPendingProfileChange()
-            }
-        }
-    }
-
     private func finish(text: String, language: String,
                         element: AXUIElement?, targetPid: pid_t?, generation: UUID) {
         guard session.accepts(generation) else { return }
@@ -1837,7 +1671,7 @@ final class DictationController: ObservableObject {
         // клавиатурного фолбэка не должна запрещать AX из-за Secure Input
         // всего приложения. При успехе системный буфер вообще не меняем.
         if TextInsertion.insertIntoFocusedField(text, targetPid: targetPid, verifying: element) {
-            status = "Вставлено (\(language == "ce" ? "OmniASR" : language)): \(text.prefix(60))"
+            status = "Вставлено (\(language)): \(text.prefix(60))"
             applyPendingProfileChange()
             return
         }
@@ -1897,7 +1731,7 @@ final class DictationController: ObservableObject {
         let inserted = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: element ?? current)
         azaDebugLog("Aza: dictation paste fallback ok=\(inserted ? 1 : 0)")
         status = inserted
-            ? "Вставлено (\(language == "ce" ? "OmniASR" : language)): \(text.prefix(60))"
+            ? "Вставлено (\(language)): \(text.prefix(60))"
             : "Транскрипт во вкладке «Диктовка»: \(text.prefix(60))"
         applyPendingProfileChange()
     }

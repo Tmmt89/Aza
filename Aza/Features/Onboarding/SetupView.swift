@@ -25,7 +25,6 @@ struct SetupView: View {
         PrayerNotifications.Sound.system.rawValue
     @StateObject private var soundPreview = PrayerSoundPreview()
     @AppStorage(DictationController.profileStorageKey) private var profile = "balanced"
-    @AppStorage(OmniASR.variantStorageKey) private var omniVariant = "ctc"
     @StateObject private var locator = CityLocator()
     @AppStorage(ChechenAutocorrect.layoutStorageKey) private var layoutCorrection = false
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrection = false
@@ -40,8 +39,6 @@ struct SetupView: View {
     @AppStorage(MenuBarDisplay.storageKey) private var menuBarDisplay = MenuBarDisplay.logo
     @State private var dictationHotKey = HotKeyBinding.load(
         HotKeyBinding.dictationKey, fallback: .dictationDefault)
-    @State private var omniHotKey = HotKeyBinding.load(
-        HotKeyBinding.omniDictationKey, fallback: .omniDictationDefault)
     @State private var clipboardHotKey = HotKeyBinding.load(
         HotKeyBinding.clipboardKey, fallback: .clipboardDefault)
     @State private var phrasesHotKey = HotKeyBinding.load(
@@ -544,34 +541,21 @@ struct SetupView: View {
                                  registering: model.dictation.rebindHotKey)
                 }
                 .disabled(model.dictation.state != .idle)
-                divider
-                HotKeyRecorder(title: "OmniASR · чеченский", binding: $omniHotKey,
-                               allowModifierKeys: true,
-                               registrationError: model.dictation.omniHotKeyError) { binding in
-                    binding.save(HotKeyBinding.omniDictationKey) {
-                        model.dictation.rebindHotKey(for: .omni)
-                    }
-                }
-                .disabled(model.dictation.state != .idle)
-                hint("Удерживайте клавишу нужной модели для записи. Двойное нажатие той же клавиши включает запись без удержания; она же, Пробел или Enter останавливают её. Следующую запись начинайте после вставки текста.")
+                hint("Удерживайте клавишу диктовки для записи. Двойное нажатие той же клавиши включает запись без удержания; она же, Пробел или Enter останавливают её. Следующую запись начинайте после вставки текста.")
             }
             card("Распознавание") {
                 settingRow("Язык") {
-                    Picker("Язык диктовки", selection: $dictationLanguage) {
+                    Picker("Язык диктовки", selection: Binding(
+                        get: { DictationController.preferredLanguage },
+                        set: { dictationLanguage = $0 }
+                    )) {
                         Text("Авто").tag("auto")
                         Text("Русский").tag("ru")
                         Text("English").tag("en")
-                        Text("Чеченский").tag("ce")
                     }
                     .labelsHidden()
                     .frame(width: 160)
-                    .disabled(!model.dictation.canChangeEngine)
-                    .onChange(of: dictationLanguage) { _, _ in model.dictation.languageChanged() }
-                }
-                if dictationLanguage == "ce" {
-                    hint("Для запуска из меню выбран OmniASR. Клавиша Whisper всё равно запускает Whisper с автоопределением русского / English. Качество чеченской речи пока экспериментальное.")
-                } else {
-                    hint("Этот язык используется Whisper и запуском из меню. Горячая клавиша OmniASR всегда включает чеченскую модель.")
+                    .disabled(!model.dictation.canChangeSettings)
                 }
                 divider
                 VStack(alignment: .leading, spacing: 8) {
@@ -581,15 +565,13 @@ struct SetupView: View {
                         .font(AzaStyle.body)
                         .accessibilityLabel("Свои слова для диктовки")
                 }
-                .disabled(dictationLanguage == "ce")
                 divider
                 settingToggle("Убирать звуки-паразиты", isOn: $removeFillers,
                               help: "Убирает «эм», «э-э» и “uh”. Слова «ну» и «вот» остаются.")
-                    .disabled(dictationLanguage == "ce")
                 divider
                 settingToggle("Распознавать во время записи", isOn: $streamingDictation,
-                              help: "Сокращает ожидание после записи с Whisper. Работает для русского и английского; чеченская речь распознаётся после остановки.")
-                    .disabled(dictationLanguage == "auto" || dictationLanguage == "ce")
+                              help: "Сокращает ожидание после записи. Работает при явно выбранном русском или английском языке.")
+                    .disabled(DictationController.preferredLanguage == "auto")
             }
             card("Whisper · русский и английский") {
                 ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in
@@ -606,7 +588,7 @@ struct SetupView: View {
                 // Полоса живёт только пока идёт скачивание. Ровно 100% —
                 // это уже подготовка модели, и полосу надо убрать: иначе она
                 // выглядит зависшей всё время прогрева.
-                if !model.dictation.isInstallingOmni, let progress = model.dictation.downloadProgress, progress < 0.999 {
+                if let progress = model.dictation.downloadProgress, progress < 0.999 {
                     VStack(alignment: .leading, spacing: 4) {
                         ProgressView(value: progress)
                             .tint(AzaStyle.rise)
@@ -614,7 +596,7 @@ struct SetupView: View {
                             .font(AzaStyle.caption)
                             .foregroundStyle(AzaStyle.faint)
                     }
-                } else if !model.dictation.isInstallingOmni, case .loadingModel = model.dictation.state {
+                } else if case .loadingModel = model.dictation.state {
                     Text("Готовлю модель…")
                         .font(AzaStyle.caption)
                         .foregroundStyle(AzaStyle.faint)
@@ -626,7 +608,7 @@ struct SetupView: View {
                     .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
                     // Скачивание обнуляет модель в памяти — во время диктовки
                     // нельзя, как и удаление (guard дублируется в контроллере).
-                    .disabled(!model.dictation.canChangeEngine || dictationLanguage == "ce")
+                    .disabled(!model.dictation.canChangeSettings)
                 }
                 divider
                 HStack {
@@ -654,58 +636,6 @@ struct SetupView: View {
                     }
                 }
 
-            }
-            card("Чеченский · OmniASR") {
-                let variant = OmniASR.Variant(rawValue: omniVariant) ?? .ctc
-                Picker("Вариант OmniASR", selection: $omniVariant) {
-                    ForEach(OmniASR.Variant.allCases) { option in
-                        Text(option.title).tag(option.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .disabled(!model.dictation.canChangeEngine)
-                .onChange(of: omniVariant) { _, _ in model.dictation.languageChanged() }
-                hint(variant == .ctc
-                     ? "Быстрый вариант. Разрешены только русские и чеченские буквы, цифры и знаки. Ограничение алфавита не гарантирует правильные слова."
-                     : "Языковая подсказка: чеченский. Русские буквы тоже разрешены. Этот вариант требует больше памяти и работает медленнее; смешанную речь нужно проверить на своих записях.")
-                divider
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(variant.modelName).font(AzaStyle.label)
-                        Text(OmniASR.isInstalled(variant) ? "Скачана · работает без интернета" : "\(variant.sizeLabel) + общие компоненты")
-                            .font(AzaStyle.caption).foregroundStyle(AzaStyle.faint)
-                    }
-                    Spacer()
-                    if model.dictation.isInstallingOmni {
-                        Button("Отменить") { model.dictation.cancelOmniDownload() }
-                    } else {
-                        if !OmniASR.isInstalled(variant) {
-                            Button("Скачать") { model.dictation.downloadOmniModel() }
-                                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
-                                .disabled(!model.dictation.canChangeEngine || !OmniASR.supported)
-                        }
-                        if FileManager.default.fileExists(atPath: OmniASR.directory.path) {
-                            Button("Удалить OmniASR", role: .destructive) {
-                                Task { modelDeleteError = await model.dictation.deleteOmniModel() }
-                            }
-                            .help("Удаляет оба варианта OmniASR и общие компоненты распознавания")
-                            .disabled(!model.dictation.canDeleteModels)
-                        }
-                    }
-                }
-                if model.dictation.isInstallingOmni {
-                    if let progress = model.dictation.downloadProgress {
-                        ProgressView(value: progress).tint(AzaStyle.rise)
-                    } else {
-                        ProgressView().controlSize(.small)
-                    }
-                }
-                Text(model.dictation.status)
-                    .font(AzaStyle.caption).foregroundStyle(AzaStyle.muted)
-                    .textSelection(.enabled)
-                hint(OmniASR.supported
-                     ? "Скачивается только выбранный вариант, по кнопке. Горячая клавиша \(omniHotKey.display) запускает вариант, выбранный выше. Память освобождается после каждой записи; настройка выгрузки выше относится к Whisper."
-                     : "Для чеченской модели нужен Mac с Apple Silicon.")
             }
             card("Звуковые сигналы") {
                 HStack {
@@ -800,7 +730,7 @@ struct SetupView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(!model.dictation.canChangeEngine || dictationLanguage == "ce")
+            .disabled(!model.dictation.canChangeSettings)
 
             // Удаление одной модели, не трогая остальные: выгружаем из
             // памяти только её и стираем только её папку в кэше.

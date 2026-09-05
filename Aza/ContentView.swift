@@ -55,8 +55,7 @@ struct ContentView: View {
         }
         for (title, error) in [("Буфер", island.clipboardHotKeyError),
                                ("Фразы", island.phrasesHotKeyError),
-                               ("Whisper", dictation.hotKeyError),
-                               ("OmniASR", dictation.omniHotKeyError)] {
+                               ("Диктовка", dictation.hotKeyError)] {
             if let error { result.append("\(title): \(error)") }
         }
         if layoutCorrection || typoCorrection, !hotKey.inputMonitoringGranted {
@@ -229,19 +228,19 @@ struct ContentView: View {
                             help: "Показывать подтверждение копирования в острове.")
                 quickToggle("Диктовка без слов-паразитов", symbol: "text.badge.checkmark", isOn: $removeFillers,
                             help: "Убирать слова-паразиты из результата диктовки.")
-                    .disabled(dictationLanguage == "ce")
             }
             HStack {
                 Label("Язык диктовки", systemImage: "globe").font(AzaStyle.body)
                 Spacer()
-                Picker("Язык диктовки", selection: $dictationLanguage) {
+                Picker("Язык диктовки", selection: Binding(
+                    get: { DictationController.preferredLanguage },
+                    set: { dictationLanguage = $0 }
+                )) {
                     Text("Авто").tag("auto")
                     Text("Русский").tag("ru")
                     Text("English").tag("en")
-                    Text("Чеченский").tag("ce")
                 }
-                .labelsHidden().frame(width: 120).disabled(!dictation.canChangeEngine)
-                .onChange(of: dictationLanguage) { _, _ in dictation.languageChanged() }
+                .labelsHidden().frame(width: 120).disabled(!dictation.canChangeSettings)
             }
         }
     }
