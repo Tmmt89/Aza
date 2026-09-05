@@ -354,15 +354,12 @@ final class IslandPanelController {
     /// неключевой неактивирующей панели хрупок (first mouse).
     private func installClickTap() {
         guard clickTap == nil, AXIsProcessTrusted() else { return }
-        let mask: CGEventMask = (1 << CGEventType.leftMouseDown.rawValue)
-            | (1 << CGEventType.leftMouseUp.rawValue)
-            | (1 << CGEventType.leftMouseDragged.rawValue)
-            | (1 << CGEventType.rightMouseDown.rawValue)
-            | (1 << CGEventType.rightMouseUp.rawValue)
-            | (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.keyUp.rawValue)
-            | (1 << CGEventType.flagsChanged.rawValue)
-            | (1 << CGEventType.scrollWheel.rawValue)
+        let eventTypes: [CGEventType] = [
+            .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+            .rightMouseDown, .rightMouseUp, .keyDown, .keyUp,
+            .flagsChanged, .scrollWheel,
+        ]
+        let mask = eventTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
             options: .defaultTap, eventsOfInterest: mask,
