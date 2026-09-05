@@ -340,10 +340,16 @@ enum TextInsertion {
     /// когда в фокусе не пароль. Синтетический ввод ниже остаётся запрещён.
     static func insertIntoFocusedField(_ text: String, targetPid: pid_t?,
                                        verifying element: AXUIElement?) -> Bool {
+        guard let current = focusedElement(targetPid: targetPid, verifying: element) else { return false }
+        return insert(text, into: current) == .success
+    }
+
+    /// Известное исходное поле для адресных AX-действий, без синтетических клавиш.
+    static func focusedElement(targetPid: pid_t?, verifying element: AXUIElement?) -> AXUIElement? {
         guard let targetPid, targetPid > 0, let element,
               let current = focusedElement(), isTextLike(current),
-              focusMatches(targetPid: targetPid, verifying: element, focused: current) else { return false }
-        return insert(text, into: current) == .success
+              focusMatches(targetPid: targetPid, verifying: element, focused: current) else { return nil }
+        return current
     }
 
     /// Перепроверка перед ОТЛОЖЕННЫМ синтетическим ⌘V: за задержку фокус
@@ -384,10 +390,19 @@ enum TextInsertion {
     /// выставляются явно: физически зажатые модификаторы (правая ⌥ в
     /// hold-режиме фраз) на посланное событие не переносятся.
     static func postPasteCommand(targetPid: pid_t?, verifying element: AXUIElement? = nil) -> Bool {
+        guard let targetPid = targetPid ?? NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              targetPid > 0 else { return false }
+        // Secure Input запрещает клавиши, но обычное поле может принять
+        // собственную команду приложения. AXSelectedText в webview бывает no-op.
+        if IsSecureEventInputEnabled(),
+           focusedElement(targetPid: targetPid, verifying: element) != nil,
+           let command = pasteMenuItem(in: targetPid),
+           focusedElement(targetPid: targetPid, verifying: element) != nil {
+            return AXUIElementPerformAction(command, kAXPressAction as CFString) == .success
+        }
         // AX-вызов мог ждать ответа приложения: проверка вызывающего кода
         // к этому моменту уже устарела. Перепроверяем у самой отправки.
-        guard let targetPid = targetPid ?? NSWorkspace.shared.frontmostApplication?.processIdentifier,
-              focusSafeForPaste(targetPid: targetPid, verifying: element) else {
+        guard focusSafeForPaste(targetPid: targetPid, verifying: element) else {
             azaDebugLog("Aza: paste blocked — focus moved or secure")
             return false
         }
@@ -403,6 +418,40 @@ enum TextInsertion {
         markAndPost(keyDown, to: targetPid)
         markAndPost(keyUp, to: targetPid)
         return true
+    }
+
+    /// Стандартная команда ⌘V; нулевой AX-модификатор означает именно Command.
+    static func isPasteShortcut(character: String?, virtualKey: Int?, modifiers: Int?) -> Bool {
+        modifiers == 0 && (character?.lowercased() == "v" || virtualKey == kVK_ANSI_V)
+    }
+
+    private static func pasteMenuItem(in pid: pid_t) -> AXUIElement? {
+        func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        func children(of element: AXUIElement) -> [AXUIElement] {
+            guard let values = attribute(kAXChildrenAttribute, of: element) as? [AnyObject] else { return [] }
+            return values.compactMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
+        }
+        guard let bar = attribute(kAXMenuBarAttribute, of: AXUIElementCreateApplication(pid)),
+              CFGetTypeID(bar) == AXUIElementGetTypeID() else { return nil }
+        // Только обычные пункты строки меню: не обходим документы и подменю.
+        for heading in children(of: bar as! AXUIElement) {
+            for menu in children(of: heading) {
+                for item in children(of: menu) {
+                    if isPasteShortcut(
+                        character: attribute(kAXMenuItemCmdCharAttribute, of: item) as? String,
+                        virtualKey: attribute(kAXMenuItemCmdVirtualKeyAttribute, of: item) as? Int,
+                        modifiers: attribute(kAXMenuItemCmdModifiersAttribute, of: item) as? Int
+                    ), attribute(kAXEnabledAttribute, of: item) as? Bool == true {
+                        return item
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     private static func postUnicode(_ text: String) -> Bool {

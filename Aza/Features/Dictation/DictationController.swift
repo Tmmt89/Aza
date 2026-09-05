@@ -1682,7 +1682,8 @@ final class DictationController: ObservableObject {
         let currentPid = current.flatMap(TextInsertion.processID(of:))
             ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
         let sameApp = targetPid != nil && targetPid == currentPid
-            && TextInsertion.focusSafeForPaste(targetPid: targetPid, verifying: element)
+            && (TextInsertion.focusSafeForPaste(targetPid: targetPid, verifying: element)
+                || TextInsertion.focusedElement(targetPid: targetPid, verifying: element) != nil)
         azaDebugLog("Aza: dictation insert target=\(element == nil ? 0 : 1) current=\(current == nil ? 0 : 1) sameApp=\(sameApp ? 1 : 0)")
 
         guard sameApp else {

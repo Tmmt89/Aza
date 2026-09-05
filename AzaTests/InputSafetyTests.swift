@@ -6,6 +6,17 @@ import XCTest
 
 @MainActor
 final class InputSafetyTests: XCTestCase {
+    func testNativePasteAcceptsOnlyTheCommandVMenuShortcut() {
+        XCTAssertTrue(TextInsertion.isPasteShortcut(character: "V", virtualKey: nil, modifiers: 0))
+        XCTAssertTrue(TextInsertion.isPasteShortcut(character: "м", virtualKey: kVK_ANSI_V, modifiers: 0))
+        for modifiers in [nil, 1, 2, 4, 8] {
+            XCTAssertFalse(TextInsertion.isPasteShortcut(character: "v", virtualKey: kVK_ANSI_V,
+                                                        modifiers: modifiers))
+        }
+        XCTAssertFalse(TextInsertion.isPasteShortcut(character: "c", virtualKey: kVK_ANSI_C, modifiers: 0))
+        XCTAssertFalse(TextInsertion.isPasteShortcut(character: nil, virtualKey: nil, modifiers: 0))
+    }
+
     func testWhisperLanguageAndShortcutAfterRemovingChechen() {
         let key = DictationController.languageStorageKey
         let previous = UserDefaults.standard.object(forKey: key)
