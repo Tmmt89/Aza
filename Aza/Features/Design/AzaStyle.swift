@@ -53,6 +53,14 @@ enum AzaMotion {
     static let compact = 0.24
     static let expand = 0.32
 
+    /// Декоративный индикатор записи, не измеритель громкости микрофона.
+    static func dictationBarHeight(index: Int, time: TimeInterval) -> CGFloat {
+        let time = max(0, time)
+        let phase = Double(index)
+        let wave = (sin(time * 6 + phase * 0.85) + sin(time * 3.2 - phase * 0.6)) / 4 + 0.5
+        let envelope = 1 - abs(phase - 3) / 5
+        return 4 + 22 * envelope * (0.25 + 0.75 * wave) * min(1, time / 0.28)
+    }
 }
 
 /// Окно настроек с отключённым прижатием к экрану: для анимации ухода

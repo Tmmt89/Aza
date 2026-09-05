@@ -4,6 +4,12 @@ import SwiftUI
 
 struct IslandRootView: View {
     @ObservedObject var store: IslandStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dictationRevealed = false
+
+    private var revealsDictation: Bool {
+        store.mode == .dictation && !reduceMotion
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -33,20 +39,31 @@ struct IslandRootView: View {
             }
             .id(store.mode)
             .padding(.horizontal, store.mode.shoulder)
+            .opacity(revealsDictation && !dictationRevealed ? 0 : 1)
+            .offset(y: revealsDictation && !dictationRevealed ? -3 : 0)
+            .animation(revealsDictation ? .easeOut(duration: AzaMotion.compact).delay(0.08) : nil,
+                       value: dictationRevealed)
         }
         .preferredColorScheme(.dark)
-        .clipShape(IslandSilhouette(
-            shoulder: store.mode.shoulder,
-            bottomRadius: store.mode.bottomRadius
-        ))
+        .mask {
+            GeometryReader { geometry in
+                IslandSilhouette(shoulder: store.mode.shoulder,
+                                 bottomRadius: store.mode.bottomRadius)
+                    .frame(width: revealsDictation && !dictationRevealed
+                           ? min(geometry.size.width, store.hasNotch ? store.notchWidth : 64)
+                           : geometry.size.width)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .animation(revealsDictation ? .smooth(duration: 0.42) : nil,
+                               value: dictationRevealed)
+            }
+        }
         .shadow(
             color: .black.opacity(store.mode.shadow.opacity),
             radius: store.mode.shadow.radius,
             y: store.mode.shadow.y
         )
-        // Смену режима контент НЕ анимирует: панель целиком опускается
-        // из выреза уже в новом облике (IslandPanelController), и морф
-        // содержимого внутри летящего окна давал бы кашу из двух анимаций.
+        // Раскрывается маска, а не окно: кадр и область кликов стабильны.
+        .task(id: store.mode) { dictationRevealed = store.mode == .dictation }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Aza")
     }
@@ -702,35 +719,60 @@ private struct PrayerTimeCell: View {
 
 private struct DictationIslandView: View {
     @ObservedObject var store: IslandStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Отпустили клавишу — запись кончилась, идёт распознавание: волна и
     /// кнопка стоп в этот момент врут (стоп вообще не работает вне записи).
     private var isTranscribing: Bool { store.dictation.state == .transcribing }
     private var isPreparing: Bool { store.dictation.state == .preparingRecording }
+    private var isRecording: Bool { store.dictation.state == .recording }
+
+    private var statusTransition: AnyTransition {
+        reduceMotion ? .identity : .asymmetric(
+            insertion: .opacity.animation(.easeOut(duration: 0.16).delay(0.08)),
+            removal: .opacity.animation(.easeOut(duration: 0.08))
+        )
+    }
 
     var body: some View {
         NotchRow(reservesNotch: store.hasNotch, notchWidth: store.notchWidth,
                  height: store.hasNotch ? store.notchHeight : 40,
                  horizontalPadding: 16) {
-            HStack(spacing: 14) {
+            ZStack(alignment: .leading) {
                 if isTranscribing || isPreparing {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(AzaStyle.danger)
-                    // Запись кончилась раньше, чем поднялась модель:
-                    // честно говорим, чего ждём; сообщение уходит само,
-                    // когда модель загрузится и начнётся распознавание.
-                    Text(isPreparing ? "Готовлю запись…" : (store.dictation.isAwaitingModel
-                         ? "Загружаю модель распознавания…" : "Распознаю…"))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(AzaStyle.ink)
-                } else {
+                    HStack(spacing: 10) {
+                        if reduceMotion {
+                            Image(systemName: "ellipsis")
+                                .foregroundStyle(AzaStyle.danger)
+                        } else {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(AzaStyle.danger)
+                        }
+                        Text(isPreparing ? "Готовлю…" : (store.dictation.isAwaitingModel
+                             ? "Загружаю…" : "Распознаю…"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(AzaStyle.ink)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .transition(statusTransition)
+                } else if isRecording {
                     // Запись — красная: универсальный язык REC, зелёная
                     // точка читалась как «всё ок», а не «идёт запись».
-                    Circle().fill(AzaStyle.danger).frame(width: 12, height: 12)
-                    WaveformView()
+                    HStack(spacing: 14) {
+                        Circle().fill(AzaStyle.danger).frame(width: 12, height: 12)
+                        WaveformView()
+                    }
+                    .transition(statusTransition)
                 }
             }
+            .animation(reduceMotion ? nil : .easeInOut(duration: AzaMotion.micro),
+                       value: store.dictation.state)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(isRecording ? "Идёт запись" : isPreparing ? "Готовлю запись"
+                                : store.dictation.isAwaitingModel ? "Загружаю модель распознавания"
+                                : "Распознаю речь")
         } right: {
             HStack(spacing: 14) {
                 // Язык и таймер — одной базовой линией: раньше таймер
@@ -739,14 +781,14 @@ private struct DictationIslandView: View {
                     Text(store.dictation.activeLanguage.uppercased())
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(AzaStyle.muted)
-                    Text(isTranscribing || isPreparing ? "" : store.dictation.elapsedText)
+                    Text(isRecording ? store.dictation.elapsedText : "")
                         .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
                         .foregroundStyle(AzaStyle.ink)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 }
                 .frame(width: 90, alignment: .trailing)
-                if !isTranscribing, store.dictation.isLatched {
+                if (isRecording || isPreparing), store.dictation.isLatched {
                     Button { store.dictation.stopFromUI() } label: {
                         Image(systemName: "square")
                             .font(.system(size: 10, weight: .semibold))
@@ -755,6 +797,7 @@ private struct DictationIslandView: View {
                             .background(AzaStyle.danger, in: Circle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(isPreparing ? "Отменить запись" : "Остановить запись")
                 } else {
                     Color.clear.frame(width: 20, height: 20)
                 }
@@ -765,44 +808,23 @@ private struct DictationIslandView: View {
 }
 
 private struct WaveformView: View {
-    @State private var animates = false
+    @State private var startedAt = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let heights: [CGFloat] = [10, 18, 26, 14, 22, 12, 24]
-
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(heights.indices, id: \.self) { index in
-                Capsule()
-                    .fill(index.isMultiple(of: 2)
-                          ? AzaStyle.danger
-                          : AzaStyle.danger.opacity(0.45))
-                    .frame(width: 4, height: heights[index])
-                    // Неоновое свечение каждого бара: тень цвета записи
-                    // дышит вместе с анимацией высоты (идея из ClickUp).
-                    .shadow(color: AzaStyle.danger.opacity(0.25), radius: 3)
-                    .scaleEffect(y: reduceMotion || animates ? 1 : 0.45)
-                    .animation(
-                        reduceMotion
-                            ? nil
-                            : .easeInOut(duration: 0.55 + Double(index) * 0.04)
-                                .repeatForever(autoreverses: true)
-                                .delay(Double(index) * 0.06),
-                        value: animates
-                    )
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
+            HStack(spacing: 5) {
+                ForEach(0..<7) { index in
+                    Capsule()
+                        .fill(AzaStyle.danger.opacity(index.isMultiple(of: 2) ? 1 : 0.65))
+                        .frame(width: 4, height: AzaMotion.dictationBarHeight(
+                            index: index, time: reduceMotion ? 1 : context.date.timeIntervalSince(startedAt)))
+                        .shadow(color: AzaStyle.danger.opacity(0.2), radius: 3)
+                }
             }
         }
         .frame(width: 58, height: 26)
-        // Мягкая задняя подсветка позади волны — размытое пятно цвета
-        // записи, как у ClickUp: волна будто светится изнутри острова.
-        .background(
-            Ellipse()
-                .fill(AzaStyle.danger.opacity(0.1))
-                .blur(radius: 14)
-                .scaleEffect(x: 1.5, y: 1.9)
-        )
-        .onAppear { animates = !reduceMotion }
-        .onChange(of: reduceMotion) { _, value in animates = !value }
+        .accessibilityHidden(true)
     }
 }
 

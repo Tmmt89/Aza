@@ -43,7 +43,7 @@ enum IslandMode: String, CaseIterable {
                                height: 40)
         // Высота с вырезом переопределяется в IslandPanelController на
         // точную высоту выреза этого экрана; 40 — запасной вариант.
-        case (.dictation, true): NSSize(width: 490, height: 40)
+        case (.dictation, true): NSSize(width: notchWidth + 330, height: 40)
         case (.dictation, false): NSSize(width: 360, height: 40)
         case (.home, true): NSSize(width: 780, height: 230)
         case (.home, false): NSSize(width: 700, height: 230)

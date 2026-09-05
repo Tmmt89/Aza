@@ -234,7 +234,9 @@ final class IslandPanelController {
             // Финальная геометрия считается ДО анимации: остров выезжает
             // из-за кромки экрана на своё место, а не из старого кадра.
             resize(for: store.mode)
-            guard animated else {
+            // Диктовка раскрывает маску внутри финального кадра. Движение
+            // окна одновременно с ней давало второй, несогласованный вход.
+            guard animated, store.mode != .dictation else {
                 panel.orderFrontRegardless()
                 return
             }
