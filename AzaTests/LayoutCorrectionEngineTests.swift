@@ -7,13 +7,24 @@ final class LayoutCorrectionEngineTests: XCTestCase {
         Array("йцукенгшщзхъфывапролджэячсмитьбю")
     ))
 
+    private var savedLayoutFlag: Any?
+    private var savedLatinFlag: Any?
+
     override func setUp() {
         super.setUp()
         UserWordLists.shared.suspendedForTests = true
+        // Тесты движка работают при включённой коррекции; по умолчанию она
+        // теперь выключена, поэтому включаем явно и восстанавливаем после.
+        savedLayoutFlag = UserDefaults.standard.object(forKey: ChechenAutocorrect.layoutStorageKey)
+        savedLatinFlag = UserDefaults.standard.object(forKey: ChechenAutocorrect.latinizationStorageKey)
+        ChechenAutocorrect.isLayoutCorrectionEnabled = true
+        ChechenAutocorrect.isLatinizationEnabled = true
     }
 
     override func tearDown() {
         UserWordLists.shared.suspendedForTests = false
+        UserDefaults.standard.set(savedLayoutFlag, forKey: ChechenAutocorrect.layoutStorageKey)
+        UserDefaults.standard.set(savedLatinFlag, forKey: ChechenAutocorrect.latinizationStorageKey)
         super.tearDown()
     }
 
@@ -28,6 +39,8 @@ final class LayoutCorrectionEngineTests: XCTestCase {
     }
 
     func testShortWordRemaps() {
+        XCTAssertEqual(LayoutCorrectionEngine.correction(for: "ghbdtn!")?.text, "привет!")
+        XCTAssertEqual(LayoutCorrectionEngine.correction(for: "ghbdtn?!")?.text, "привет?!")
         // Двухбуквенные местоимения и частицы исправляются, однобуквенное —
         // только «я»; английские и кодовые диграфы не трогаются.
         XCTAssertEqual(LayoutCorrectionEngine.correction(for: "ns")?.text, "ты")
@@ -38,6 +51,15 @@ final class LayoutCorrectionEngineTests: XCTestCase {
         XCTAssertNil(LayoutCorrectionEngine.correction(for: "js"))
         XCTAssertNil(LayoutCorrectionEngine.correction(for: "b"))
         XCTAssertNil(LayoutCorrectionEngine.correction(for: "t"))
+    }
+
+    func testPunctuationCannotBypassUserExclusion() {
+        XCTAssertNil(LayoutCorrectionEngine.correction(
+            for: "ghbdtn!", isNeverCorrect: { $0 == "ghbdtn!" }))
+        XCTAssertNil(LayoutCorrectionEngine.correction(
+            for: "ghbdtn!", isNeverCorrect: { $0 == "ghbdtn" }))
+        XCTAssertEqual(LayoutCorrectionEngine.correction(
+            for: "ghbdtn?", isNeverCorrect: { $0 == "ghbdtn!" })?.text, "привет?")
     }
 
     func testRussianBackwardSpan() {
@@ -98,6 +120,37 @@ final class LayoutCorrectionEngineTests: XCTestCase {
         XCTAssertEqual(LayoutCorrectionEngine.typoCorrection(
             for: "барклла", isValidRussian: { _ in false }
         ), "баркалла")
+    }
+
+    func testLayoutAndTyposCanBeEnabledIndependently() {
+        let saved = UserDefaults.standard.object(forKey: ChechenAutocorrect.typoStorageKey)
+        defer { UserDefaults.standard.set(saved, forKey: ChechenAutocorrect.typoStorageKey) }
+
+        for layout in [false, true] {
+            for typos in [false, true] {
+                ChechenAutocorrect.isLayoutCorrectionEnabled = layout
+                ChechenAutocorrect.isTypoCorrectionEnabled = typos
+                XCTAssertEqual(LayoutCorrectionEngine.correction(for: "ghbdtn")?.text,
+                               layout ? "привет" : nil)
+                let correction = LayoutCorrectionEngine.correction(for: "барклла!")
+                XCTAssertEqual(correction?.text, typos ? "баркалла!" : nil)
+                XCTAssertNil(correction?.inputLanguage)
+            }
+        }
+
+        ChechenAutocorrect.isLayoutCorrectionEnabled = false
+        ChechenAutocorrect.isTypoCorrectionEnabled = true
+        XCTAssertNil(LayoutCorrectionEngine.correction(
+            for: "барклла!", isNeverCorrect: { $0 == "барклла" }))
+        XCTAssertNil(LayoutCorrectionEngine.correction(for: "1алам"))
+        XCTAssertNil(LayoutCorrectionEngine.forwardContextRemap(
+            for: "le", previousIsChechen: true))
+        XCTAssertNil(LayoutCorrectionEngine.backwardContextSpan(previous: [
+            .init(typed: "le", delimiter: " ", chechen: false, corrected: false),
+        ], correctedWord: "баркалла"))
+        XCTAssertNil(LayoutCorrectionEngine.backwardRussianSpan(previous: [
+            .init(typed: "e", delimiter: " ", chechen: false, corrected: false),
+        ], correctedWord: "меня"))
     }
 
     func testForwardAndBackwardPhraseContext() {

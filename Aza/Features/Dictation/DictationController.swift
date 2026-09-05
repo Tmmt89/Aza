@@ -15,9 +15,22 @@ import WhisperKit
 @MainActor
 final class DictationController: ObservableObject {
 
+    enum Engine: CaseIterable {
+        case whisper, omni
+
+        var bindingKey: String { self == .whisper ? HotKeyBinding.dictationKey : HotKeyBinding.omniDictationKey }
+        var binding: HotKeyBinding {
+            HotKeyBinding.load(bindingKey, fallback: self == .whisper ? .dictationDefault : .omniDictationDefault)
+        }
+        var language: String {
+            self == .omni ? "ce" : (DictationController.preferredLanguage == "ce" ? "auto" : DictationController.preferredLanguage)
+        }
+    }
+
     enum State: Equatable {
         case idle
         case loadingModel(String)
+        case preparingRecording
         case recording
         case transcribing
     }
@@ -26,13 +39,76 @@ final class DictationController: ObservableObject {
         didSet {
             rescheduleIdleUnload()
             updateLatchStopKeys()
+            if state == .idle { resumePrayerNotifications() }
         }
     }
     @Published private(set) var status = "Диктовка: удерживайте сочетание"
+    @Published private(set) var hotKeyError: String?
+    @Published private(set) var omniHotKeyError: String?
     /// Начало текущей записи — для таймера в острове.
     @Published private(set) var recordingStartedAt: Date?
     /// Доля загрузки модели 0…1 — для полосы прогресса в настройках.
     @Published private(set) var downloadProgress: Double?
+    @Published private(set) var isInstallingOmni = false
+    private let omni: OmniASR
+    private var omniInstallTask: Task<Void, Never>?
+    // One recording keeps its engine/language even if defaults change during an await.
+    private var recordingLanguage = "auto"
+    private var recordingOmniVariant = OmniASR.Variant.ctc
+
+    var canChangeEngine: Bool { state == .idle && !isLoadingModel && !isInstallingOmni && session.canStart }
+
+    func downloadOmniModel() {
+        guard canChangeEngine else { return }
+        let variant = OmniASR.preferredVariant
+        isInstallingOmni = true
+        state = .loadingModel("OmniASR")
+        status = "Скачиваю чеченскую модель…"
+        cancelWarmup()
+        whisper = nil
+        loadedProfile = nil
+        omniInstallTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.isInstallingOmni = false
+                self.omniInstallTask = nil
+                self.downloadProgress = nil
+                self.state = .idle
+                self.applyPendingProfileChange()
+            }
+            await self.drainWarmup()
+            do {
+                try Task.checkCancellation()
+                try await self.omni.install(variant) { status, progress in
+                    guard !Task.isCancelled else { return }
+                    self.status = status
+                    self.downloadProgress = progress
+                }
+                self.status = "Чеченская модель скачана — удерживайте \(Engine.omni.binding.display)"
+            } catch {
+                self.status = Task.isCancelled ? "Загрузка чеченской модели отменена"
+                    : "Не удалось скачать чеченскую модель: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func cancelOmniDownload() {
+        omniInstallTask?.cancel()
+        if isInstallingOmni { omni.cancel() }
+    }
+
+    func deleteOmniModel() async -> String? {
+        await performModelDeletion {
+            omni.cancel()
+            await drainWarmup()
+            return PrivacyCleanup.deleteOmniModel()
+        }
+    }
+
+    func languageChanged() {
+        pendingProfileChange = true
+        applyPendingProfileChange()
+    }
 
     /// Явная загрузка выбранной модели по кнопке (§5.4): пользователь
     /// видит, что качается и сколько осталось.
@@ -40,7 +116,7 @@ final class DictationController: ObservableObject {
         // Во время записи/распознавания обнулять whisper нельзя: prepareModel
         // тут же вышел бы по своему guard state == .idle, и живая диктовка
         // осталась бы без модели (кнопка задизейблена, guard — второй рубеж).
-        guard state == .idle else { return }
+        guard canChangeEngine, Self.preferredLanguage != "ce" else { return }
         suppressPrewarm = false
         // В памяти может лежать ДРУГОЙ профиль — тогда prepareModel
         // молча выходил по guard whisper == nil, и кнопка не работала.
@@ -146,7 +222,8 @@ final class DictationController: ObservableObject {
     /// поэтому явный выбор — не роскошь, а рабочий инструмент.
     static let languageStorageKey = "DictationLanguage"
     static var preferredLanguage: String {
-        UserDefaults.standard.string(forKey: languageStorageKey) ?? "auto"
+        let language = UserDefaults.standard.string(forKey: languageStorageKey) ?? "auto"
+        return ["auto", "ru", "en", "ce"].contains(language) ? language : "auto"
     }
 
     /// Предохранитель §5.1: максимум 30 минут на одну запись.
@@ -166,10 +243,10 @@ final class DictationController: ObservableObject {
         return directory
     }
 
-    private var hotKey: HotKeyController?
+    private var hotKeys: [Engine: HotKeyController] = [:]
     /// Одиночный модификатор (Fn, ⌃, ⌥…) идёт мимо Carbon — через
     /// монитор flagsChanged.
-    private var fnMonitor: ModifierKeyMonitor?
+    private var modifierMonitors: [Engine: ModifierKeyMonitor] = [:]
     private var whisper: WhisperKit?
     private var audio: AudioProcessor?
     private var failsafeTimer: Timer?
@@ -241,13 +318,21 @@ final class DictationController: ObservableObject {
     /// Нажатие клавиши во время await барьера удаления иначе сбрасывало
     /// suppressPrewarm и воскрешало стираемую модель — цикл барьера мог
     /// не завершиться никогда.
-    private var modelDeletionInProgress = false
+    @Published private var session = DictationSession()
+    private var sessionObservers: [NSObjectProtocol] = []
+    private var transcribeTask: Task<Void, Never>?
+    private var recordingStartTask: Task<Void, Never>?
+    private var recordingStartID: UUID?
+    private var prayerPauseID: UUID?
+
+    var canDeleteModels: Bool { state == .idle && !isInstallingOmni && session.canStart }
     /// Для острова: экран распознавания показывает «Загружаю модель…»
     /// вместо «Распознаю…», пока звук ждёт модель.
     @Published private(set) var isAwaitingModel = false
-    /// Пробная запись ради диалога TCC: результат всегда отбрасывается,
-    /// поле для вставки не запоминается (активация окна сместила бы фокус).
-    private var isPermissionProbe = false
+    @Published private(set) var isRequestingMicrophone = false
+    private let microphoneAuthorization: () -> AVAuthorizationStatus
+    private let accessibilityTrusted: () -> Bool
+    private let requestMicrophoneAuthorization: () async -> Bool
     /// После удаления моделей не греем автоматически: иначе удаление
     /// немедленно обернулось бы новой загрузкой в сотни мегабайт.
     private var suppressPrewarm = false
@@ -259,6 +344,7 @@ final class DictationController: ObservableObject {
         didSet { updateLatchStopKeys() }
     }
     private var lastPressAt = Date.distantPast
+    private var lastPressEngine: Engine?
     /// Второе нажатие в пределах этого окна включает фиксацию.
     private static let doubleTapWindow: TimeInterval = 0.5
     /// Пробел/Enter как стоп зафиксированной записи (§5.1): тап живёт
@@ -268,7 +354,7 @@ final class DictationController: ObservableObject {
     }
 
     private func updateLatchStopKeys() {
-        if isLatched, state == .recording, !isPermissionProbe {
+        if isLatched, state == .recording || state == .preparingRecording {
             latchStopKeys.start()
         } else {
             latchStopKeys.stop()
@@ -281,20 +367,71 @@ final class DictationController: ObservableObject {
     func startLatchedFromUI() {
         guard state == .idle else { return }
         isLatched = true
-        keyDown()
+        shortcutPressed(Self.preferredLanguage == "ce" ? .omni : .whisper)
         // Запись не началась (нет модели, нет доступа) — фиксация не должна
         // тихо доживать до следующего обычного удержания клавиши.
-        if state != .recording { isLatched = false }
+        if state != .recording && state != .preparingRecording { isLatched = false }
     }
     /// История буфера для транскриптов (§5.6); появляется асинхронно.
     private let clipboardStore: () -> ClipboardStore?
+    private let prayer: PrayerStore?
 
-    init(clipboardStore: @escaping () -> ClipboardStore?) {
+    init(clipboardStore: @escaping () -> ClipboardStore?, prayer: PrayerStore? = nil,
+         omni: OmniASR? = nil,
+         microphoneAuthorization: @escaping () -> AVAuthorizationStatus = {
+             AVCaptureDevice.authorizationStatus(for: .audio)
+         },
+         requestMicrophoneAuthorization: @escaping () async -> Bool = {
+             await AVCaptureDevice.requestAccess(for: .audio)
+         }, accessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }) {
         self.clipboardStore = clipboardStore
+        self.omni = omni ?? OmniASR()
+        self.prayer = prayer
+        self.microphoneAuthorization = microphoneAuthorization
+        self.accessibilityTrusted = accessibilityTrusted
+        self.requestMicrophoneAuthorization = requestMicrophoneAuthorization
+    }
+
+    /// Один системный запрос из настроек или хоткея. До ответа аудиодвижок
+    /// не создаётся; выдача доступа сама по себе не начинает запись.
+    func requestMicrophoneAccess() async {
+        guard state == .idle, session.canStart, !isRequestingMicrophone else { return }
+        guard microphoneAuthorization() == .notDetermined else { return }
+        isRequestingMicrophone = true
+        isLatched = false
+        lastPressAt = .distantPast
+        let generation = session.generation
+        defer { isRequestingMicrophone = false }
+        status = "Разрешите доступ к микрофону в системном диалоге"
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        let granted = await requestMicrophoneAuthorization()
+        guard session.accepts(generation) else { return }
+        status = granted
+            ? "Доступ к микрофону есть — нажмите диктовку ещё раз"
+            : "Нет доступа к микрофону — откройте Системные настройки → Конфиденциальность и безопасность → Микрофон"
     }
 
     func start() {
-        guard hotKey == nil, fnMonitor == nil else { return }
+        guard hotKeys.isEmpty, modifierMonitors.isEmpty else { return }
+        if sessionObservers.isEmpty {
+            let center = DistributedNotificationCenter.default()
+            let sessionInfo = CGSessionCopyCurrentDictionary() as? [String: Any]
+            session.isLocked = sessionInfo?["CGSSessionScreenIsLocked"] as? Bool == true
+            sessionObservers = [
+                center.addObserver(forName: .init("com.apple.screenIsLocked"),
+                                   object: nil, queue: .main) { [weak self] _ in
+                    azaAssumeMainUnchecked {
+                        self?.session.isLocked = true
+                        self?.cancelRecording()
+                        self?.status = "Диктовка остановлена — экран заблокирован"
+                    }
+                },
+                center.addObserver(forName: .init("com.apple.screenIsUnlocked"),
+                                   object: nil, queue: .main) { [weak self] _ in
+                    azaAssumeMainUnchecked { self?.session.isLocked = false }
+                },
+            ]
+        }
         // Прогрев: модель поднимается в память ~8 секунд, и без него
         // ПЕРВОЕ нажатие уходит в ожидание, а пользователь видит «ничего
         // не происходит». Греем только когда доступ к микрофону уже есть —
@@ -302,6 +439,7 @@ final class DictationController: ObservableObject {
         // Как PrayerStore: UserDefaults надёжно виден только на следующем
         // витке main loop, иначе сохранённый профиль мог читаться как balanced.
         DispatchQueue.main.async { [weak self] in
+            guard Self.preferredLanguage != "ce" else { return }
             guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
             // Греем ТОЛЬКО уже скачанную модель: иначе удаление моделей
             // оборачивается новой загрузкой при следующем запуске.
@@ -310,42 +448,51 @@ final class DictationController: ObservableObject {
             // клавиши во время прогрева сразу пишет звук.
             self?.prepareModel(ownsState: false)
         }
-        installHotKey()
+        for engine in Engine.allCases { installHotKey(for: engine) }
     }
 
     /// Регистрация текущего сочетания: Carbon для обычных клавиш,
     /// монитор flagsChanged для одиночного модификатора (Fn, ⌃, ⌥…).
-    private func installHotKey() {
-        let binding = HotKeyBinding.load(HotKeyBinding.dictationKey,
-                                         fallback: .dictationDefault)
+    @discardableResult
+    private func installHotKey(for engine: Engine) -> OSStatus? {
+        let binding = engine.binding
+        func report(_ problem: String?) {
+            if engine == .whisper { hotKeyError = problem } else { omniHotKeyError = problem }
+            if let problem { status = problem }
+        }
+        report(nil)
+        // При старте сохраняем работающее прежнее назначение Whisper,
+        // даже если оно пересеклось с новым сочетанием OmniASR по умолчанию.
+        let other: Engine = engine == .whisper ? .omni : .whisper
+        let conflict = (hotKeys[other] != nil || modifierMonitors[other] != nil)
+            ? binding.dictationConflict(for: engine.bindingKey) : nil
+        if let problem = binding.phraseSelectionConflict(for: engine.bindingKey) ?? conflict {
+            report(problem)
+            return OSStatus(eventHotKeyExistsErr)
+        }
+        let registrationStatus: OSStatus?
         if binding.isModifierOnly,
            let monitor = ModifierKeyMonitor(
                keyCode: UInt16(binding.keyCode),
-               onPress: { [weak self] in self?.keyDown() },
-               onRelease: { [weak self] in self?.keyUp() }
+               onPress: { [weak self] in self?.shortcutPressed(engine) },
+               onRelease: { [weak self] in self?.shortcutReleased(engine) }
            ) {
-            monitor.register()
-            fnMonitor = monitor
-            status = "Диктовка: удерживайте \(binding.display)"
-            azaDebugLog("Aza: dictation modifier monitor installed \(binding.display)")
-            return
-        }
-        let controller = HotKeyController(
-            keyCode: binding.keyCode,
-            modifiers: binding.modifiers,
-            id: 2,
-            onPress: { [weak self] in self?.keyDown() },
-            onRelease: { [weak self] in self?.keyUp() }
-        )
-        hotKey = controller
-        if let status = controller.register() {
-            self.status = "Сочетание \(binding.display) занято другой программой"
-            azaDebugLog("Aza: dictation hotkey registration FAILED status=\(status)")
-            hotKey = nil
+            registrationStatus = monitor.register(accessibilityGranted: accessibilityTrusted())
+            if registrationStatus == nil { modifierMonitors[engine] = monitor }
         } else {
-            self.status = "Диктовка: удерживайте \(binding.display)"
-            azaDebugLog("Aza: dictation hotkey registered \(binding.display)")
+            let controller = HotKeyController(
+                keyCode: binding.keyCode, modifiers: binding.modifiers,
+                id: engine == .whisper ? 2 : 5,
+                onPress: { [weak self] in self?.shortcutPressed(engine) },
+                onRelease: { [weak self] in self?.shortcutReleased(engine) })
+            registrationStatus = controller.register()
+            if registrationStatus == nil { hotKeys[engine] = controller }
         }
+        if let error = registrationStatus { report(binding.registrationError(error)) }
+        else if hotKeyError == nil, omniHotKeyError == nil {
+            status = "Whisper: \(Engine.whisper.binding.display) · OmniASR: \(Engine.omni.binding.display)"
+        }
+        return registrationStatus
     }
 
     /// Пользователь выбрал другой профиль: выгружаем модель, следующая
@@ -363,7 +510,17 @@ final class DictationController: ObservableObject {
         // Не во время загрузки: prepareModel всё равно заблокирован, а
         // сброс pendingProfileChange здесь оставил бы старый профиль
         // активным навсегда. Завершение загрузки вызовет нас снова.
-        guard pendingProfileChange, state == .idle, !isLoadingModel else { return }
+        guard pendingProfileChange, state == .idle, !isLoadingModel,
+              !isInstallingOmni, session.canStart else { return }
+        if Self.preferredLanguage == "ce" {
+            pendingProfileChange = false
+            cancelWarmup()
+            whisper = nil
+            loadedProfile = nil
+            status = omni.isInstalled(OmniASR.preferredVariant) ? "Чеченская диктовка готова"
+                : "Скачайте чеченскую модель в настройках диктовки"
+            return
+        }
         guard loadedProfile != Self.preferredProfile else {
             pendingProfileChange = false
             return
@@ -416,11 +573,7 @@ final class DictationController: ObservableObject {
     /// (retry ожидающего звука, отложенная смена профиля) — глушим
     /// респаун через suppressPrewarm и отменяем каждого, пока не
     /// останется ни одного.
-    func shutdownLoadersForDeletion() async {
-        modelDeletionInProgress = true
-        // Сброс в defer: PrivacyCleanup зовётся сразу после await в том же
-        // синхронном участке MainActor — вклиниться keyDown уже не успеет.
-        defer { modelDeletionInProgress = false }
+    private func shutdownLoadersForDeletion() async {
         suppressPrewarm = true
         while isLoadingModel, let task = loadTask {
             discardCurrentLoad = true
@@ -430,6 +583,40 @@ final class DictationController: ObservableObject {
         // Холостой прогон тоже гоняет модель — файлы нельзя стирать,
         // пока он не остановился.
         await drainWarmup()
+    }
+
+    /// Флаг живёт до самого удаления, включая ожидание молитвенного
+    /// планировщика. Между отдельными async-вызовами мог начаться новый сеанс.
+    private func performModelDeletion(_ operation: () async -> String?) async -> String? {
+        guard canDeleteModels else { return "диктовка занята — попробуйте снова" }
+        session.isDeletingModels = true
+        session.invalidate()
+        defer {
+            session.isDeletingModels = false
+            applyPendingProfileChange()
+        }
+        return await operation()
+    }
+
+    func deleteModels() async -> String? {
+        await performModelDeletion {
+            unloadModel()
+            await shutdownLoadersForDeletion()
+            return PrivacyCleanup.deleteModels()
+        }
+    }
+
+    func deleteAllData(prayer: PrayerStore) async -> String? {
+        await performModelDeletion {
+            await prayer.shutdownForCleanup()
+            unloadModel()
+            await shutdownLoadersForDeletion()
+            let error = PrivacyCleanup.deleteEverything()
+            // Полный успех завершает приложение. При ошибке пользователь
+            // должен сохранить прежние настройки уведомлений.
+            if error != nil { prayer.restoreNotificationsAfterCleanupFailure() }
+            return error
+        }
     }
 
     /// Удаление файлов одного профиля целиком: выгрузка/отмена загрузчика,
@@ -445,18 +632,17 @@ final class DictationController: ObservableObject {
         // Кнопка в UI выключена при занятости, но между кликом и стартом
         // Task диктовка могла начаться — граница API обязана проверить сама:
         // стирать файлы под живой моделью нельзя.
-        guard state == .idle else { return "диктовка занята — попробуйте снова" }
-        modelDeletionInProgress = true
-        defer { modelDeletionInProgress = false }
-        prepareForModelDeletion(profile)
-        while isLoadingModel, let task = loadTask, loadingProfile == profile {
-            discardCurrentLoad = true
-            task.cancel()
-            await task.value
+        await performModelDeletion {
+            prepareForModelDeletion(profile)
+            while isLoadingModel, let task = loadTask, loadingProfile == profile {
+                discardCurrentLoad = true
+                task.cancel()
+                await task.value
+            }
+            // Прогрев мог идти на удаляемом профиле — дожидаемся остановки.
+            await drainWarmup()
+            return PrivacyCleanup.deleteModel(variant: profile.variant)
         }
-        // Прогрев мог идти на удаляемом профиле — дожидаемся остановки.
-        await drainWarmup()
-        return PrivacyCleanup.deleteModel(variant: profile.variant)
     }
 
     /// Перед удалением файлов ОДНОГО профиля: выгрузить его из памяти и
@@ -505,7 +691,7 @@ final class DictationController: ObservableObject {
         guard minutes > 0 else { return }
         idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes) * 60,
                                                repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 guard let self, self.state == .idle, self.whisper != nil else { return }
                 self.cancelWarmup()
                 self.whisper = nil
@@ -516,32 +702,51 @@ final class DictationController: ObservableObject {
     }
 
     func stop() {
-        hotKey?.stop()
-        hotKey = nil
-        fnMonitor?.stop()
-        fnMonitor = nil
+        cancelOmniDownload()
         cancelRecording()
+        hotKeys.values.forEach { $0.stop() }
+        hotKeys = [:]
+        modifierMonitors.values.forEach { $0.stop() }
+        modifierMonitors = [:]
+        for observer in sessionObservers {
+            DistributedNotificationCenter.default().removeObserver(observer)
+        }
+        sessionObservers = []
     }
 
     /// Перерегистрация после смены сочетания в настройках.
-    func rebindHotKey() {
-        hotKey?.stop()
-        hotKey = nil
-        fnMonitor?.stop()
-        fnMonitor = nil
-        installHotKey()
+    @discardableResult
+    func rebindHotKey() -> OSStatus? { rebindHotKey(for: .whisper) }
+
+    @discardableResult
+    func rebindHotKey(for engine: Engine) -> OSStatus? {
+        guard state == .idle else { return OSStatus(eventNotHandledErr) }
+        hotKeys.removeValue(forKey: engine)?.stop()
+        modifierMonitors.removeValue(forKey: engine)?.stop()
+        return installHotKey(for: engine)
     }
 
     // MARK: Жизненный цикл записи
 
-    private func keyDown() {
+    func shortcutPressed(_ engine: Engine) {
         azaDebugLog("Aza: dictation keyDown state=\(state) latched=\(isLatched ? 1 : 0)")
+        guard session.canStart, !isRequestingMicrophone, !isInstallingOmni else {
+            lastPressAt = .distantPast
+            isLatched = false
+            return
+        }
+
+        // Чужая клавиша не останавливает и не фиксирует текущую запись.
+        if state == .recording || state == .preparingRecording {
+            guard (recordingLanguage == "ce") == (engine == .omni) else { return }
+        }
 
         // Нажатие во время зафиксированной записи останавливает её
         // (спецификация §5.1); Пробел и Enter делают то же через
         // LatchStopKeys.
-        if isLatched, state == .recording {
+        if isLatched, state == .recording || state == .preparingRecording {
             isLatched = false
+            if cancelPendingRecording() { return }
             finishRecording()
             return
         }
@@ -549,22 +754,23 @@ final class DictationController: ObservableObject {
         // Нажатия во время загрузки модели и распознавания игнорируем
         // ЦЕЛИКОМ: иначе фиксация «залипнет» и следующая обычная запись
         // окажется зафиксированной.
-        guard state == .idle || state == .recording else {
+        guard state == .idle || state == .recording || state == .preparingRecording else {
             lastPressAt = .distantPast
             return
         }
 
         let now = Date()
-        let isDoubleTap = now.timeIntervalSince(lastPressAt) < Self.doubleTapWindow
+        let isDoubleTap = lastPressEngine == engine && now.timeIntervalSince(lastPressAt) < Self.doubleTapWindow
         lastPressAt = now
+        lastPressEngine = engine
 
         // Второе быстрое нажатие включает фиксацию. Проверяем по ВРЕМЕНИ,
         // а не по состоянию: короткое первое нажатие успевает и начать,
         // и остановить запись, поэтому к моменту второго мы уже в idle.
-        if isDoubleTap, !isPermissionProbe {
+        if isDoubleTap {
             isLatched = true
             azaDebugLog("Aza: dictation latched")
-            if state == .recording {
+            if state == .recording || state == .preparingRecording {
                 status = "Запись зафиксирована — остановят сочетание, Пробел или Enter"
                 return
             }
@@ -573,40 +779,22 @@ final class DictationController: ObservableObject {
 
         guard state == .idle else { return }
 
-        let authorization = AVCaptureDevice.authorizationStatus(for: .audio)
+        if engine == .omni {
+            guard omni.isInstalled(OmniASR.preferredVariant) else {
+                isLatched = false
+                status = "Сначала нажмите «Скачать» для \(OmniASR.preferredVariant.modelName) в настройках диктовки"
+                return
+            }
+        }
+
+        let authorization = microphoneAuthorization()
         azaDebugLog("Aza: dictation mic auth=\(authorization.rawValue) model=\(whisper == nil ? 0 : 1)")
         switch authorization {
         case .authorized:
             break
         case .notDetermined:
-            // Диалог TCC у agent-приложения (LSUIElement) не всплывает от
-            // одного requestAccess — его надёжно поднимает фактическое
-            // обращение к устройству. Поэтому запускаем ПРОБНУЮ запись:
-            // она существует только чтобы показать запрос, её звук всегда
-            // отбрасывается (пока диалог открыт, система отдаёт тишину),
-            // и в любом исходе пользователь удерживает клавишу заново.
-            // Модель здесь не трогаем: пробе она не нужна, а параллельные
-            // загрузки при повторных нажатиях недопустимы.
-            status = "Разрешите доступ к микрофону и удержите сочетание ещё раз"
-            isPermissionProbe = true
-            NSApp.activate(ignoringOtherApps: true)
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    azaDebugLog("Aza: dictation mic request granted=\(granted ? 1 : 0)")
-                    self.cancelRecording()
-                    self.isPermissionProbe = false
-                    guard granted else {
-                        self.status = "Доступ к микрофону запрещён — откройте Настройки → Конфиденциальность → Микрофон"
-                        return
-                    }
-                    // Греем модель сразу после выдачи доступа: иначе первое
-                    // же «удержите ещё раз» снова утонет в загрузке.
-                    self.status = "Доступ есть, готовлю модель…"
-                    self.prepareModel(ownsState: false)
-                }
-            }
-            beginRecording()
+            isLatched = false
+            Task { [weak self] in await self?.requestMicrophoneAccess() }
             return
         default:
             // Фиксация не должна пережить отказ: иначе следующее одиночное
@@ -621,11 +809,23 @@ final class DictationController: ObservableObject {
         // параллельно: нажатие не должно уходить в пустое ожидание.
         // Если запись кончится раньше загрузки, звук подождёт модель
         // (pendingSamples), остров покажет «Загружаю модель…».
-        if whisper == nil {
+        recordingLanguage = engine.language
+        if recordingLanguage != "auto" { activeLanguage = recordingLanguage }
+        else if activeLanguage == "ce" { activeLanguage = "ru" }
+        if engine == .omni {
+            recordingOmniVariant = OmniASR.preferredVariant
+            cancelWarmup()
+            whisper = nil
+            loadedProfile = nil
+            if isLoadingModel {
+                discardCurrentLoad = true
+                loadTask?.cancel()
+            }
+        } else if whisper == nil {
             suppressPrewarm = false
-            prepareModel(ownsState: false)
+            prepareModel(ownsState: false, language: recordingLanguage)
         }
-        beginRecording()
+        requestRecording()
     }
 
     private static func options(for language: String, prompt: [Int]?) -> DecodingOptions {
@@ -728,7 +928,7 @@ final class DictationController: ObservableObject {
     }
 
     private func startStreaming(buffer: StreamBuffer, whisper: WhisperKit) {
-        let language = Self.preferredLanguage
+        let language = recordingLanguage
         streamSegments = []
         streamConfirmedEnd = 0
         streamLanguage = language
@@ -842,6 +1042,7 @@ final class DictationController: ObservableObject {
         if samples.count >= Self.detectorMinSamples,
            let detected = try? await whisper.detectLangauge(
                audioArray: Array(samples.prefix(30 * 16000))).language {
+            try Task.checkCancellation()
             azaDebugLog("Aza: dictation detector language=\(detected)")
             let language = detected == "en" ? "en" : "ru"
             let results = try await whisper.transcribe(
@@ -855,6 +1056,7 @@ final class DictationController: ObservableObject {
         // Упавший прогон не должен обнулять удачный: берём то, что есть.
         let russian = try? await whisper.transcribe(
             audioArray: samples, decodeOptions: options(for: "ru", prompt: prompt))
+        try Task.checkCancellation()
         if let russian {
             let score = confidence(of: russian)
             azaDebugLog("Aza: dictation ru score=\(score)")
@@ -862,6 +1064,7 @@ final class DictationController: ObservableObject {
         }
         let english = try? await whisper.transcribe(
             audioArray: samples, decodeOptions: options(for: "en", prompt: prompt))
+        try Task.checkCancellation()
         switch (russian, english) {
         case let (russian?, english?):
             let russianScore = confidence(of: russian)
@@ -891,11 +1094,13 @@ final class DictationController: ObservableObject {
     /// `ownsState: false` — фоновая загрузка параллельно записи: состояние
     /// не трогаем (оно принадлежит записи/распознаванию), прогресс идёт
     /// только в status.
-    private func prepareModel(ownsState: Bool = true) {
+    private func prepareModel(ownsState: Bool = true, language requestedLanguage: String? = nil) {
         // Одна загрузка за раз: прогрев при старте и нажатие клавиши
         // не должны запустить её дважды.
         guard whisper == nil, !isLoadingModel else { return }
-        guard !suppressPrewarm, !modelDeletionInProgress else { return }
+        guard !suppressPrewarm, !isInstallingOmni, session.canStart else { return }
+        let language = requestedLanguage ?? (state == .idle ? Self.preferredLanguage : recordingLanguage)
+        guard language != "ce" else { return }
         if ownsState {
             // Явная загрузка (кнопка в настройках) занимает состояние —
             // только из покоя. Фоновая (ownsState: false) состояния не
@@ -915,6 +1120,8 @@ final class DictationController: ObservableObject {
             guard let self else { return }
             let loadStart = Date()
             do {
+                await self.awaitRetiredModelWork()
+                try Task.checkCancellation()
                 // Кэш на месте — сеть не нужна: WhisperKit.download даже при
                 // полном кэше ходит на Hugging Face сверять ревизию, и каждый
                 // подъём модели платил секунды сети (офлайн — ждал таймаута).
@@ -1157,29 +1364,81 @@ final class DictationController: ObservableObject {
         sound.play()
     }
 
-    private func beginRecording() {
-        // В пробной записи фокус уже уехал на наше активированное окно —
-        // запоминать его нельзя, вставлять всё равно нечего.
-        targetElement = isPermissionProbe ? nil : TextInsertion.focusedElement()
+    private func requestRecording() {
+        guard state == .idle, session.canStart else { return }
+        targetElement = TextInsertion.focusedElement()
         // Элемента может не быть (Electron/webview до пробуждения AX) —
         // тогда идентичность цели держит хотя бы pid фронтмоста.
-        targetAppPid = isPermissionProbe ? nil
-            : (targetElement.flatMap(TextInsertion.processID(of:))
-               ?? NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        targetAppPid = targetElement.flatMap(TextInsertion.processID(of:))
+            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let id = UUID()
+        let generation = session.generation
+        recordingStartID = id
+        prayerPauseID = id
+        state = .preparingRecording
+        status = "Готовлю запись…"
+        recordingStartTask = Task { [weak self] in
+            guard let self, !Task.isCancelled, self.recordingStartID == id else { return }
+            let ready = await self.prayer?.pauseNotificationsForDictation(id) ?? true
+            guard !Task.isCancelled, self.recordingStartID == id,
+                  self.session.accepts(generation) else {
+                self.prayer?.resumeNotificationsAfterDictation(id)
+                return
+            }
+            self.recordingStartID = nil
+            self.recordingStartTask = nil
+            guard ready else {
+                self.isLatched = false
+                self.state = .idle
+                self.targetElement = nil
+                self.targetAppPid = nil
+                self.status = "Не удалось приостановить уведомления — повторите диктовку"
+                return
+            }
+            self.beginRecording()
+        }
+    }
+
+    @discardableResult
+    private func cancelPendingRecording() -> Bool {
+        guard recordingStartID != nil else { return false }
+        recordingStartID = nil
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
+        isLatched = false
+        targetElement = nil
+        targetAppPid = nil
+        if state == .preparingRecording {
+            state = .idle
+            status = "Запись отменена"
+        }
+        return true
+    }
+
+    private func resumePrayerNotifications() {
+        guard let id = prayerPauseID else { return }
+        prayerPauseID = nil
+        prayer?.resumeNotificationsAfterDictation(id)
+    }
+
+    private func beginRecording() {
+        // Доступ мог быть отозван, пока ждали паузы уведомлений.
+        guard session.canStart, microphoneAuthorization() == .authorized else {
+            cancelRecording()
+            state = .idle
+            status = "Запись недоступна — проверьте доступ к микрофону"
+            return
+        }
         let processor = AudioProcessor()
         audio = processor
         // Копия звука для стрима собирается прямо из колбэка записи —
         // читать processor.audioSamples во время записи нельзя (гонка).
-        let buffer = (!isPermissionProbe && whisper != nil
-                      && Self.streamingEnabled && Self.preferredLanguage != "auto")
+        let buffer = (whisper != nil && recordingLanguage != "ce"
+                      && Self.streamingEnabled && recordingLanguage != "auto")
             ? StreamBuffer() : nil
-        // startRecordingLive присваивает колбэк уже ПОСЛЕ запуска движка:
-        // первые ~100–400 мс (раскрутка) долетают в audioSamples мимо нашей
-        // копии. Это не чинится снаружи без гонки на audioBufferCallback,
-        // поэтому в стрим-режиме финал идёт по ТОЙ ЖЕ копии (см.
-        // finishRecording) — таймлайны совпадают конструктивно, а голова
-        // отброшена из обоих проходов одинаково (пользователь начинает
-        // говорить после сигнала — терять там нечего).
+        // Колбэк устанавливается после запуска движка. Первые сэмплы
+        // остаются только в audioSamples: finishRecording сохраняет их
+        // и учитывает смещение таймлайна стрима при финальном прогоне.
         let capture: (([Float]) -> Void)? = buffer.map { buffer in
             { chunk in buffer.append(chunk) }
         }
@@ -1187,6 +1446,10 @@ final class DictationController: ObservableObject {
             try processor.startRecordingLive(callback: capture)
         } catch {
             audio = nil
+            isLatched = false
+            state = .idle
+            targetElement = nil
+            targetAppPid = nil
             status = "Микрофон не запустился: \(error.localizedDescription)"
             return
         }
@@ -1198,7 +1461,7 @@ final class DictationController: ObservableObject {
             : "Запись… отпустите клавишу, чтобы вставить текст"
         // Пока острова нет, звук — единственный сигнал «пишу»: панель
         // меню пользователь в этот момент не открывает.
-        if !isPermissionProbe { Self.playTone(start: true) }
+        Self.playTone(start: true)
         // Стрим стартует только с готовой моделью: если она грузится
         // параллельно, запись всё равно короче загрузки — распознает финал.
         if let buffer, let whisper {
@@ -1206,23 +1469,25 @@ final class DictationController: ObservableObject {
         }
         failsafeTimer = Timer.scheduledTimer(withTimeInterval: Self.maxRecordingSeconds,
                                              repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 guard let self else { return }
                 self.status = "Достигнут предел 30 минут — останавливаю"
                 self.isLatched = false
-                // Пробную запись нельзя отправлять в распознавание: модели
-                // может не быть, и состояние застряло бы в .transcribing.
-                if self.isPermissionProbe {
-                    self.cancelRecording()
-                } else {
-                    self.finishRecording()
-                }
+                self.finishRecording()
             }
         }
         azaDebugLog("Aza: dictation recording started")
     }
 
     private func cancelRecording() {
+        session.invalidate()
+        if !isInstallingOmni { omni.cancel() }
+        cancelPendingRecording()
+        if let transcribeTask {
+            transcribeTask.cancel()
+            retiredWarmups.append(transcribeTask)
+            self.transcribeTask = nil
+        }
         isLatched = false
         failsafeTimer?.invalidate()
         failsafeTimer = nil
@@ -1242,36 +1507,24 @@ final class DictationController: ObservableObject {
             isAwaitingModel = false
             if state == .transcribing { state = .idle }
         }
-        // Сбрасывать в idle можно только из записи: во время загрузки
-        // модели это открыло бы дверь параллельным загрузкам (guard в
-        // keyDown пропускает только idle).
-        if state == .recording { state = .idle }
+        // Загрузкой модели владеет loadTask; её состояние не сбрасываем.
+        if state == .recording || state == .transcribing { state = .idle }
     }
 
-    private func keyUp() {
+    func shortcutReleased(_ engine: Engine) {
         azaDebugLog("Aza: dictation keyUp state=\(state) latched=\(isLatched ? 1 : 0)")
-        // Пробную запись (диалог TCC) просто гасим: распознавать тишину,
-        // записанную пока открыт системный запрос, незачем.
-        guard !isPermissionProbe else {
-            cancelRecording()
-            return
-        }
         // В режиме фиксации отпускание клавиши ничего не значит — запись
         // остановит следующее нажатие.
-        guard !isLatched else { return }
+        guard !isLatched, (recordingLanguage == "ce") == (engine == .omni) else { return }
+        if cancelPendingRecording() { return }
         finishRecording()
     }
 
     /// Остановка записи из интерфейса (кнопка в острове, §5.1).
     /// Не путать со `stop()`, который снимает хоткей и гасит контроллер.
     func stopFromUI() {
+        if cancelPendingRecording() { return }
         guard state == .recording else { return }
-        // Пробную запись (диалог TCC) не распознаём: модели может не быть,
-        // и состояние застряло бы в .transcribing.
-        guard !isPermissionProbe else {
-            cancelRecording()
-            return
-        }
         isLatched = false
         finishRecording()
     }
@@ -1296,6 +1549,7 @@ final class DictationController: ObservableObject {
             : Float(max(0, samples.count - captured.count)) / 16000
         processor.purgeAudioSamples(keepingLast: 0)
         audio = nil
+        recordingStartedAt = nil
         azaDebugLog("Aza: dictation stopped samples=\(samples.count) captured=\(captured.count) head=\(streamHead)")
 
         // Короче ~0,3 с — случайное нажатие, распознавать нечего.
@@ -1327,6 +1581,12 @@ final class DictationController: ObservableObject {
         let pid = targetAppPid
         targetElement = nil
         targetAppPid = nil
+
+        if recordingLanguage == "ce" {
+            stopStreaming()
+            transcribeOmni(samples: samples, element: element, targetPid: pid)
+            return
+        }
 
         // Модель ещё греется (запись шла параллельно загрузке): звук
         // ждёт её, остров показывает «Загружаю модель…» без волны —
@@ -1368,20 +1628,30 @@ final class DictationController: ObservableObject {
                             element: AXUIElement?, targetPid: pid_t?,
                             stream: Task<Void, Never>? = nil,
                             streamHead: Float = 0) {
-        Task { [weak self] in
+        let generation = session.generation
+        let requestedLanguage = recordingLanguage
+        // Снимок ДО запуска: отменённая задача позже сама попадёт в retired,
+        // и чтение массива изнутри могло бы заставить её ждать саму себя.
+        let predecessors = retiredWarmups
+        retiredWarmups = []
+        transcribeTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.session.generation == generation { self.transcribeTask = nil }
+            }
             // Прогрев ещё идёт — дожидаемся: два одновременных прогона
             // на одном экземпляре WhisperKit не нужны.
             await self.warmupTask?.value
             // Стрим: отменяем цикл и ждём его текущий проход (тот держит
             // модель), затем забираем подтверждённое.
-            await self.awaitRetiredModelWork()
+            for task in predecessors { await task.value }
             var confirmed: [(text: String, avgLogprob: Float, noSpeechProb: Float)] = []
             var clipStart: Float = 0
             var streamedLanguage: String?
             if let stream {
                 stream.cancel()
                 await stream.value
+                guard !Task.isCancelled, self.session.accepts(generation) else { return }
                 confirmed = self.streamSegments
                 clipStart = self.streamConfirmedEnd
                 streamedLanguage = self.streamLanguage
@@ -1390,6 +1660,7 @@ final class DictationController: ObservableObject {
                 self.streamLanguage = nil
                 self.streamBuffer = nil
             }
+            guard !Task.isCancelled, self.session.accepts(generation) else { return }
             azaDebugLog("Aza: dictation transcribe begin streamed=\(confirmed.count) clip=\(clipStart)")
             do {
                 // §5.2: русский, английский или автоопределение между ними.
@@ -1405,7 +1676,7 @@ final class DictationController: ObservableObject {
                     // её не видел) дораспознаётся клип-парой [0, head] в том
                     // же прогоне; подтверждённая граница сдвигается на head:
                     // таймстемпы стрима шли по копии без головы.
-                    language = streamedLanguage ?? Self.preferredLanguage
+                    language = streamedLanguage ?? requestedLanguage
                     // Ни в хвосте, ни в голове нет речи (типовой случай:
                     // договорили, выдохнули, отпустили) — финальный прогон
                     // не нужен вовсе, текст уже подтверждён стримом.
@@ -1419,7 +1690,8 @@ final class DictationController: ObservableObject {
                         self.activeLanguage = language
                         let text = Self.finishText(segments: confirmed)
                         self.finish(text: text, language: language,
-                                    element: element, targetPid: targetPid)
+                                    element: element, targetPid: targetPid,
+                                    generation: generation)
                         return
                     }
                     var options = Self.options(for: language, prompt: prompt)
@@ -1434,15 +1706,16 @@ final class DictationController: ObservableObject {
                     options.chunkingStrategy = nil
                     results = try await whisper.transcribe(
                         audioArray: samples, decodeOptions: options)
-                } else if Self.preferredLanguage == "auto" {
+                } else if requestedLanguage == "auto" {
                     (language, results) = try await Self.autoTranscribe(
                         whisper: whisper, samples: samples, prompt: prompt)
                 } else {
-                    language = Self.preferredLanguage
+                    language = requestedLanguage
                     results = try await whisper.transcribe(
                         audioArray: samples,
                         decodeOptions: Self.options(for: language, prompt: prompt))
                 }
+                guard !Task.isCancelled, self.session.accepts(generation) else { return }
                 azaDebugLog("Aza: dictation language=\(language) results=\(results.count)")
                 self.activeLanguage = language
                 let segments = results.flatMap(\.segments)
@@ -1460,8 +1733,9 @@ final class DictationController: ObservableObject {
                 }
                 let text = Self.finishText(segments: tuples(head) + confirmed + tuples(tail))
                 self.finish(text: text, language: language,
-                            element: element, targetPid: targetPid)
+                            element: element, targetPid: targetPid, generation: generation)
             } catch {
+                guard self.session.accepts(generation) else { return }
                 self.state = .idle
                 self.status = "Распознавание не удалось: \(error.localizedDescription)"
                 self.applyPendingProfileChange()
@@ -1470,8 +1744,52 @@ final class DictationController: ObservableObject {
         }
     }
 
+    private func transcribeOmni(samples: [Float], element: AXUIElement?, targetPid: pid_t?) {
+        let generation = session.generation
+        let variant = recordingOmniVariant
+        let loading = loadTask
+        cancelWarmup()
+        whisper = nil
+        loadedProfile = nil
+        let predecessors = retiredWarmups
+        retiredWarmups = []
+        status = "Готовлю модель чеченского…"
+        isAwaitingModel = true
+        transcribeTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.session.generation == generation {
+                    self.transcribeTask = nil
+                    self.isAwaitingModel = false
+                }
+            }
+            // Cancelled Whisper work can retain its model until its final await completes.
+            await loading?.value
+            for task in predecessors { await task.value }
+            guard !Task.isCancelled, self.session.accepts(generation) else { return }
+            do {
+                let text = try await self.omni.transcribe(samples, variant: variant) { status, _ in
+                    guard !Task.isCancelled, self.session.accepts(generation) else { return }
+                    self.status = status
+                    self.isAwaitingModel = status.hasPrefix("Готовлю")
+                }
+                guard !Task.isCancelled, self.session.accepts(generation) else { return }
+                self.activeLanguage = "ce"
+                // Russian/English filler and Whisper-confidence filters do not apply to Chechen.
+                self.finish(text: text, language: "ce", element: element,
+                            targetPid: targetPid, generation: generation)
+            } catch {
+                guard !Task.isCancelled, self.session.accepts(generation) else { return }
+                self.state = .idle
+                self.status = "Не удалось распознать чеченскую речь: \(error.localizedDescription)"
+                self.applyPendingProfileChange()
+            }
+        }
+    }
+
     private func finish(text: String, language: String,
-                        element: AXUIElement?, targetPid: pid_t?) {
+                        element: AXUIElement?, targetPid: pid_t?, generation: UUID) {
+        guard session.accepts(generation) else { return }
         state = .idle
         guard !text.isEmpty else {
             status = "Ничего не распознано"
@@ -1492,23 +1810,21 @@ final class DictationController: ObservableObject {
         // оказалась в истории «раньше» транскрипта.
         let store = clipboardStore
         let dictatedAt = Date()
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            guard self?.session.accepts(generation) == true else { return }
             store()?.add(text: text,
                          sourceAppBundleID: Bundle.main.bundleIdentifier,
                          sourceAppName: "Aza (диктовка)",
                          copiedAt: dictatedAt, isTranscript: true)
         }
 
-        // Вставляем в поле, где курсор СЕЙЧАС, но только если это то же
-        // приложение, что и в момент начала записи: так текст не уедет
-        // туда, куда пользователь переключился за время распознавания.
-        // Идентичность — по pid: сравнивать AX-элементы нельзя (система
-        // отдаёт новую обёртку), а когда AX слеп (Electron/webview),
-        // элементов нет вовсе — тогда сверяем pid фронтмоста.
+        // Исходное поле должно оставаться в фокусе. Когда AX слеп
+        // (Electron/webview), сверить можно только приложение по pid.
         let current = TextInsertion.focusedElement()
         let currentPid = current.flatMap(TextInsertion.processID(of:))
             ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
         let sameApp = targetPid != nil && targetPid == currentPid
+            && TextInsertion.focusSafeForPaste(targetPid: targetPid, verifying: element)
         azaDebugLog("Aza: dictation insert target=\(element == nil ? 0 : 1) current=\(current == nil ? 0 : 1) sameApp=\(sameApp ? 1 : 0)")
 
         guard sameApp else {
@@ -1545,6 +1861,8 @@ final class DictationController: ObservableObject {
         // время буфер менял кто-то другой — не трогаем: его копия новее.
         // ponytail: 600 мс — потолок для медленных Electron; если ⌘V
         // обрабатывается дольше, вставится восстановленное — поднять задержку.
+        // Это откат транспортной копии, он нужен и после блокировки:
+        // иначе отменённый транскрипт останется в системном буфере навсегда.
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(600)) {
             guard pasteboard.changeCount == written else { return }
             PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
@@ -1561,17 +1879,15 @@ final class DictationController: ObservableObject {
             // обязана сдвинуться. ⌘V — только при точно неподвижной
             // каретке (как в ClipboardCommands): двойная вставка хуже.
             if let caretBefore {
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) { [weak self] in
+                    guard self?.session.accepts(generation) == true,
+                          pasteboard.changeCount == written else { return }
                     guard TextInsertion.caretPosition(of: current) == caretBefore else { return }
                     // За 180 мс фокус мог уехать: ⌘V летит в ТЕКУЩЕЕ поле,
                     // поэтому приложение и secure сверяем заново.
-                    let focusedNow = TextInsertion.focusedElement()
-                    let pidNow = focusedNow.flatMap(TextInsertion.processID(of:))
-                        ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
-                    guard pidNow == targetPid,
-                          focusedNow.map({ !SecureFieldDetector.isSecure($0) }) ?? true
-                    else { return }
-                    _ = TextInsertion.postPasteCommand()
+                    guard TextInsertion.focusSafeForPaste(
+                        targetPid: targetPid, verifying: current) else { return }
+                    _ = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: current)
                 }
             }
         } else if let current, SecureFieldDetector.isSecure(current) {
@@ -1581,11 +1897,11 @@ final class DictationController: ObservableObject {
             // AX не видит поле или отверг вставку (Claude-чат VS Code,
             // Electron) — текст уже в буфере, добиваем синтетическим ⌘V,
             // как вставка из истории буфера (ClipboardCommands).
-            inserted = TextInsertion.postPasteCommand()
+            inserted = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: element ?? current)
             azaDebugLog("Aza: dictation paste fallback ok=\(inserted ? 1 : 0)")
         }
         status = inserted
-            ? "Вставлено (\(language)): \(text.prefix(60))"
+            ? "Вставлено (\(language == "ce" ? "OmniASR" : language)): \(text.prefix(60))"
             : "Транскрипт во вкладке «Диктовка»: \(text.prefix(60))"
         applyPendingProfileChange()
     }

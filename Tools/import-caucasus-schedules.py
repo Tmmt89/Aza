@@ -221,12 +221,17 @@ def main():
         readers.append(lambda _root, p=path, l=label: read_govzalla_xlsx(p, l))
 
     added, replaced = [], []
+    processed = set()
     for reader in readers:
         try:
             entry = reader(root)
         except (OSError, ValueError, KeyError) as error:
             print("ПРОПУЩЕН:", error)
             continue
+        if entry["name"] in processed:
+            print("ПРОПУЩЕН повторный источник города:", entry["name"])
+            continue
+        processed.add(entry["name"])
         if entry["name"] in known:
             if not replace:
                 print("уже в каталоге:", entry["name"])

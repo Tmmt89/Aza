@@ -2,7 +2,7 @@
 # Локальная замена CI (GitHub Actions отключён — биллинг): те же проверки,
 # что и .github/workflows/build.yml, плюс аудит палочки. Отличие от CI:
 # сборка идёт со штатной подписью «Aza Development» — вариант без подписи
-# локально запрещён (§8.9 HANDOVER: сброс TCC и Keychain).
+# локально запрещён (§8.9 HANDOVER: сброс TCC).
 #
 # Запуск перед push:  Tools/check.sh
 set -euo pipefail
@@ -22,6 +22,9 @@ echo "== 4. Синтаксис скриптов"
 # Скрипты рождают данные приложения и релизы — битый синтаксис не должен
 # ждать ручного запуска.
 python3 -m py_compile "$ROOT"/Tools/*.py
-bash -n "$ROOT"/Tools/*.sh
+for script in "$ROOT"/Tools/*.sh; do
+    bash -n "$script"
+done
+python3 "$ROOT/Tools/test_tools.py"
 
 echo "✔ Все проверки прошли — можно пушить"

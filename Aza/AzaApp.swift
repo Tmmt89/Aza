@@ -2,12 +2,8 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// Асинхронный старт хранилища буфера: ключ Keychain добывается на фоне,
-/// потому что SecItemCopyMatching может показать модальный диалог
-/// (разблокировка связки, подтверждение доступа) — на главном потоке он
-/// дважды вешал ВСЁ приложение, включая коррекцию раскладки. Пока ключ
-/// не получен, панель показывает «история загружается», а коррекция
-/// работает с первой секунды.
+/// Чтение и перенос локального ключа выполняются в фоне, чтобы работа
+/// с диском не задерживала запуск коррекции и интерфейса.
 @MainActor
 final class ClipboardStartup: ObservableObject {
     @Published private(set) var store: ClipboardStore?
@@ -28,11 +24,11 @@ final class ClipboardStartup: ObservableObject {
         let center = DistributedNotificationCenter.default()
         center.addObserver(forName: .init("com.apple.screenIsLocked"),
                            object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.handleLock() }
+            azaAssumeMainUnchecked { self?.handleLock() }
         }
         center.addObserver(forName: .init("com.apple.screenIsUnlocked"),
                            object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.handleUnlock() }
+            azaAssumeMainUnchecked { self?.handleUnlock() }
         }
         if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
            session["CGSSessionScreenIsLocked"] as? Bool == true {
@@ -91,7 +87,7 @@ struct AzaApp: App {
     /// хоткеи работают и без неё, поэтому иконку можно убрать совсем.
     static let menuBarIconKey = "MenuBarIconVisible"
 
-    @StateObject private var hotKey = GlobalHotKey()
+    @StateObject private var hotKey: GlobalHotKey
     /// «Залипший» Secure Input глушит все перехваты клавиш — предупреждаем.
     @StateObject private var secureInput = SecureInputMonitor()
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
@@ -116,28 +112,34 @@ struct AzaApp: App {
         let lockPath = ClipboardStore.defaultStorageURL()
             .deletingLastPathComponent()
             .appendingPathComponent("aza.lock").path
-        let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        let lockFD = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
         if lockFD < 0 || flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
             NSLog("Aza: another instance holds %@, exiting", lockPath)
             exit(0)
         }
         // lockFD намеренно не закрывается — лок держится всю жизнь процесса.
+        let hotKey = GlobalHotKey()
+        _hotKey = StateObject(wrappedValue: hotKey)
         let startup = ClipboardStartup()
         _clipboardStartup = StateObject(wrappedValue: startup)
+        let prayer = PrayerStore()
         let dictation = DictationController(clipboardStore: { [weak startup] in
             startup?.store
-        })
+        }, prayer: prayer)
         DictationController.seedDefaultProfileIfNeeded()
         dictation.start()
         _dictation = StateObject(wrappedValue: dictation)
 
         let islandStore = IslandStore(startup: startup, dictation: dictation,
-                                      prayer: PrayerStore())
+                                      prayer: prayer)
         _islandStore = StateObject(wrappedValue: islandStore)
         island = IslandPanelController(store: islandStore)
         island.show()
 
         let setupModel = SetupModel(prayer: islandStore.prayer, dictation: dictation)
+        islandStore.$clipboardHotKeyError.assign(to: &setupModel.$clipboardHotKeyError)
+        islandStore.$phrasesHotKeyError.assign(to: &setupModel.$phrasesHotKeyError)
+        setupModel.refreshInputAccess = { [weak hotKey] in hotKey?.refreshInputMonitoring() }
         setupModel.rebindClipboardHotKey = { [weak islandStore] in
             islandStore?.rebindClipboardHotKey()
         }
@@ -157,12 +159,14 @@ struct AzaApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Aza", systemImage: "waveform", isInserted: $menuBarIconVisible) {
+        MenuBarExtra(isInserted: $menuBarIconVisible) {
             ContentView(hotKey: hotKey, clipboardStartup: clipboardStartup,
                         dictation: dictation,
                         island: islandStore,
                         secureInput: secureInput,
                         openSetup: { setup.show() })
+        } label: {
+            AzaMenuBarLabel(island: islandStore)
         }
         .menuBarExtraStyle(.window)
         .onChange(of: clipboardHistoryEnabled) { _, isEnabled in

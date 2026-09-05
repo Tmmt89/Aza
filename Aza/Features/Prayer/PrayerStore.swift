@@ -132,7 +132,7 @@ final class PrayerStore: ObservableObject {
 
     /// Уведомления берут времена ОТСЮДА же: иначе они разошлись бы с тем,
     /// что показано на экране, вместе с подписью источника.
-    let notifications = PrayerNotifications()
+    let notifications: PrayerNotifications
     @Published private(set) var notificationsEnabled = UserDefaults.standard
         .bool(forKey: "PrayerNotificationsEnabled")
     /// Непустая строка — расписание уведомлений неполное. Показывается
@@ -143,6 +143,8 @@ final class PrayerStore: ObservableObject {
     /// снять только что добавленное уведомление или вернуть устаревший
     /// текст поверх нового.
     private var schedulingTask: Task<Void, Never>?
+    private var notificationPreferenceID = UUID()
+    private var dictationPauseID: UUID?
 
     private let calculated = CalculatedPrayerProvider()
     private var table: ScheduleTablePrayerProvider?
@@ -150,7 +152,8 @@ final class PrayerStore: ObservableObject {
     private var settingsRestored = false
     private var systemObservers: [NSObjectProtocol] = []
 
-    init() {
+    init(notifications: PrayerNotifications? = nil) {
+        self.notifications = notifications ?? PrayerNotifications()
         table = ScheduleTablePrayerProvider.userProvided()
         // Настройки читаем НЕ здесь: AzaApp.init выполняется до того, как
         // песочница подключит контейнер параметров, и UserDefaults в этот
@@ -164,7 +167,7 @@ final class PrayerStore: ObservableObject {
         // и после пробуждения, и при переводе часов; refresh идемпотентен,
         // лишний вызов безвреден.
         let onMain: @Sendable (Notification) -> Void = { [weak self] _ in
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 self?.refresh()
                 self?.scheduleRollover()
             }
@@ -265,24 +268,29 @@ final class PrayerStore: ObservableObject {
 
     /// Включение спрашивает разрешение (§9: не при запуске, а по действию).
     func setNotifications(enabled: Bool) async {
-        if enabled, await notifications.requestAuthorization() == false {
-            notificationsEnabled = false
-            UserDefaults.standard.set(false, forKey: "PrayerNotificationsEnabled")
-            return
-        }
-        notificationsEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "PrayerNotificationsEnabled")
+        let preferenceID = UUID()
+        notificationPreferenceID = preferenceID
+        var allowed = true
         if enabled {
+            allowed = await notifications.requestAuthorization()
+        }
+        // Ответ старого диалога не отменяет более позднее выключение.
+        guard notificationPreferenceID == preferenceID else { return }
+        notificationsEnabled = enabled && allowed
+        UserDefaults.standard.set(notificationsEnabled, forKey: "PrayerNotificationsEnabled")
+        if notificationsEnabled {
             rescheduleNotifications()
         } else {
             cancelNotifications()
+            notificationIssue = allowed ? nil
+                : "Нет разрешения на уведомления — включите Aza в Системных настройках → Уведомления"
         }
     }
 
     /// Недельный горизонт из тех же провайдеров, что рисуют расписание.
     func rescheduleNotifications(now: Date = .now) {
         azaDebugLog("Aza: prayer reschedule enabled=\(notificationsEnabled ? 1 : 0) city=\(selectedCityID ?? "-")")
-        guard notificationsEnabled, let city = selectedCity else { return }
+        guard dictationPauseID == nil, notificationsEnabled, let city = selectedCity else { return }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = city.timeZone
         var days: [(date: Date, times: DayPrayerTimes)] = []
@@ -304,14 +312,17 @@ final class PrayerStore: ObservableObject {
         schedulingTask = Task { [notifications] in
             // Ждём предыдущую пересборку, а не бежим с ней наперегонки.
             await previous?.value
-            let outcome = await notifications.reschedule(days: snapshot, city: city, now: now)
+            guard self.dictationPauseID == nil, self.notificationsEnabled,
+                  self.selectedCityID == city.id else { return }
+            let outcome = await notifications.reschedule(
+                days: snapshot, city: city, now: max(now, Date()))
             await notifications.logPending()
             // Очередь может быть полной, а разрешения — не быть: система
             // принимает запросы и без него, но в момент намаза молча их
             // выбрасывает. Это главный источник «звука не было».
             let auth = await notifications.authorizationStatus()
             azaDebugLog("Aza: prayer notif authorization=\(auth.rawValue)")
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.dictationPauseID == nil else { return }
             if auth != .authorized {
                 self.notificationIssue = "Нет разрешения на уведомления — включите Aza в Системных настройках → Уведомления"
             } else if !outcome.isComplete {
@@ -326,15 +337,41 @@ final class PrayerStore: ObservableObject {
         }
     }
 
+    /// Токен защищает новую запись от запоздавшего завершения старой паузы.
+    /// Барьер входит в общую очередь, поэтому resume не обгоняет cancelAll.
+    func pauseNotificationsForDictation(_ id: UUID) async -> Bool {
+        dictationPauseID = id
+        notifications.isSuppressedForDictation = true
+        let previous = schedulingTask
+        let barrier = Task { [notifications] in await notifications.pause(after: previous) }
+        schedulingTask = Task { _ = await barrier.value }
+        let ready = await barrier.value
+        return ready && dictationPauseID == id
+    }
+
+    func resumeNotificationsAfterDictation(_ id: UUID) {
+        guard dictationPauseID == id else { return }
+        dictationPauseID = nil
+        notifications.isSuppressedForDictation = false
+        // Только будущие запросы: пропущенный за время записи азан не звучит.
+        rescheduleNotifications()
+    }
+
     /// Перед удалением данных: гасим планировщик, чтобы незавершённая
     /// пересборка не вернула уведомления после их снятия.
     func shutdownForCleanup() async {
+        notificationPreferenceID = UUID()
         notificationsEnabled = false
         let running = schedulingTask
         schedulingTask = nil
         running?.cancel()
         await running?.value
         await notifications.cancelAll()
+    }
+
+    func restoreNotificationsAfterCleanupFailure() {
+        notificationsEnabled = UserDefaults.standard.bool(forKey: "PrayerNotificationsEnabled")
+        refresh()
     }
 
     /// Снятие уведомлений — через ту же очередь, что и планирование:
@@ -371,7 +408,7 @@ final class PrayerStore: ObservableObject {
                                                matching: DateComponents(hour: 0, minute: 0),
                                                matchingPolicy: .nextTime) else { return }
         let timer = Timer(fire: midnight, interval: 0, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 self?.refresh()
                 self?.scheduleRollover()
             }

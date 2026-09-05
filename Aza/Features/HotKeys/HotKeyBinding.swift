@@ -12,11 +12,14 @@ struct HotKeyBinding: Codable, Equatable {
     var modifiers: UInt32
 
     static let dictationKey = "HotKey.Dictation"
+    static let omniDictationKey = "HotKey.OmniDictation"
     static let clipboardKey = "HotKey.Clipboard"
     static let phrasesKey = "HotKey.Phrases"
 
     static let dictationDefault = HotKeyBinding(
         keyCode: UInt32(kVK_ANSI_D), modifiers: UInt32(controlKey | shiftKey))
+    static let omniDictationDefault = HotKeyBinding(
+        keyCode: UInt32(kVK_ANSI_D), modifiers: UInt32(controlKey | optionKey))
     static let clipboardDefault = HotKeyBinding(
         keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(controlKey | shiftKey))
     static let phrasesDefault = HotKeyBinding(
@@ -32,6 +35,85 @@ struct HotKeyBinding: Codable, Equatable {
     func save(_ key: String) {
         guard let data = try? JSONEncoder().encode(self) else { return }
         UserDefaults.standard.set(data, forKey: key)
+    }
+
+    /// Сохраняем назначение только вместе с работающей регистрацией.
+    @MainActor
+    func save(_ key: String, registering: () -> OSStatus?) -> String? {
+        if let problem = phraseSelectionConflict(for: key) { return problem }
+        if let problem = dictationConflict(for: key) { return problem }
+        let previous = UserDefaults.standard.object(forKey: key)
+        save(key)
+        guard let status = registering() else { return nil }
+        if let previous {
+            UserDefaults.standard.set(previous, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        let problem = registrationError(status)
+        if let restoreStatus = registering() {
+            return problem + " Прежнее сочетание тоже недоступно (ошибка \(restoreStatus))."
+        }
+        return problem + " Прежнее сочетание сохранено."
+    }
+
+    /// Shift всегда выбирает вариант, даже если он входит в сочетание открытия.
+    var phraseDigitModifiers: [UInt32] {
+        var result: [UInt32] = []
+        for base in [UInt32(optionKey), modifiers & ~UInt32(shiftKey)] {
+            for value in [base, base | UInt32(shiftKey)] where !result.contains(value) {
+                result.append(value)
+            }
+        }
+        return result
+    }
+
+    static let phraseDigitKeys = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4,
+                                 kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8,
+                                 kVK_ANSI_9, kVK_ANSI_0].map(UInt32.init)
+
+    /// Цифры фраз регистрируются позже, поэтому Carbon ещё не видит конфликт
+    /// при сохранении настройки. Проверяем оба порядка назначения.
+    func phraseSelectionConflict(for key: String) -> String? {
+        guard [Self.dictationKey, Self.omniDictationKey, Self.clipboardKey, Self.phrasesKey].contains(key) else { return nil }
+        let phrases = key == Self.phrasesKey ? self : Self.load(Self.phrasesKey, fallback: .phrasesDefault)
+        let bindings = key == Self.phrasesKey ? [self,
+            Self.load(Self.clipboardKey, fallback: .clipboardDefault),
+            Self.load(Self.omniDictationKey, fallback: .omniDictationDefault),
+            Self.load(Self.dictationKey, fallback: .dictationDefault)] : [self]
+        guard let conflict = bindings.first(where: {
+            Self.phraseDigitKeys.contains($0.keyCode) && phrases.phraseDigitModifiers.contains($0.modifiers)
+        }) else { return nil }
+        return "Сочетание \(conflict.display) нужно для выбора фразы по цифре. Выберите другое сочетание."
+    }
+
+    /// Одиночный модификатор не должен запускать одну модель в начале
+    /// сочетания другой: Carbon такого пересечения не замечает.
+    func dictationConflict(for key: String) -> String? {
+        let other: HotKeyBinding
+        switch key {
+        case Self.dictationKey: other = Self.load(Self.omniDictationKey, fallback: .omniDictationDefault)
+        case Self.omniDictationKey: other = Self.load(Self.dictationKey, fallback: .dictationDefault)
+        default: return nil
+        }
+        func starts(_ combination: HotKeyBinding, with modifier: HotKeyBinding) -> Bool {
+            guard modifier.isModifierOnly,
+                  let flag = Self.modifierFlagByKeyCode[UInt16(modifier.keyCode)] else { return false }
+            return combination.modifiers & Self.carbonModifiers(from: flag) != 0
+        }
+        guard self == other || starts(self, with: other) || starts(other, with: self) else { return nil }
+        return "Клавиши Whisper и OmniASR пересекаются. Выберите разные сочетания без общего одиночного модификатора."
+    }
+
+    func registrationError(_ status: OSStatus) -> String {
+        switch status {
+        case OSStatus(eventHotKeyExistsErr):
+            return "Сочетание \(display) уже занято. Выберите другое."
+        case OSStatus(permErr):
+            return "Для клавиши \(display) разрешите Aza «Универсальный доступ» в настройках macOS."
+        default:
+            return "Не удалось назначить \(display) (ошибка \(status)). Выберите другое сочетание."
+        }
     }
 
     /// Человеческая запись сочетания: ⌃⇧D.
@@ -63,7 +145,8 @@ struct HotKeyBinding: Codable, Equatable {
 
     /// Одиночная клавиша-модификатор (Fn, ⌃, ⌥, ⇧, ⌘).
     var isModifierOnly: Bool {
-        Self.modifierFlagByKeyCode[UInt16(keyCode)] != nil && modifiers == 0
+        guard let code = UInt16(exactly: keyCode) else { return false }
+        return Self.modifierFlagByKeyCode[code] != nil && modifiers == 0
     }
 
     /// Перевод CGEvent в Carbon-модификаторы (матчинг хоткеев в tap'е).

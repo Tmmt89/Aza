@@ -45,6 +45,7 @@ final class PasteboardMonitor: ObservableObject {
     static var ignoredChangeCount = -1
 
     private var timer: Timer?
+    private var captureGeneration = UUID()
     private var lastChangeCount = NSPasteboard.general.changeCount
     /// Все приложения, побывавшие активными с прошлого тика: копия
     /// случилась где-то между тиками, и источником могло быть ЛЮБОЕ из
@@ -71,7 +72,7 @@ final class PasteboardMonitor: ObservableObject {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { [weak self] notification in
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 guard let self,
                       let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
                         as? NSRunningApplication,
@@ -80,13 +81,14 @@ final class PasteboardMonitor: ObservableObject {
             }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 self?.poll()
             }
         }
     }
 
     func stop() {
+        captureGeneration = UUID()
         timer?.invalidate()
         timer = nil
         if let activationObserver {
@@ -126,7 +128,7 @@ final class PasteboardMonitor: ObservableObject {
     /// Приоритет классификации (стиль Maccy): файлы → изображение →
     /// ссылка → RTF → текст. Копия файла-картинки из Finder остаётся
     /// файловой ссылкой; содержимое файлов не читается.
-    private func classify(_ pasteboard: NSPasteboard,
+    func classify(_ pasteboard: NSPasteboard,
                           sourceAppBundleID: String?, sourceAppName: String?) {
         if let urls = pasteboard.readObjects(
             forClasses: [NSURL.self],
@@ -144,22 +146,25 @@ final class PasteboardMonitor: ObservableObject {
             // Декодирование, нормализация к PNG и миниатюра — в фоне:
             // на таймере главного потока большое изображение подвешивало
             // бы UI и сам опрос. В main возвращаемся только для записи.
-            let store = self.store
+            let generation = captureGeneration
             // Время — момент КОПИИ: текст, скопированный позже картинки,
             // добавляется синхронно и не должен оказаться под ней в истории.
             let copiedAt = Date()
             Self.imageDecodeQueue.async {
-                guard let rep = NSBitmapImageRep(data: image),
+                guard Self.imageIsSafeToDecode(image),
+                      let rep = NSBitmapImageRep(data: image),
                       let png = rep.representation(using: .png, properties: [:]) else {
                     azaDebugLog("Aza: clip image decode failed bytes=\(image.count)")
                     return
                 }
                 let thumbnail = Self.thumbnailPNG(from: png)
                 let label = "Изображение \(rep.pixelsWide)×\(rep.pixelsHigh)"
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
+                DispatchQueue.main.async { [weak self] in
+                    azaAssumeMainUnchecked {
+                        guard let self, self.isRunning,
+                              self.captureGeneration == generation else { return }
                         azaDebugLog("Aza: clip kind=image bytes=\(png.count) thumb=\(thumbnail?.count ?? 0)")
-                        store.addImage(png: png, label: label, thumbnail: thumbnail,
+                        self.store.addImage(png: png, label: label, thumbnail: thumbnail,
                                        sourceAppBundleID: sourceAppBundleID,
                                        sourceAppName: sourceAppName,
                                        copiedAt: copiedAt)
@@ -178,7 +183,8 @@ final class PasteboardMonitor: ObservableObject {
             return
         }
 
-        if let rtf = pasteboard.data(forType: .rtf) {
+        if let rtf = pasteboard.data(forType: .rtf),
+           rtf.count <= ClipboardStore.maxObjectBytes {
             // Плоский текст: из pasteboard, иначе из самого RTF.
             let text = pasteboard.string(forType: .string)
                 ?? NSAttributedString(rtf: rtf, documentAttributes: nil)?.string
@@ -204,7 +210,21 @@ final class PasteboardMonitor: ObservableObject {
     /// Последовательная очередь декодирования изображений: сохраняет
     /// порядок при быстрых подряд копированиях (гонка «старое поверх
     /// нового» невозможна: main тоже последовательный).
-    private static let imageDecodeQueue = DispatchQueue(label: "com.tmmt.Aza.image-decode")
+    static let imageDecodeQueue = DispatchQueue(label: "com.tmmt.Aza.image-decode")
+
+    /// Размер сжатого PNG/TIFF не ограничивает память после распаковки.
+    /// ponytail: до 100 МБ RGBA на кадр; большие изображения требуют
+    /// отдельного декодера с уменьшением размера до загрузки в память.
+    nonisolated static func imageIsSafeToDecode(_ data: Data) -> Bool {
+        guard data.count <= ClipboardStore.maxObjectBytes,
+              let source = CGImageSourceCreateWithData(data as CFData,
+                  [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else { return false }
+        return width <= ClipboardStore.maxObjectBytes / 4 / height
+    }
 
     /// PNG-миниатюра ≤512px по длинной стороне через ImageIO —
     /// потокобезопасно без графического контекста AppKit. 512, а не меньше:

@@ -66,7 +66,7 @@ struct CityPickerList: View {
                 .background(AzaStyle.control, in: RoundedRectangle(
                     cornerRadius: 6, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(searchFocused ? AzaStyle.acid.opacity(0.6) : AzaStyle.line))
+                    .stroke(searchFocused ? AzaStyle.rise.opacity(0.6) : AzaStyle.line))
                 .padding(8)
             Divider()
             ScrollViewReader { proxy in
@@ -92,7 +92,7 @@ struct CityPickerList: View {
             }
         }
         .frame(width: 240, height: 300)
-        .tint(AzaStyle.acid)
+        .tint(AzaStyle.rise)
         .onAppear { searchFocused = true }
     }
 
@@ -106,7 +106,7 @@ struct CityPickerList: View {
                 if id == cityID {
                     Image(systemName: "checkmark")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(AzaStyle.acid)
+                        .foregroundStyle(AzaStyle.rise)
                 }
             }
             .contentShape(Rectangle())

@@ -21,12 +21,13 @@ func azaDebugLog(_ message: String) {
 #endif
 }
 
-/// MainActor.assumeIsolated для колбэков CGEventTap. Штатный assumeIsolated
-/// падал SIGSEGV (31.08, swift_task_isCurrentExecutor → getObjectType по
-/// мусорному адресу): колбэк tap'а выполняется реентерабельно внутри
-/// вложенных tracking-петель, где TLS «текущий executor» рантайма
-/// оказывается мусорным, и его проверка разыменовывает мусор. Поток
-/// проверяем сами — источники всех tap'ов стоят на главном runloop.
+/// Замена MainActor.assumeIsolated для ВСЕХ синхронных колбэков главного
+/// потока (tap'ы, таймеры, NSEvent-мониторы, нотификации). Штатный
+/// assumeIsolated падал SIGSEGV (31.08, tap) и SIGBUS (04.09, таймер
+/// PasteboardMonitor после контекстного меню): swift_task_isCurrentExecutor
+/// читает TLS «текущий executor», который внутри/после вложенных
+/// tracking-петель AppKit оказывается мусорным, и разыменовывает его.
+/// Поток проверяем сами — все источники стоят на главном runloop.
 func azaAssumeMainUnchecked<T>(_ body: @MainActor () -> T) -> T {
     precondition(Thread.isMainThread, "tap callback вне главного потока")
     return withoutActuallyEscaping(body) { escaping in
@@ -125,13 +126,20 @@ final class GlobalHotKey: ObservableObject {
     }
 
     func requestInputMonitoring() {
-        inputMonitoringGranted = CGRequestListenEventAccess()
-        correctionStatus = inputMonitoringGranted
-            ? "Input Monitoring разрешён"
-            : "Включите Aza в Input Monitoring и перезапустите"
+        _ = CGRequestListenEventAccess()
+        refreshInputMonitoring()
+    }
+
+    func refreshInputMonitoring() {
+        inputMonitoringGranted = CGPreflightListenEventAccess()
         if inputMonitoringGranted {
             wordMonitor?.start()
             startUndoMonitor()
+        } else {
+            wordMonitor?.stop()
+            if let shiftMonitor { NSEvent.removeMonitor(shiftMonitor) }
+            shiftMonitor = nil
+            recentWords.removeAll()
         }
     }
 
@@ -150,7 +158,7 @@ final class GlobalHotKey: ObservableObject {
     private func startUndoMonitor() {
         guard shiftMonitor == nil else { return }
         shiftMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 self?.handleFlagsChanged(event)
             }
         }
@@ -323,13 +331,12 @@ final class GlobalHotKey: ObservableObject {
     /// защита от системной автозамены и запоминание неисправленных слов.
     /// nil — исправлять нечего (вся сопутствующая работа уже сделана).
     private func evaluate(word: String, delimiter: String) -> (text: String, inputLanguage: String?)? {
-        // Выключенная коррекция не должна ни исправлять, ни копить контекст:
-        // иначе двухбуквенный контекстный ремап всё равно менял бы текст.
+        inputGeneration &+= 1
+        // Без раскладки исправляем только опечатки, не копим контекст фразы.
         guard ChechenAutocorrect.isLayoutCorrectionEnabled else {
             recentWords.removeAll()
-            return nil
+            return LayoutCorrectionEngine.correction(for: word)
         }
-        inputGeneration &+= 1
         // Смена фокусного окна внутри приложения (другой документ, диалог
         // сохранения) — тоже разрыв фразы; смену приложений рвёт WordMonitor.
         let window = TextInsertion.focusedWindow()
@@ -373,6 +380,9 @@ final class GlobalHotKey: ObservableObject {
                           // элемент и каретка обязаны совпасть с моментом
                           // планирования — чужой текст не переписывается.
                           self.inputGeneration == generation,
+                          ChechenAutocorrect.isLayoutCorrectionEnabled,
+                          TextInsertion.focusSafeForPaste(
+                            targetPid: TextInsertion.processID(of: element), verifying: element),
                           // Компромисс: автозамена, менявшая длину слова,
                           // сдвигает каретку — restore тогда пропускается
                           // (лучше пропуск, чем риск чужого текста).
@@ -432,8 +442,11 @@ final class GlobalHotKey: ObservableObject {
             // пропадало. Одна повторная попытка; сверки внутри
             // applyCorrection не дадут переписать чужой текст.
             let generation = inputGeneration
+            let targetPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in
                 guard let self, self.inputGeneration == generation,
+                      let targetPid,
+                      TextInsertion.focusSafeForPaste(targetPid: targetPid),
                       let element = TextInsertion.focusedElement(),
                       !SecureFieldDetector.isSecure(element) else { return }
                 azaDebugLog("Aza: retry after accessibility wake")
@@ -449,8 +462,10 @@ final class GlobalHotKey: ObservableObject {
         // Give the app time to process the delimiter keystroke; replaceTypedText
         // verifies the text before the caret still matches, so a moved caret
         // aborts the replacement instead of corrupting the field.
+        let generation = inputGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
-            self?.applyCorrection(word: word, delimiter: delimiter,
+            guard let self, self.inputGeneration == generation else { return }
+            self.applyCorrection(word: word, delimiter: delimiter,
                                   correction: correction,
                                   spanOriginal: spanOriginal,
                                   spanCorrected: spanCorrected,
@@ -462,6 +477,13 @@ final class GlobalHotKey: ObservableObject {
                                  correction: (text: String, inputLanguage: String?),
                                  spanOriginal: String, spanCorrected: String,
                                  spanWords: [String], element: AXUIElement) {
+            guard (ChechenAutocorrect.isLayoutCorrectionEnabled
+                   || (spanOriginal.isEmpty
+                       && LayoutCorrectionEngine.correction(for: word)?.text == correction.text)),
+                  TextInsertion.focusSafeForPaste(
+                    targetPid: TextInsertion.processID(of: element), verifying: element),
+                  let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                  !ExcludedApps.isCorrectionDenied(bundleID: bundleID) else { return }
             var usedSpan = !spanOriginal.isEmpty
             var replaced = TextInsertion.replaceTypedText(
                 in: element,

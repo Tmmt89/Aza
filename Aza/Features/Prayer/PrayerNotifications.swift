@@ -6,24 +6,26 @@ import UserNotifications
 /// Уведомления о намазе (§4.4).
 ///
 /// Звуки поставляются с приложением: четыре азана и три коротких
-/// синтезированных сигнала (см. docs/PLAN-prayer-schedules.md). Все
-/// укладываются в системный предел уведомления в 30 секунд, поэтому
-/// звучат целиком.
+/// синтезированных сигнала. Файлы играет собственный плеер до конца:
+/// usernoted может заменить выбранную запись коротким системным звуком.
 @MainActor
-final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
-
-    override init() {
-        super.init()
-        // Без делегата macOS МОЛЧА прячет баннер и звук, когда Aza —
-        // активное приложение (панель буфера держит ключевое окно):
-        // уведомление уходит в Центр, а намаз проходит беззвучно.
-        center.delegate = self
+class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
+    /// Пауза действует и на уже начатую пересборку очереди.
+    var isSuppressedForDictation = false {
+        didSet {
+            if isSuppressedForDictation { playback.pause() }
+            else { playback.resume() }
+        }
     }
+
+    private let playback = PrayerSoundPreview()
+    private var soundTimers: [Timer] = []
+    private var soundScheduleID = UUID()
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification)
         async -> UNNotificationPresentationOptions {
-        [.banner, .sound, .list]
+        isSuppressedForDictation ? [] : [.banner, .sound, .list]
     }
 
     /// Чем звучит уведомление. Отделено от режима: «когда сработает» и
@@ -130,7 +132,12 @@ final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
     /// если Aza несколько дней не запускалась.
     static let horizonDays = 7
 
-    private let center = UNUserNotificationCenter.current()
+    private lazy var center: UNUserNotificationCenter = {
+        let center = UNUserNotificationCenter.current()
+        // Делегат нужен и для баннера, когда Aza активна.
+        center.delegate = self
+        return center
+    }()
 
     /// Разрешение спрашиваем только по явному включению (§9: ни одно
     /// разрешение не обязательно).
@@ -149,11 +156,15 @@ final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
         return settings.authorizationStatus
     }
 
-    /// Пересобирает расписание уведомлений: сначала добавляет нужные
-    /// (одинаковый идентификатор ЗАМЕНЯЕТ запись, а не дублирует), затем
-    /// снимает устаревшие. Обратный порядок — «снять всё, потом added» —
-    /// оставлял бы окно, в котором ближайшее уведомление уже снято, но
-    /// ещё не поставлено.
+    /// Пересобирает расписание уведомлений: снимает ВСЁ, потом ставит
+    /// заново. Точечная чистка по идентификаторам не работает: usernoted
+    /// может держать запись, которую pendingNotificationRequests не
+    /// возвращает (31.08–02.09 призрак с временами MWL пережил все
+    /// пересборки и дублировал уведомления), а add() с тем же id такую
+    /// запись не заменяет. removeAllPendingNotificationRequests —
+    /// единственный вызов, который бьёт и по невидимым записям. Окно
+    /// «снято, но ещё не поставлено» — миллисекунды; убийство приложения
+    /// в этом окне лечится пересборкой при следующем запуске.
     /// Итог планирования — чтобы интерфейс мог честно сказать, что
     /// расписание неполное. На уведомления о намазе полагаются каждый
     /// день, поэтому молчаливый сбой недопустим.
@@ -167,62 +178,64 @@ final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
     func reschedule(days: [(date: Date, times: DayPrayerTimes)],
                     city: PrayerCity,
                     now: Date = .now) async -> Outcome {
-        var wanted: Set<String> = []
-        /// Id, которые ХОТЕЛИ поставить, но add упал: их прежние версии в
-        /// очереди трогать нельзя — старое уведомление лучше пропавшего.
-        var failedIDs: Set<String> = []
-        var failed = 0
-
+        guard !isSuppressedForDictation else { return Outcome(scheduled: 0, failed: 0) }
+        // Запросы собираются ДО чистки, чтобы очередь пустовала минимум.
+        var requests: [(request: UNNotificationRequest, date: Date)] = []
         for day in days {
             for occurrence in day.times.occurrences {
-                let mode = Self.mode(for: occurrence.kind)
-                guard mode != .off else { continue }
-                let fireDate = mode == .reminder
-                    ? occurrence.date.addingTimeInterval(-Double(Self.reminderMinutes) * 60)
-                    : occurrence.date
-                guard fireDate > now else { continue }
-
-                let id = Self.identifier(city: city, kind: occurrence.kind, date: occurrence.date)
-                let request = UNNotificationRequest(
-                    identifier: id,
+                guard let fireDate = Self.fireDate(kind: occurrence.kind, at: occurrence.date,
+                                                   now: now) else { continue }
+                let trigger = Self.trigger(for: fireDate, city: city)
+                guard let soundDate = city.calendar.date(from: trigger.dateComponents) else { continue }
+                requests.append((UNNotificationRequest(
+                    identifier: Self.identifier(city: city, kind: occurrence.kind,
+                                                date: occurrence.date),
                     content: Self.content(kind: occurrence.kind, at: occurrence.date,
-                                          city: city, source: day.times.source, mode: mode),
-                    trigger: Self.trigger(for: fireDate, city: city)
-                )
-                do {
-                    try await center.add(request)
-                    wanted.insert(id)
-                } catch {
-                    failed += 1
-                    failedIDs.insert(id)
-                    azaDebugLog("Aza: prayer notification add failed")
-                }
+                                          city: city, source: day.times.source,
+                                          mode: Self.mode(for: occurrence.kind)),
+                    trigger: trigger
+                ), soundDate))
             }
         }
 
-        // Чистим устаревшее, если встало хоть что-то новое: иначе к
-        // свежим уведомлениям примешивались бы старые — например,
-        // времена прежнего города. А вот полный провал старые запросы
-        // сохраняет: лучше устаревшее расписание, чем никакого.
-        // Пустой список без ошибок — это НЕ сбой, а осознанный выбор
-        // пользователя (все намазы выключены). Старые запросы обязаны
-        // уйти, иначе выключённые уведомления продолжали бы приходить.
-        // А вот пустой список ИЗ-ЗА ошибок старое расписание сохраняет:
-        // устаревшие напоминания лучше молчания.
-        guard !wanted.isEmpty || failed == 0 else {
-            azaDebugLog("Aza: prayer reschedule failed — keeping old requests")
-            return Outcome(scheduled: 0, failed: failed)
+        clearSoundSchedule()
+        let selectedSound = Self.sound
+        center.removeAllPendingNotificationRequests()
+
+        var scheduled = 0
+        var failed = 0
+        for (request, date) in requests {
+            guard !isSuppressedForDictation else { break }
+            do {
+                try await center.add(request)
+                scheduled += 1
+                if !isSuppressedForDictation {
+                    scheduleSound(selectedSound, at: date)
+                }
+            } catch {
+                failed += 1
+                azaDebugLog("Aza: prayer notification add failed")
+            }
         }
-        if failed > 0 {
-            azaDebugLog("Aza: prayer reschedule partial — replacing what was scheduled")
-        }
-        let pending = await center.pendingNotificationRequests()
-        let stale = pending
-            .map(\.identifier)
-            .filter { $0.hasPrefix(Self.identifierPrefix) && !wanted.contains($0)
-                && !failedIDs.contains($0) }
-        center.removePendingNotificationRequests(withIdentifiers: stale)
-        return Outcome(scheduled: wanted.count, failed: failed)
+        return Outcome(scheduled: scheduled, failed: failed)
+    }
+
+    /// Сначала завершается последний center.add, затем очередь снимается.
+    /// Чтение после снятия подтверждает, что запись можно начать без звука
+    /// из оставшегося pending-запроса. Настройки и разрешения не меняются.
+    func pause(after pendingWork: Task<Void, Never>?) async -> Bool {
+        await Self.pause(after: pendingWork, cancel: { self.cancelAll(preservingPlayback: true) }, pendingEmpty: {
+            await self.center.pendingNotificationRequests().isEmpty
+        })
+    }
+
+    /// Граница usernoted передаётся замыканиями, чтобы порядок барьера
+    /// проверялся без системного центра и изменения очереди пользователя.
+    static func pause(after pendingWork: Task<Void, Never>?,
+                      cancel: () -> Void, pendingEmpty: () async -> Bool) async -> Bool {
+        await pendingWork?.value
+        cancel()
+        return await pendingEmpty()
     }
 
     /// Диагностика Live QA: сколько уведомлений реально стоит в очереди
@@ -243,17 +256,74 @@ final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
         azaDebugLog("Aza: prayer notifications delivered=[\(delivered.joined(separator: ", "))]")
     }
 
-    func cancelAll() async {
-        let pending = await center.pendingNotificationRequests()
-        center.removePendingNotificationRequests(
-            withIdentifiers: pending.map(\.identifier)
-                .filter { $0.hasPrefix(Self.identifierPrefix) }
-        )
+    /// Aza не планирует никаких уведомлений, кроме намаза, поэтому «всё» —
+    /// это и есть намаз. Снятие по идентификаторам не годится: невидимые
+    /// для pendingNotificationRequests записи оно не достаёт (см.
+    /// reschedule).
+    func cancelAll(preservingPlayback: Bool = false) {
+        clearSoundSchedule()
+        // Диктовка приостанавливает уже начатую запись, а не обрезает её.
+        if !preservingPlayback { playback.stop() }
+        center.removeAllPendingNotificationRequests()
+    }
+
+    private func clearSoundSchedule() {
+        soundScheduleID = UUID()
+        soundTimers.forEach { $0.invalidate() }
+        soundTimers.removeAll()
+    }
+
+    private func scheduleSound(_ sound: Sound, at date: Date) {
+        guard sound.fileName != nil else { return }
+        let scheduleID = soundScheduleID
+        let timer = Timer(fire: date, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let settings = await self.center.notificationSettings()
+                let now = Date.now
+                guard self.soundScheduleID == scheduleID else { return }
+                guard Self.shouldPlaySound(at: date, now: now,
+                                           suppressed: self.isSuppressedForDictation,
+                                           authorization: settings.authorizationStatus,
+                                           soundSetting: settings.soundSetting) else {
+                    NSLog("Aza: prayer sound skipped (offset=%.3f, suppressed=%d, authorization=%ld, sound=%ld)",
+                          now.timeIntervalSince(date), self.isSuppressedForDictation ? 1 : 0,
+                          settings.authorizationStatus.rawValue, settings.soundSetting.rawValue)
+                    return
+                }
+                self.playback.play(sound)
+                NSLog("Aza: prayer sound %@ (offset=%.3f)",
+                      self.playback.playing == sound ? "started" : "failed", now.timeIntervalSince(date))
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        soundTimers.append(timer)
+    }
+
+    /// Просроченный во сне звук не догоняет пользователя после пробуждения.
+    /// Коррекция настенных часов может дать ранний callback Timer на доли
+    /// секунды: строгий ноль отменял единственную попытку проиграть азан.
+    static func shouldPlaySound(at date: Date, now: Date, suppressed: Bool,
+                                authorization: UNAuthorizationStatus,
+                                soundSetting: UNNotificationSetting) -> Bool {
+        !suppressed && authorization == .authorized && soundSetting == .enabled
+            && (-0.5..<5).contains(now.timeIntervalSince(date))
     }
 
     // MARK: Сборка запроса
 
     private static let identifierPrefix = "aza.prayer."
+
+    /// Когда сработает уведомление о намазе; nil — выключено или уже
+    /// прошло.
+    static func fireDate(kind: PrayerKind, at date: Date, now: Date) -> Date? {
+        let mode = mode(for: kind)
+        guard mode != .off else { return nil }
+        let fireDate = mode == .reminder
+            ? date.addingTimeInterval(-Double(reminderMinutes) * 60)
+            : date
+        return fireDate > now ? fireDate : nil
+    }
 
     /// Детерминированный идентификатор: повторное планирование заменяет
     /// запись, а не плодит дубликаты.
@@ -276,7 +346,7 @@ final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
         return UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
     }
 
-    private static func content(kind: PrayerKind, at date: Date, city: PrayerCity,
+    static func content(kind: PrayerKind, at date: Date, city: PrayerCity,
                                 source: PrayerTimesSource, mode: Mode) -> UNNotificationContent {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
@@ -287,35 +357,25 @@ final class PrayerNotifications: NSObject, UNUserNotificationCenterDelegate {
         content.title = mode == .reminder
             ? "\(kind.title) через \(reminderMinutes) мин"
             : kind.title
-        content.body = "\(city.name) · \(time)"
-        // Источник — в подзаголовке: расчётное время не должно выглядеть
-        // как выверенное расписание (§4.3).
-        content.subtitle = source.label
-        // Звук берём у системы уведомлений, а не проигрываем сами:
-        // только так соблюдаются Focus и «Не беспокоить» (§4.4). Плата за
-        // это — системный предел в 30 секунд.
-        content.sound = sound.fileName
-            .map { UNNotificationSound(named: UNNotificationSoundName($0)) } ?? .default
+        content.subtitle = city.name
+        content.body = source.isVerifiedTable ? time : "\(time) · \(source.label)"
+        // Файл звучит независимо от жизни баннера; второй системный
+        // сигнал поверх него не нужен. Системный вариант остаётся штатным.
+        content.sound = sound == .system ? .default : nil
         return content
     }
 }
 
-/// Прослушивание звука уведомления в настройках.
-///
-/// Живёт рядом с уведомлениями, а не отдельным файлом: это тот же список
-/// звуков и те же файлы, просто проигранные вручную. Настоящее
-/// уведомление по-прежнему звучит через систему — здесь только
-/// предварительное прослушивание, поэтому Focus и «Не беспокоить»
-/// осознанно не учитываются: пользователь сам нажал.
+/// Плеер файлов для уведомлений и прослушивания в настройках.
+/// Каждый владелец держит свой экземпляр: закрытие настроек не обрывает азан.
 @MainActor
-final class PrayerSoundPreview: ObservableObject {
+final class PrayerSoundPreview: NSObject, ObservableObject, @preconcurrency AVAudioPlayerDelegate {
 
     /// Что звучит прямо сейчас; nil — тишина. Нужно интерфейсу, чтобы
     /// кнопка показывала «стоп» вместо «играть».
     @Published private(set) var playing: PrayerNotifications.Sound?
 
-    private var player: AVAudioPlayer?
-    private var finishWatcher: Task<Void, Never>?
+    private(set) var player: AVAudioPlayer?
 
     /// Переключатель: тот же звук останавливает, другой — начинает заново.
     func toggle(_ sound: PrayerNotifications.Sound) {
@@ -339,28 +399,36 @@ final class PrayerSoundPreview: ObservableObject {
             return
         }
         self.player = player
-        playing = sound
-        player.play()
-        // Кнопка обязана вернуться в исходное состояние сама, когда запись
-        // доиграет: иначе она навсегда останется «стоп».
-        let seconds = player.duration
-        finishWatcher = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(seconds + 0.1))
-            guard !Task.isCancelled else { return }
-            self?.finish(sound)
+        player.delegate = self
+        guard player.play() else {
+            NSLog("Aza: could not play sound (%@)", name)
+            return stop()
         }
+        playing = sound
     }
 
     func stop() {
-        finishWatcher?.cancel()
-        finishWatcher = nil
         player?.stop()
         player = nil
         playing = nil
     }
 
-    private func finish(_ sound: PrayerNotifications.Sound) {
-        guard playing == sound else { return }
+    func pause() { player?.pause() }
+
+    func resume() {
+        guard let player, !player.isPlaying else { return }
+        if !player.play() { stop() }
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard self.player === player else { return }
+        if !flag { NSLog("Aza: sound playback did not finish successfully") }
+        stop()
+    }
+
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        guard self.player === player else { return }
+        NSLog("Aza: sound decoding failed: %@", error?.localizedDescription ?? "unknown")
         stop()
     }
 }

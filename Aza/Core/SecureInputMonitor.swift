@@ -32,7 +32,7 @@ final class SecureInputMonitor: ObservableObject {
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: Self.pollSeconds,
                                      repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.poll() }
+            azaAssumeMainUnchecked { self?.poll() }
         }
     }
 

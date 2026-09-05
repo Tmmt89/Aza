@@ -9,9 +9,7 @@ import Foundation
 @MainActor
 enum ChechenAutocorrect {
 
-    /// Главный тумблер: исправление раскладки целиком. Включено по
-    /// умолчанию — это основная функция приложения, но выключить её
-    /// пользователь должен иметь возможность одним переключателем.
+    /// Исправление раскладки: выключено по умолчанию, независимо от опечаток.
     static let layoutStorageKey = "LayoutCorrectionEnabled"
 
     /// Опечаточная автокоррекция: выключена по умолчанию.
@@ -26,7 +24,7 @@ enum ChechenAutocorrect {
     static let latinizationStorageKey = "CyrillicToLatinEnabled"
 
     static var isLayoutCorrectionEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: layoutStorageKey) as? Bool ?? true }
+        get { UserDefaults.standard.object(forKey: layoutStorageKey) as? Bool ?? false }
         set { UserDefaults.standard.set(newValue, forKey: layoutStorageKey) }
     }
 
@@ -41,7 +39,7 @@ enum ChechenAutocorrect {
     }
 
     static var isLatinizationEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: latinizationStorageKey) as? Bool ?? true }
+        get { UserDefaults.standard.object(forKey: latinizationStorageKey) as? Bool ?? false }
         set { UserDefaults.standard.set(newValue, forKey: latinizationStorageKey) }
     }
 

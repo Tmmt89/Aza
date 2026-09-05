@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import XCTest
 
 @MainActor
@@ -20,29 +21,91 @@ final class ClipboardStoreTests: XCTestCase {
                        ["форматированный текст", "изображение", "файл/папка"])
     }
 
-    /// Спасение ключа из связки обязано случиться не больше одного раза
-    /// на конкретную историю: иначе отказ в доступе возвращал бы диалог
-    /// «Разрешить всегда» при каждом запуске.
-    func testKeychainIsAskedOncePerHistoryFile() throws {
+    func testLocalKeyPersistsWithPrivatePermissionsAndOpensHistory() throws {
         let directory = try TestFiles.directory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let marker = directory.appendingPathComponent("debug-history.rescue-failed")
-        let first = "aaaa1111"
-        let second = "bbbb2222"
+        let history = directory.appendingPathComponent("Aza/history.bin")
+        let keyFile = history.deletingLastPathComponent()
+            .appendingPathComponent(ClipboardStore.localKeyFileName)
+        let first = ClipboardStore.obtainKey(storageURL: history)
+        XCTAssertTrue(first.1)
+        let raw = try Data(contentsOf: keyFile)
+        XCTAssertEqual(raw.count, 32)
+        XCTAssertEqual(first.0.withUnsafeBytes { Data($0) }, raw)
+        let manager = FileManager.default
+        XCTAssertEqual(try manager.attributesOfItem(atPath: keyFile.path)[.posixPermissions] as? Int, 0o600)
+        let directoryAttributes = try manager.attributesOfItem(
+            atPath: keyFile.deletingLastPathComponent().path)
+        XCTAssertEqual(directoryAttributes[.posixPermissions] as? Int, 0o700)
 
-        // Отметки нет — спрашиваем.
-        XCTAssertTrue(ClipboardStore.shouldAskKeychain(fingerprint: first, marker: marker))
+        let store = ClipboardStore(preparedKey: first, storageURL: history)
+        store.add(text: "сохранённая запись", sourceAppBundleID: nil, sourceAppName: nil)
+        let encrypted = try Data(contentsOf: history)
+        XCTAssertNil(encrypted.range(of: Data("сохранённая запись".utf8)))
+        // Повторный запуск использует тот же ключ и восстанавливает права.
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: keyFile.path)
+        let second = ClipboardStore.obtainKey(storageURL: history)
+        XCTAssertTrue(second.1)
+        XCTAssertEqual(second.0.withUnsafeBytes { Data($0) }, raw)
+        XCTAssertEqual(try manager.attributesOfItem(atPath: keyFile.path)[.posixPermissions] as? Int, 0o600)
+        XCTAssertEqual(ClipboardStore(preparedKey: second, storageURL: history).entries.first?.text,
+                       "сохранённая запись")
+    }
 
-        // Записали неудачу для этой истории — больше не спрашиваем.
-        try first.write(to: marker, atomically: true, encoding: .utf8)
-        XCTAssertFalse(ClipboardStore.shouldAskKeychain(fingerprint: first, marker: marker))
+    func testMissingOrDamagedLocalKeyLeavesExistingHistoryReadOnly() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = FileManager.default
+        for mode in ["missing", "damaged", "unreadable", "wrong-legacy"] {
+            let root = directory.appendingPathComponent(mode)
+            try manager.createDirectory(at: root, withIntermediateDirectories: true)
+            let history = root.appendingPathComponent("history.bin")
+            let keyFile = root.appendingPathComponent(
+                mode == "wrong-legacy" ? "debug-history.key" : ClipboardStore.localKeyFileName)
+            makeStore(at: history).add(text: "не стирать", sourceAppBundleID: nil, sourceAppName: nil)
+            let before = try Data(contentsOf: history)
+            let keyBytes = Data(repeating: 0x11, count: mode == "damaged" ? 31 : 32)
+            if mode != "missing" { try keyBytes.write(to: keyFile) }
+            if mode == "unreadable" {
+                try manager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: keyFile.path)
+            }
+            let prepared = ClipboardStore.obtainKey(storageURL: history)
+            XCTAssertFalse(prepared.1, mode)
+            let store = ClipboardStore(preparedKey: prepared, storageURL: history)
+            XCTAssertTrue(store.isReadOnly, mode)
+            store.add(text: "не перезаписывать", sourceAppBundleID: nil, sourceAppName: nil)
+            XCTAssertEqual(try Data(contentsOf: history), before, mode)
+            if mode == "missing" {
+                XCTAssertFalse(manager.fileExists(atPath: keyFile.path))
+            } else {
+                try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
+                XCTAssertEqual(try Data(contentsOf: keyFile), keyBytes, mode)
+            }
+        }
+    }
 
-        // Другая история — новая попытка.
-        XCTAssertTrue(ClipboardStore.shouldAskKeychain(fingerprint: second, marker: marker))
-
-        // Перевод строки в конце файла не должен ломать сравнение.
-        try (first + "\n").write(to: marker, atomically: true, encoding: .utf8)
-        XCTAssertFalse(ClipboardStore.shouldAskKeychain(fingerprint: first, marker: marker))
+    func testLocalKeyDoesNotFollowLinksOrReadSpecialFiles() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = FileManager.default
+        let history = directory.appendingPathComponent("history.bin")
+        let keyFile = directory.appendingPathComponent(ClipboardStore.localKeyFileName)
+        let target = directory.appendingPathComponent("target.key")
+        let raw = key.withUnsafeBytes { Data($0) }
+        try raw.write(to: target)
+        try manager.createSymbolicLink(at: keyFile, withDestinationURL: target)
+        XCTAssertFalse(ClipboardStore.obtainKey(storageURL: history).1)
+        XCTAssertEqual(try Data(contentsOf: target), raw)
+        try manager.removeItem(at: target)
+        XCTAssertFalse(ClipboardStore.obtainKey(storageURL: history).1,
+                       "dangling link must not be replaced")
+        try manager.removeItem(at: keyFile)
+        try manager.createDirectory(at: keyFile, withIntermediateDirectories: false)
+        XCTAssertFalse(ClipboardStore.obtainKey(storageURL: history).1)
+        try manager.removeItem(at: keyFile)
+        XCTAssertEqual(mkfifo(keyFile.path, 0o600), 0)
+        XCTAssertFalse(ClipboardStore.obtainKey(storageURL: history).1,
+                       "FIFO must not hang the loader")
     }
 
     /// Если файл ключа не удалось удалить, ключевой материал обязан быть
@@ -287,46 +350,65 @@ final class ClipboardStoreTests: XCTestCase {
         }
     }
 
-    /// Решение об удалении файла ключа. Копия нечитаемой истории
-    /// перекрывает ВСЁ: она зашифрована другим ключом, и им вполне может
-    /// быть этот файл. Раньше хватало двух обычных запусков, чтобы его
-    /// потерять — ветка «рабочий ключ открывает историю» шла мимо
-    /// проверки копии.
-    func testBackupBlocksKeyDisposalOnEveryGround() throws {
+    func testLegacyMigrationPreservesKeyHistoryBackupAndImages() throws {
         let directory = try TestFiles.directory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let history = directory.appendingPathComponent("clipboard-history.bin")
+        let manager = FileManager.default
+        let raw = key.withUnsafeBytes { Data($0) }
+        for legacyBytes in [raw, Data([0xDE]) + raw + Data([0xAD])] {
+            let root = directory.appendingPathComponent(UUID().uuidString)
+            try manager.createDirectory(at: root, withIntermediateDirectories: true)
+            let history = root.appendingPathComponent("clipboard-history.bin")
+            let legacy = root.appendingPathComponent("debug-history.key")
+            let keyFile = root.appendingPathComponent(ClipboardStore.localKeyFileName)
+            makeStore(at: history).add(text: "прежняя история", sourceAppBundleID: nil, sourceAppName: nil)
+            let before = try Data(contentsOf: history)
+            try legacyBytes.write(to: legacy)
+            let backup = ClipboardStore.unreadableBackupURL(for: history)
+            let backupBytes = try XCTUnwrap(AES.GCM.seal(Data("старая копия".utf8),
+                using: SymmetricKey(size: .bits256)).combined)
+            try backupBytes.write(to: backup)
+            let blobs = history.deletingPathExtension().appendingPathExtension("blobs")
+            try manager.createDirectory(at: blobs, withIntermediateDirectories: false)
+            let backupImage = blobs.appendingPathComponent("backup-image.bin")
+            try Data([1, 2, 3]).write(to: backupImage)
+
+            let prepared = ClipboardStore.obtainKey(storageURL: history)
+            XCTAssertTrue(prepared.1)
+            XCTAssertEqual(try Data(contentsOf: keyFile), raw)
+            XCTAssertEqual(try Data(contentsOf: legacy), legacyBytes)
+            XCTAssertEqual(try Data(contentsOf: history), before)
+            XCTAssertEqual(try Data(contentsOf: backup), backupBytes)
+            XCTAssertEqual(ClipboardStore(preparedKey: prepared, storageURL: history)
+                .entries.first?.text, "прежняя история")
+            XCTAssertEqual(try Data(contentsOf: backupImage), Data([1, 2, 3]),
+                           "images possibly referenced by the backup must survive")
+            XCTAssertTrue(ClipboardStore.obtainKey(storageURL: history).1)
+            XCTAssertEqual(try Data(contentsOf: legacy), legacyBytes)
+        }
+    }
+
+    func testBackupOrOrphanImagesBlockFreshKeyCreation() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = directory.appendingPathComponent("history.bin")
         let backup = ClipboardStore.unreadableBackupURL(for: history)
-        XCTAssertEqual(backup.lastPathComponent, "clipboard-history.unreadable.bin",
-                       "имя копии обязано выводиться одной формулой на весь код")
-
-        let other = SymmetricKey(data: Data(repeating: 0x11, count: 32))
-
-        // Истории нет и копии нет — терять нечего, удалять можно.
-        XCTAssertTrue(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
-
-        // История открывается рабочим ключом — тоже можно.
-        let store = makeStore(at: history)
-        store.add(text: "запись", sourceAppBundleID: nil, sourceAppName: nil)
-        XCTAssertTrue(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
-
-        // История есть, но рабочий ключ её не открывает — нельзя:
-        // AES-GCM не отличает неверный ключ от повреждённых данных.
-        XCTAssertFalse(ClipboardStore.shouldDiscardKey(working: other, historyURL: history))
-
-        // Появилась копия — нельзя НИ ПО КАКОМУ основанию, включая то,
-        // на котором ключ терялся: рабочий ключ открывает историю.
-        try Data(repeating: 0xEE, count: 64).write(to: backup)
-        XCTAssertFalse(ClipboardStore.shouldDiscardKey(working: key, historyURL: history),
-                       "копия обязана перекрывать ветку «ключ открывает историю»")
-
-        // И при отсутствующей истории копия тоже защищает.
-        try FileManager.default.removeItem(at: history)
-        XCTAssertFalse(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
-
-        // Убрали копию — запрет снят.
+        let keyFile = directory.appendingPathComponent(ClipboardStore.localKeyFileName)
+        try Data([1, 2, 3]).write(to: backup)
+        XCTAssertFalse(ClipboardStore.obtainKey(storageURL: history).1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: keyFile.path))
+        XCTAssertEqual(try Data(contentsOf: backup), Data([1, 2, 3]))
         try FileManager.default.removeItem(at: backup)
-        XCTAssertTrue(ClipboardStore.shouldDiscardKey(working: key, historyURL: history))
+        let blobs = history.deletingPathExtension().appendingPathExtension("blobs")
+        try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: false)
+        let image = blobs.appendingPathComponent("image.bin")
+        try Data([4, 5, 6]).write(to: image)
+        XCTAssertFalse(ClipboardStore.obtainKey(storageURL: history).1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: keyFile.path))
+        XCTAssertEqual(try Data(contentsOf: image), Data([4, 5, 6]))
+        try FileManager.default.removeItem(at: image)
+        XCTAssertTrue(ClipboardStore.obtainKey(storageURL: history).1,
+                      "an empty blob directory must not block a clean start")
     }
 
     func testEncryptedRoundTripAndUnreadableGuard() throws {
@@ -425,12 +507,71 @@ final class ClipboardStoreTests: XCTestCase {
         let store = makeStore(at: url)
         store.add(text: "before-lock", sourceAppBundleID: nil, sourceAppName: nil)
         let ids = store.entries.map(\.id)
+        store.addImage(png: Data([1, 2, 3]), label: "image", thumbnail: nil,
+                       sourceAppBundleID: nil, sourceAppName: nil)
+        let image = try XCTUnwrap(store.entries.first)
+        let deleted = try XCTUnwrap(store.delete(id: image.id))
 
         store.wipeInMemory()
         XCTAssertTrue(store.entries.isEmpty)
         store.add(text: "during-lock", sourceAppBundleID: nil, sourceAppName: nil)
+        store.addRTF(text: "rich", rtf: Data([1]), sourceAppBundleID: nil, sourceAppName: nil)
+        store.addFiles(paths: ["/tmp/file"], sourceAppBundleID: nil, sourceAppName: nil)
+        store.addLink(URL(string: "https://example.com")!, sourceAppBundleID: nil, sourceAppName: nil)
+        store.restore(deleted)
+        XCTAssertTrue(store.entries.isEmpty, "Locked history must stay empty in memory, too")
+        XCTAssertNil(store.imageData(for: image), "Stale cards must not decrypt images while locked")
         store.reloadFromDisk()
         XCTAssertEqual(store.entries.map(\.id), ids)
         XCTAssertFalse(store.entries.contains { $0.text == "during-lock" })
+    }
+
+    func testRTFPreservesPlainTextWhitespace() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("rtf.bin")
+        let store = makeStore(at: url)
+        let text = "  indented text\n"
+        let attributed = NSAttributedString(string: text)
+        let rtf = try XCTUnwrap(attributed.rtf(
+            from: NSRange(location: 0, length: attributed.length), documentAttributes: [:]))
+        store.addRTF(text: text, rtf: rtf, sourceAppBundleID: nil, sourceAppName: nil)
+        XCTAssertEqual(store.entries.first?.text, text)
+        XCTAssertEqual(makeStore(at: url).entries.first?.text, text)
+    }
+
+    func testStoppingMonitorDiscardsPendingImageAfterRestart() async throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = makeStore(at: directory.appendingPathComponent("image.bin"))
+        let monitor = PasteboardMonitor(store: store)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { monitor.stop(); pasteboard.releaseGlobally() }
+        let rep = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        rep.setColor(.red, atX: 0, y: 0)
+        pasteboard.setData(try XCTUnwrap(rep.representation(using: .png, properties: [:])),
+                           forType: .png)
+        monitor.start()
+        monitor.classify(pasteboard, sourceAppBundleID: nil, sourceAppName: nil)
+        monitor.stop()
+        monitor.start()
+        // Дождаться декодирования и затем уже поставленной в main записи.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            PasteboardMonitor.imageDecodeQueue.async {
+                DispatchQueue.main.async { done.resume() }
+            }
+        }
+        XCTAssertTrue(store.entries.isEmpty)
+
+        monitor.classify(pasteboard, sourceAppBundleID: nil, sourceAppName: nil)
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            PasteboardMonitor.imageDecodeQueue.async {
+                DispatchQueue.main.async { done.resume() }
+            }
+        }
+        XCTAssertEqual(store.entries.first?.resolvedKind, .image)
     }
 }

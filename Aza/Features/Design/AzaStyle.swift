@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Дизайн-система Aza (Design/design-system-state-aza-macos-v1.json):
-/// чистый чёрный «сцены», графитовые поверхности, мягкий изумрудный
-/// акцент, спокойная типографика, отступы кратны четырём.
+/// Чёрный остров, графитовые поверхности. Настройки используют единый
+/// синий акцент; цвета функций остаются в содержимом острова.
 ///
 /// Раньше эти значения жили приватно внутри IslandView — из-за чего окно
 /// настройки выглядело системным, а не частью продукта.
@@ -16,18 +16,18 @@ enum AzaStyle {
 
     // Текст
     static let ink = Color(red: 245 / 255, green: 245 / 255, blue: 247 / 255)
-    static let muted = Color(red: 161 / 255, green: 161 / 255, blue: 166 / 255)
-    static let faint = Color(red: 120 / 255, green: 120 / 255, blue: 126 / 255)
+    static let muted = Color(red: 171 / 255, green: 173 / 255, blue: 180 / 255)
+    static let faint = Color(red: 142 / 255, green: 145 / 255, blue: 153 / 255)
 
     // Линии и акценты
     static let line = Color(red: 56 / 255, green: 56 / 255, blue: 58 / 255)
-    static let rise = Color(red: 10 / 255, green: 132 / 255, blue: 1)
-    static let acid = Color(red: 70 / 255, green: 215 / 255, blue: 124 / 255)
-    static let acidSoft = Color(red: 114 / 255, green: 232 / 255, blue: 160 / 255)
-    static let acidSurface = Color(red: 70 / 255, green: 215 / 255, blue: 124 / 255)
-        .opacity(0.12)
-    static let danger = Color(red: 1, green: 69 / 255, blue: 58 / 255)
-    static let warning = Color(red: 1, green: 179 / 255, blue: 64 / 255)
+    static let rise = Color(red: 105 / 255, green: 169 / 255, blue: 246 / 255)
+    static let violet = Color(red: 184 / 255, green: 158 / 255, blue: 242 / 255)
+    static let acid = Color(red: 98 / 255, green: 208 / 255, blue: 154 / 255)
+    static let acidSoft = Color(red: 170 / 255, green: 234 / 255, blue: 198 / 255)
+    static let acidSurface = acid.opacity(0.12)
+    static let danger = Color(red: 1, green: 104 / 255, blue: 96 / 255)
+    static let warning = Color(red: 242 / 255, green: 192 / 255, blue: 112 / 255)
 
     // Стекло: карточка — лёгкий вертикальный градиент поверхности, кромка
     // освещена сверху. Родилось в карточке управления большого острова —
@@ -63,12 +63,6 @@ final class AzaSlidingWindow: NSWindow {
         frameRect
     }
 
-    /// Приложение никогда не активируется по-настоящему (AppKit роняет
-    /// и активирующий клик — память aza-island-clicks), система отклоняет
-    /// makeKey, и AppKit рисовал окно «неактивным»: блеклые контролы, ни
-    /// рамки фокуса, ни каретки в полях. Принудительный key-статус
-    /// возвращает живой вид; события всё равно доставляет CGEventTap.
-    override var isKeyWindow: Bool { true }
 }
 
 /// Появление и уход окон в одном жесте продукта: окно опускается из-за
@@ -76,6 +70,11 @@ final class AzaSlidingWindow: NSWindow {
 /// кромку. Без растворения: движение чисто физическое. При включённом
 /// «уменьшении движения» окно появляется и прячется мгновенно.
 extension NSWindow {
+    /// Системный hit-test учитывает модальные окна, их слой и прозрачность.
+    func receivesMouse(at point: NSPoint) -> Bool {
+        isVisible && NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == windowNumber
+    }
+
     /// Насколько поднять окно, чтобы оно целиком (с тенью) ушло за
     /// верхнюю кромку своего экрана.
     private var offscreenLift: CGFloat {
@@ -96,7 +95,7 @@ extension NSWindow {
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1, 0.36, 1)
             animator().setFrame(target, display: true)
         }, completionHandler: {
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 // Прерванная анимация оставляет модельный кадр за кромкой
                 // (окно видно, а клики летят «мимо») — финал закрепляется
                 // явно. Тот же прямоугольник AppKit ест как no-op, поэтому
@@ -118,7 +117,7 @@ extension NSWindow {
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.9, 0.4)
             animator().setFrame(target.offsetBy(dx: 0, dy: offscreenLift), display: true)
         } completionHandler: {
-            MainActor.assumeIsolated {
+            azaAssumeMainUnchecked {
                 completion()
                 // Спрятанным окно возвращается на место: следующий показ
                 // стартует с правильной геометрии.
@@ -128,38 +127,23 @@ extension NSWindow {
     }
 }
 
-/// Переключатель в стиле Aza: капсула с бегунком, изумрудная во
-/// включённом состоянии. Системный `.switch` выбивался из тёмной сцены
-/// собственным синим и своей геометрией.
+/// Системный переключатель сохраняет клавиатурное управление и семантику VoiceOver.
 struct AzaToggleStyle: ToggleStyle {
+    var tint: Color = AzaStyle.rise
+
     func makeBody(configuration: Configuration) -> some View {
-        Button {
-            configuration.isOn.toggle()
-        } label: {
-            HStack(spacing: 8) {
-                configuration.label
-                Spacer(minLength: 8)
-                ZStack(alignment: configuration.isOn ? .trailing : .leading) {
-                    Capsule()
-                        .fill(configuration.isOn ? AzaStyle.acid : AzaStyle.control)
-                        .frame(width: 34, height: 20)
-                        .overlay(Capsule().stroke(
-                            configuration.isOn ? .clear : AzaStyle.line))
-                    Circle()
-                        .fill(configuration.isOn ? Color.black.opacity(0.85) : AzaStyle.muted)
-                        .frame(width: 14, height: 14)
-                        .padding(.horizontal, 3)
-                }
-            }
-            .contentShape(Rectangle())
+        Toggle(isOn: configuration.$isOn) {
+            configuration.label.frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(.plain)
-        .animation(.easeOut(duration: AzaMotion.micro), value: configuration.isOn)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .tint(tint)
     }
 }
 
-/// Кнопка-капсула в стиле острова: тёмная подложка, акцент по смыслу.
+/// Общая кнопка настроек: спокойная поверхность, компактные скругления.
 struct AzaCapsuleButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
     var tint: Color = AzaStyle.control
     var foreground: Color = AzaStyle.ink
     var prominent = false
@@ -170,9 +154,11 @@ struct AzaCapsuleButtonStyle: ButtonStyle {
             .foregroundStyle(prominent ? Color.black : foreground)
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
-            .background(prominent ? tint : AzaStyle.control, in: Capsule())
-            .overlay(Capsule().stroke(prominent ? .clear : AzaStyle.line))
-            .opacity(configuration.isPressed ? 0.75 : 1)
+            .background(prominent ? tint : AzaStyle.control,
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(prominent ? .clear : AzaStyle.line.opacity(0.7)))
+            .opacity(!isEnabled ? 0.4 : configuration.isPressed ? 0.75 : 1)
             .animation(.easeOut(duration: AzaMotion.micro), value: configuration.isPressed)
     }
 }

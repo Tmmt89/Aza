@@ -3,6 +3,36 @@ import XCTest
 @MainActor
 final class PhraseStoreTests: XCTestCase {
 
+    func testFailedWriteAndResetRemainVisibleAndCanBeRetried() throws {
+        let directory = try TestFiles.directory()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let file = directory.appendingPathComponent("phrases.json")
+        let store = PhraseStore(fileURL: file)
+        store.update(0, text: "Saved phrase")
+        XCTAssertNil(store.saveError)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        store.update(0, text: "Unsaved draft")
+        XCTAssertNotNil(store.saveError)
+        XCTAssertEqual(store.phrases[0], "Unsaved draft", "ошибка не теряет набранный текст")
+        XCTAssertEqual(PhraseStore(fileURL: file).phrases[0], "Saved phrase")
+        store.resetToFactory()
+        XCTAssertNotNil(store.saveError)
+        XCTAssertEqual(store.phrases[0], "Unsaved draft", "неудачный сброс не меняет фразы")
+        XCTAssertTrue(store.isCustomized)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        store.save()
+        XCTAssertNil(store.saveError, "неудачный сброс не запрещает дальнейшее сохранение")
+        XCTAssertEqual(PhraseStore(fileURL: file).phrases[0], "Unsaved draft")
+        store.resetToFactory()
+        XCTAssertNil(store.saveError)
+        XCTAssertEqual(PhraseStore(fileURL: file).phrases, PhraseStore.factoryPhrases)
+        store.resetToFactory()
+        XCTAssertNil(store.saveError, "повторный сброс без файла тоже успешен")
+    }
+
     func testDefaultsEditPersistAndReset() throws {
         let url = try TestFiles.directory().appendingPathComponent("phrases.json")
 

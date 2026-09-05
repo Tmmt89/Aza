@@ -16,9 +16,10 @@ final class ClipboardCommands: ObservableObject {
     /// Удалённое, что ещё можно вернуть (пусто — кнопки «Отменить» нет).
     @Published private(set) var pendingUndo: [ClipboardStore.Deleted] = []
 
-    /// Хранилище появляется асинхронно (ключ Keychain добывается в фоне).
+    /// Хранилище появляется асинхронно (локальный ключ читается в фоне).
     private let storeProvider: () -> ClipboardStore?
     private var undoToken = UUID()
+    private var insertionToken = UUID()
 
     /// Сколько живёт окно «Отменить» (спецификация §8.7).
     static let undoWindow: TimeInterval = 5
@@ -34,7 +35,7 @@ final class ClipboardCommands: ObservableObject {
     /// Кладёт запись в системный буфер сообразно её виду.
     @discardableResult
     func copyToPasteboard(_ entry: ClipEntry) -> Bool {
-        guard let store else { return false }
+        guard let store, !store.screenLocked else { return false }
         let pasteboard = NSPasteboard.general
         // clearContents — только после того, как данные добыты: неудача
         // (нечитаемый blob) не должна стирать прежнее содержимое буфера.
@@ -63,6 +64,7 @@ final class ClipboardCommands: ObservableObject {
             pasteboard.setString(entry.text, forType: .string)
         }
         status = "Скопировано — вставьте ⌘V"
+        insertionToken = UUID()
         store.touch(id: entry.id)
         return true
     }
@@ -85,14 +87,19 @@ final class ClipboardCommands: ObservableObject {
         let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let targetPid = frontPid == ProcessInfo.processInfo.processIdentifier
             ? nil : frontPid
+        let targetElement = TextInsertion.focusedElement().flatMap {
+            TextInsertion.processID(of: $0) == targetPid ? $0 : nil
+        }
+        let token = insertionToken
+        let changeCount = NSPasteboard.general.changeCount
         NSApp.hide(nil)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) { [weak self] in
-            guard let self else { return }
-            let currentPid = TextInsertion.focusedElement()
-                .flatMap(TextInsertion.processID(of:))
-                ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
-            guard targetPid == nil || currentPid == targetPid else {
+            guard let self, self.insertionToken == token,
+                  self.store?.screenLocked == false,
+                  NSPasteboard.general.changeCount == changeCount else { return }
+            guard TextInsertion.focusSafeForPaste(targetPid: targetPid,
+                                                  verifying: targetElement) else {
                 self.status = "Фокус сменился — текст в буфере (⌘V)"
                 return
             }
@@ -100,7 +107,7 @@ final class ClipboardCommands: ObservableObject {
                   TextInsertion.isTextLike(element) else {
                 // AX не видит поле (Electron, webview) — запись уже в
                 // буфере, добиваем синтетическим ⌘V, как вставка фраз.
-                self.status = TextInsertion.postPasteCommand()
+                self.status = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: targetElement)
                     ? "Вставлено в активное приложение"
                     : "Поле не найдено — текст в буфере (⌘V)"
                 return
@@ -111,7 +118,7 @@ final class ClipboardCommands: ObservableObject {
             }
             let caretBefore = TextInsertion.caretPosition(of: element)
             guard TextInsertion.insert(entry.text, into: element) == .success else {
-                self.status = TextInsertion.postPasteCommand()
+                self.status = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: element)
                     ? "Вставлено в активное приложение"
                     : "Прямая вставка не поддержана — ⌘V"
                 return
@@ -124,9 +131,11 @@ final class ClipboardCommands: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) {
                 // За вторые 180 мс фокус тоже мог уехать: ⌘V летит в ТЕКУЩЕЕ
                 // поле, сверяем приложение и secure заново (как диктовка).
-                if TextInsertion.caretPosition(of: element) == caretBefore,
-                   TextInsertion.focusSafeForPaste(targetPid: targetPid) {
-                    _ = TextInsertion.postPasteCommand()
+                if self.insertionToken == token, self.store?.screenLocked == false,
+                   NSPasteboard.general.changeCount == changeCount,
+                   TextInsertion.caretPosition(of: element) == caretBefore,
+                   TextInsertion.focusSafeForPaste(targetPid: targetPid, verifying: element) {
+                    _ = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: element)
                 }
             }
         }
@@ -153,7 +162,7 @@ final class ClipboardCommands: ObservableObject {
     }
 
     func clearAll() {
-        // Хранилище открывается асинхронно (ключ из связки): пока его нет,
+        // Хранилище открывается асинхронно (локальный ключ): пока его нет,
         // молчаливый no-op с рапортом об успехе — ложь пользователю.
         guard let store else {
             status = "История ещё загружается — попробуйте через секунду"
@@ -171,6 +180,7 @@ final class ClipboardCommands: ObservableObject {
     /// её даже в окне «Отменить». Токен сбрасывается, чтобы просроченный
     /// таймер ничего не финализировал после разблокировки.
     func wipeOnLock() {
+        insertionToken = UUID()
         pendingUndo = []
         undoToken = UUID()
         status = ""

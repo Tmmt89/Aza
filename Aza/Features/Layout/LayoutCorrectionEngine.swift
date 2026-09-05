@@ -37,7 +37,7 @@ enum LayoutCorrectionEngine {
 
     /// Trailing characters that are more likely real punctuation than the
     /// letters б/ю, so a word ending in them is retried without them.
-    private static let trailingPunctuation: Set<Character> = [",", "."]
+    private static let trailingPunctuation: Set<Character> = [",", ".", "!", "?"]
 
     /// True once the system has the layouts needed to correct anything.
     @MainActor
@@ -127,7 +127,10 @@ enum LayoutCorrectionEngine {
     /// The correction for a finished word, if any, and the input-source language
     /// to switch to afterwards (nil — keep the current layout).
     @MainActor
-    static func correction(for word: String) -> (text: String, inputLanguage: String?)? {
+    static func correction(for word: String,
+                           isNeverCorrect: ((String) -> Bool)? = nil) -> (text: String, inputLanguage: String?)? {
+        let excluded = isNeverCorrect ?? UserWordLists.shared.isNeverCorrect
+        guard !excluded(word) else { return nil }
         if let direct = directCorrection(for: word) { return direct }
 
         // "ghbdtn," is привет followed by a comma, not a word ending in б.
@@ -137,7 +140,8 @@ enum LayoutCorrectionEngine {
             suffix.insert(last, at: suffix.startIndex)
             core.removeLast()
         }
-        guard !suffix.isEmpty, let correction = directCorrection(for: core) else { return nil }
+        guard !suffix.isEmpty, !excluded(core),
+              let correction = directCorrection(for: core) else { return nil }
         return (correction.text + suffix, correction.inputLanguage)
     }
 
@@ -207,8 +211,11 @@ enum LayoutCorrectionEngine {
 
     @MainActor
     private static func directCorrection(for word: String) -> (text: String, inputLanguage: String?)? {
-        // Главный тумблер: коррекция раскладки выключена целиком.
-        guard ChechenAutocorrect.isLayoutCorrectionEnabled else { return nil }
+        // Опечатки работают отдельно; выключенная раскладка не меняет язык
+        // ввода и не запускает нормализацию палочки или ремап.
+        guard ChechenAutocorrect.isLayoutCorrectionEnabled else {
+            return typoCorrection(for: word).map { ($0, nil) }
+        }
         // Пользователь отменял исправление этого слова — не трогаем ни одной
         // стадией (раньше проверялось только в палочке и опечатках, и слово
         // после отмены снова исправлялось ремапом).
@@ -317,7 +324,8 @@ enum LayoutCorrectionEngine {
         // 312 до удвоения корпуса). При следующем росте корпуса —
         // пересчитать тем же анализом (scratchpad/fp_vetting.py).
         let bar = word.count <= 2 ? 50 : 20
-        guard word.count >= 2,
+        guard ChechenAutocorrect.isLayoutCorrectionEnabled,
+              word.count >= 2,
               !UserWordLists.shared.isNeverCorrect(word),
               word.dropFirst().allSatisfy({ !$0.isUppercase }),
               !(isValidEnglish?(word) ?? isValidEnglishTyped(word)),
@@ -366,7 +374,8 @@ enum LayoutCorrectionEngine {
 
     @MainActor
     static func russianContextRemap(for word: String) -> String? {
-        guard !UserWordLists.shared.isNeverCorrect(word),
+        guard ChechenAutocorrect.isLayoutCorrectionEnabled,
+              !UserWordLists.shared.isNeverCorrect(word),
               word.dropFirst().allSatisfy({ !$0.isUppercase }),
               let table = KeyboardLayoutMap.table(from: "en", to: "ru"),
               let mapped = remapped(word, table: table) else { return nil }

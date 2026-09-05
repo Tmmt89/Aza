@@ -23,7 +23,7 @@ enum PrivacyCleanup {
     struct Item: Identifiable {
         let id: String
         let title: String
-        /// Байты на диске; nil — величина неизвестна (настройки, Keychain).
+        /// Байты на диске; nil — величина неизвестна (настройки).
         let bytes: Int64?
     }
 
@@ -55,6 +55,8 @@ enum PrivacyCleanup {
             var items: [Item] = [
                 Item(id: "history", title: "История буфера (зашифрована)",
                      bytes: size(of: "clipboard-history.bin")),
+                Item(id: "history-key", title: "Локальный ключ истории",
+                     bytes: size(of: ClipboardStore.localKeyFileName)),
                 Item(id: "blobs", title: "Изображения истории (зашифрованы)",
                      bytes: size(of: "clipboard-history.blobs")),
                 Item(id: "models", title: "Модели распознавания речи",
@@ -62,6 +64,10 @@ enum PrivacyCleanup {
                 Item(id: "words", title: "Слова-исключения",
                      bytes: size(of: "user-words.json")),
             ]
+            if let omni = size(of: "OmniASR") {
+                items.append(Item(id: "omni-asr", title: "Чеченская модель и компоненты распознавания",
+                                  bytes: omni))
+            }
             if let phrases = size(of: "phrases.json") {
                 items.append(Item(id: "phrases",
                                   title: "Изменённые фразы быстрой вставки",
@@ -93,6 +99,9 @@ enum PrivacyCleanup {
                                   title: "Копия нечитаемой истории (зашифрована)",
                                   bytes: backup))
             }
+            if let legacy = size(of: "debug-history.key") {
+                items.append(Item(id: "legacy-key", title: "Ключ прежней сборки", bytes: legacy))
+            }
             // Обломок ключа появляется редко, но опись обязана показывать
             // то, что реально лежит на диске.
             let spoiledNames = ((try? FileManager.default
@@ -119,19 +128,15 @@ enum PrivacyCleanup {
     /// Что покидает компьютер (§12). Формулировка точная: модель может
     /// скачаться и при запуске — прогрев идёт сам, если микрофон разрешён.
     static let outboundTraffic = """
-        Наружу уходит только загрузка модели распознавания с Hugging Face. \
-        Она начинается автоматически при запуске, если доступ к микрофону \
-        уже выдан, либо при первой диктовке. Буфер, аудио, транскрипты, \
+        Whisper скачивается с Hugging Face по кнопке или при первой диктовке. \
+        Чеченская модель и её компоненты скачиваются с серверов Meta, GitHub и PyPI \
+        только по кнопке «Скачать». Буфер, аудио, транскрипты, \
         набранные слова и координаты не отправляются никуда.
         """
 
-    /// Всё, что оставляет после себя работа с ключом истории: сам ключ,
-    /// отложенный повреждённый ключ и отпечаток истории, по которому
-    /// решается, спрашивать ли связку. Два последних завела логика
-    /// спасения ключа, и «удалить всё» обязано убирать и их.
-    /// Имена начинаются с этих префиксов; точный список невозможен, потому
-    /// что отложенные повреждённые ключи нумеруются.
+    /// Рабочий ключ и артефакты прежних сборок, включая карантин ключей.
     static let keyArtifactPrefixes = [
+        ClipboardStore.localKeyFileName,
         "debug-history.key",
         "debug-history.rescue-failed",
     ]
@@ -150,7 +155,7 @@ enum PrivacyCleanup {
                 return failure
             }
             if let failure = removeMatching(prefixes: keyArtifactPrefixes) { return failure }
-            return deleteKeychainKey()
+            return nil
         }
     }
 
@@ -170,8 +175,10 @@ enum PrivacyCleanup {
     /// обязан сперва выгрузить модель из памяти (DictationController),
     /// иначе в ней останется ссылка на исчезнувшие файлы.
     static func deleteModels() -> String? {
-        remove("huggingface")
+        removeAll(["huggingface", "OmniASR"])
     }
+
+    static func deleteOmniModel() -> String? { remove("OmniASR") }
 
     /// Одна модель по варианту WhisperKit — остальные остаются на диске.
     /// Общий токенизатор не трогаем: он мал и нужен другим моделям.
@@ -185,14 +192,13 @@ enum PrivacyCleanup {
             if let failure = removeAll([
                 "clipboard-history.bin", "clipboard-history.blobs",
                 "clipboard-history.unreadable.bin", "user-words.json",
-                "phrases.json", "huggingface", "prayer-schedules",
+                "phrases.json", "huggingface", "OmniASR", "prayer-schedules",
             ]) {
                 return failure
             }
             // Карантин фраз нумеруется — убираем по префиксу, как ключи.
             if let failure = removeMatching(prefixes: keyArtifactPrefixes
                 + ["phrases.unreadable"]) { return failure }
-            if let failure = deleteKeychainKey() { return failure }
             let center = UNUserNotificationCenter.current()
             center.removeAllPendingNotificationRequests()
             // Уже показанные уведомления — тоже данные Aza (город, времена):
@@ -244,21 +250,6 @@ enum PrivacyCleanup {
         for name in names.sorted()
         where prefixes.contains(where: { name.hasPrefix($0) }) {
             if let failure = remove(name) { return failure }
-        }
-        return nil
-    }
-
-    /// Отсутствие элемента — не ошибка; всё остальное сообщаем, иначе
-    /// приложение вышло бы, оставив ключ от удалённой истории.
-    private static func deleteKeychainKey() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.tmmt.Aza.clipboard",
-            kSecAttrAccount as String: "history-key",
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            return "ключ в связке ключей (\(status))"
         }
         return nil
     }

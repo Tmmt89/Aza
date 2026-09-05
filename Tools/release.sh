@@ -16,6 +16,11 @@
 # Запуск:
 #   Tools/release.sh                      — собрать и подписать
 #   Tools/release.sh --notarize           — плюс отправить на нотаризацию
+#   Tools/release.sh --local              — без Apple Developer Program:
+#       подпись самоподписанным сертификатом «Aza Development».
+#       Работает на этом Mac; на чужом Mac получатель один раз делает
+#       System Settings → Privacy & Security → Open Anyway (или
+#       xattr -d com.apple.quarantine /Applications/Aza.app).
 #
 # Переменные окружения (можно задать вместо автоопределения):
 #   AZA_SIGN_IDENTITY   строка сертификата, например
@@ -33,12 +38,19 @@ BUILD="$ROOT/build_release"
 APP="$BUILD/Build/Products/Release/Aza.app"
 DMG_DIR="$ROOT/dist"
 NOTARIZE=0
-[ "${1:-}" = "--notarize" ] && NOTARIZE=1
+LOCAL=0
+case "${1:-}" in
+    --notarize) NOTARIZE=1 ;;
+    --local)    LOCAL=1 ;;
+esac
 
 cd "$ROOT"
 
 echo "== 1. Сертификат"
 IDENTITY="${AZA_SIGN_IDENTITY:-}"
+if [ "$LOCAL" -eq 1 ] && [ -z "$IDENTITY" ]; then
+    IDENTITY="Aza Development"
+fi
 if [ -z "$IDENTITY" ]; then
     IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
         | grep "Developer ID Application" | head -1 \
@@ -64,8 +76,10 @@ fi
 echo "   $IDENTITY"
 
 TEAM="${AZA_TEAM_ID:-$(echo "$IDENTITY" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')}"
-[ -n "$TEAM" ] || { echo "ОШИБКА: не определил team id, задайте AZA_TEAM_ID"; exit 2; }
-echo "   команда: $TEAM"
+if [ "$LOCAL" -eq 0 ]; then
+    [ -n "$TEAM" ] || { echo "ОШИБКА: не определил team id, задайте AZA_TEAM_ID"; exit 2; }
+    echo "   команда: $TEAM"
+fi
 
 echo "== 2. Сборка"
 rm -rf "$BUILD"
@@ -73,8 +87,9 @@ xcodebuild -project Aza.xcodeproj -scheme Aza -configuration Release \
     -destination 'platform=macOS' -derivedDataPath "$BUILD" \
     CODE_SIGN_STYLE=Manual \
     CODE_SIGN_IDENTITY="$IDENTITY" \
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
     DEVELOPMENT_TEAM="$TEAM" \
-    OTHER_CODE_SIGN_FLAGS="--timestamp" \
+    OTHER_CODE_SIGN_FLAGS="$([ "$LOCAL" -eq 1 ] && echo "--timestamp=none" || echo "--timestamp")" \
     build > "$BUILD.log" 2>&1 || { tail -30 "$BUILD.log"; exit 1; }
 [ -d "$APP" ] || { echo "ОШИБКА: приложение не собралось"; exit 1; }
 
@@ -92,39 +107,70 @@ if codesign -d --entitlements - "$APP" 2>&1 | grep -q "get-task-allow"; then
 fi
 # Подпись обязана быть именно Developer ID: AZA_SIGN_IDENTITY мог подсунуть
 # self-signed или Apple Development — структурно валидную, но нераздаваемую.
-if ! codesign -dv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
-    echo "ОШИБКА: цепочка подписи не Developer ID Application — на чужом Mac"
-    echo "        сборка не запустится"
+# В режиме --local self-signed выбран осознанно, проверка не нужна.
+if [ "$LOCAL" -eq 0 ]; then
+    if ! codesign -dv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
+        echo "ОШИБКА: цепочка подписи не Developer ID Application — на чужом Mac"
+        echo "        сборка не запустится"
+        exit 1
+    fi
+    # Gatekeeper-проверка тем же способом, каким её сделает чужой Mac.
+    if ! spctl -a -t exec -vv "$APP" 2>&1 | grep -q "accepted"; then
+        echo "ПРЕДУПРЕЖДЕНИЕ: spctl не принял сборку (до нотаризации это норма" \
+             "для Developer ID); после --notarize проверка обязана пройти"
+    fi
+fi
+# Отладочные обработчики и логи не должны попадать в Release.
+# Проверяем фактические флаги компиляции модуля Aza в логе сборки.
+if grep -- "-module-name Aza " "$BUILD.log" | grep -- "-D DEBUG" > /dev/null; then
+    echo "ОШИБКА: модуль Aza компилировался с условием DEBUG — в релизе"
+    echo "        включились бы отладочные обработчики и логи"
     exit 1
 fi
-# Gatekeeper-проверка тем же способом, каким её сделает чужой Mac.
-if ! spctl -a -t exec -vv "$APP" 2>&1 | grep -q "accepted"; then
-    echo "ПРЕДУПРЕЖДЕНИЕ: spctl не принял сборку (до нотаризации это норма" \
-         "для Developer ID); после --notarize проверка обязана пройти"
-fi
-# Релиз не имеет права нести отладочный файловый ключ истории: сборка
-# Release с SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG протащила бы его
-# незаметно (ключ лежал бы плейнтекстом рядом с зашифрованной историей).
-# Без -q: grep -q выходит на первом совпадении, strings получает SIGPIPE,
-# и под set -o pipefail статус 141 превращал НАЙДЕННЫЙ ключ в «не найдено».
-if strings "$APP/Contents/MacOS/Aza" | grep "debug-history.key" > /dev/null; then
-    echo "ОШИБКА: в релизном бинарнике активен отладочный файловый ключ"
-    echo "        истории (debug-history.key) — сборка шла с условием DEBUG"
-    exit 1
-fi
+
+# Проверяем итоговую подпись и Info.plist, а не только настройки проекта:
+# отсутствующее право может дать отказ или завершение TCC без диалога.
+python3 - "$ROOT/Tools" "$APP" <<'PYTHON'
+import sys
+sys.path.insert(0, sys.argv[1])
+from test_tools import check_app_permissions
+check_app_permissions(sys.argv[2])
+PYTHON
 
 echo "== 4. DMG"
 mkdir -p "$DMG_DIR"
 VERSION=$(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "0")
 DMG="$DMG_DIR/Aza-$VERSION.dmg"
-rm -f "$DMG"
-STAGE=$(mktemp -d)
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "Aza" -srcfolder "$STAGE" -ov -format UDZO "$DMG" > /dev/null
-rm -rf "$STAGE"
-codesign --sign "$IDENTITY" --timestamp "$DMG"
+# dmgbuild пишет настройки Finder в образ без управления открытыми окнами.
+# Зависимость нужна только для упаковки, в Aza.app она не попадает.
+DMG_PYTHON="$ROOT/.build/dmg-tools/bin/python"
+if [ ! -x "$DMG_PYTHON" ]; then
+    python3 -m venv "$ROOT/.build/dmg-tools"
+fi
+"$DMG_PYTHON" -m pip install --disable-pip-version-check 'dmgbuild==1.6.5'
+swift "$ROOT/Tools/dmg-background.swift" "$BUILD/dmg-background.tiff"
+"$DMG_PYTHON" "$ROOT/Tools/build-dmg.py" \
+    "$APP" "$BUILD/dmg-background.tiff" "$BUILD/Aza.dmg"
+if [ "$LOCAL" -eq 1 ]; then
+    codesign --sign "$IDENTITY" --timestamp=none "$BUILD/Aza.dmg"
+else
+    codesign --sign "$IDENTITY" --timestamp "$BUILD/Aza.dmg"
+fi
+mv -f "$BUILD/Aza.dmg" "$DMG"
 echo "   $DMG"
+
+if [ "$LOCAL" -eq 1 ]; then
+    cat <<DONE
+
+ГОТОВО (self-signed, без Apple Developer Program): $DMG
+На этом Mac запускается как есть. Получателю на чужом Mac — один раз:
+  1. Открыть DMG. При блокировке: Системные настройки →
+     Конфиденциальность и безопасность → «Всё равно открыть».
+  2. Перетащить Aza в Applications и запустить.
+  3. Если заблокирована сама Aza — повторить «Всё равно открыть» для неё.
+DONE
+    exit 0
+fi
 
 if [ "$NOTARIZE" -eq 0 ]; then
     echo

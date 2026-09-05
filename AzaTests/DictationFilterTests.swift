@@ -2,6 +2,28 @@ import XCTest
 
 @MainActor
 final class DictationFilterTests: XCTestCase {
+    func testLockAndDeletionRejectStaleDictationResults() {
+        var session = DictationSession()
+        let captured = session.generation
+        XCTAssertTrue(session.accepts(captured))
+
+        session.isLocked = true
+        session.invalidate()
+        XCTAssertFalse(session.canStart)
+        XCTAssertFalse(session.accepts(captured))
+        session.isLocked = false
+        XCTAssertTrue(session.canStart)
+        XCTAssertFalse(session.accepts(captured), "разблокировка не оживляет отменённый результат")
+
+        let beforeDeletion = session.generation
+        session.isDeletingModels = true
+        session.invalidate()
+        XCTAssertFalse(session.canStart, "новая запись запрещена на всём async-удалении")
+        session.isDeletingModels = false
+        XCTAssertFalse(session.accepts(beforeDeletion))
+        XCTAssertTrue(session.accepts(session.generation))
+    }
+
     func testSilenceGate() {
         // Чистая тишина и шум ниже порога — не речь.
         XCTAssertFalse(DictationFilters.hasSpeech([Float](repeating: 0, count: 16000)))

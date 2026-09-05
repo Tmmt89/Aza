@@ -141,6 +141,13 @@ struct PrayerOccurrence {
         let seconds = max(0, Int(date.timeIntervalSince(now)))
         return String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
     }
+
+    /// Первые две минуты намаза. Восход — граница времени, не молитва.
+    static func current(in occurrences: [PrayerOccurrence], at now: Date) -> PrayerOccurrence? {
+        occurrences.last {
+            $0.kind != .sunrise && (0..<120).contains(now.timeIntervalSince($0.date))
+        }
+    }
 }
 
 struct PrayerCatalog: Decodable {
@@ -193,6 +200,8 @@ struct PrayerCatalog: Decodable {
             // случайная строка за пределами заявленного покрытия иначе
             // показывалась бы как выверенная таблица вместо отказа.
             matches = matches.filter { $0.covers(date) }
+            let userMatches = matches.filter(\.userProvided)
+            if !userMatches.isEmpty { matches = userMatches }
         }
         return matches.count == 1 ? matches[0] : nil
     }
@@ -211,8 +220,10 @@ struct PrayerCatalog: Decodable {
     /// файлов идентификаторы перестали быть уникальными, и повторный поиск
     /// по id вернул бы день из другого снимка под подписью выбранного.
     func prayers(_ city: CityPrayerSchedule, on date: Date) -> [PrayerOccurrence] {
-        guard let calendar = calendar(for: city),
-              let day = city.days.first(where: { $0.date == dateKey(date, calendar: calendar) }),
+        guard let calendar = calendar(for: city) else { return [] }
+        let key = dateKey(date, calendar: calendar)
+        let days = city.days.filter { $0.date == key }
+        guard days.count == 1, let day = days.first,
               // Ровно шесть значений: zip молча отбросил бы лишние, и строка
               // с седьмым значением сошла бы за выверенную таблицу.
               day.times.count == PrayerKind.allCases.count else {

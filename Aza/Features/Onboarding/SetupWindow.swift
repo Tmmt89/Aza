@@ -6,16 +6,11 @@ import ServiceManagement
 import SwiftUI
 import UserNotifications
 
-/// Окно первичной настройки (§9) и постоянная страница состояния прав.
-///
-/// Одна прокручиваемая страница, а не мастер из семи шагов: половина
-/// разрешений уводит в системные настройки, и возвращаться в пошаговый
-/// мастер неудобно; открытая заново, эта же страница честно показывает,
-/// что уже выдано.
+/// Знакомство при первом запуске и постоянное окно настроек.
 @MainActor
 final class SetupWindowController: NSObject, NSWindowDelegate {
 
-    static let completedKey = "OnboardingCompleted"
+    static let completedKey = OnboardingProgress.completedKey
 
     private var window: NSWindow?
     private let model: SetupModel
@@ -46,6 +41,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard !isSlidingOut else { return false }
         isSlidingOut = true
+        sender.resignKey()
         sender.slideOut { [weak self] in
             self?.isSlidingOut = false
             sender.close()
@@ -56,11 +52,13 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// Показывается сама только при первом запуске; дальше — по команде
     /// из меню.
     func showIfFirstRun() {
-        guard !UserDefaults.standard.bool(forKey: Self.completedKey) else { return }
-        show()
+        model.onboarding.restore()
+        guard !model.onboarding.completed else { return }
+        show(onboarding: true)
     }
 
-    func show() {
+    func show(onboarding: Bool = false) {
+        model.showsOnboarding = onboarding
         azaDebugLog("Aza: SetupWindow.show, existing=\(window == nil ? 0 : 1)")
         // Профиль по умолчанию считаем ДО показа: переключатель должен
         // сразу стоять на скачанной или рекомендованной модели.
@@ -85,25 +83,21 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             azaDebugLog("Aza: SetupWindow shown frame=\(window.frame)")
             return
         }
-        // Размер окна подгоняется под содержимое: настройки должны
-        // помещаться целиком, без прокрутки.
         let content = NSHostingView(rootView: SetupView(model: model))
-        // Содержимое подгоняем под экран: на маленьком дисплее окно
-        // иначе вылезло бы за границы, а скролла в нём нет.
         let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.size
             ?? CGSize(width: 1280, height: 800)
-        let fitting = content.fittingSize
-        let size = CGSize(width: min(fitting.width, visible.width - 40),
-                          height: min(fitting.height, visible.height - 40))
+        let size = CGSize(width: min(820, visible.width - 40),
+                          height: min(680, visible.height - 60))
         // AzaSlidingWindow: обычный NSWindow прижимался бы constrain'ом
         // к экрану и не смог бы улететь за верхнюю кромку при закрытии.
         let window = AzaSlidingWindow(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Настройка Aza"
+        window.title = "Настройки Aza"
+        window.contentMinSize = CGSize(width: 700, height: 560)
         window.isReleasedWhenClosed = false
         // Тёмная сцена без системной полосы: окно — часть продукта,
         // а не стандартный диалог настроек.
@@ -133,9 +127,8 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     /// роняет и активирующий клик — память aza-island-clicks), и окно
     /// рисуется блёкло: серые контролы, ни рамки фокуса, ни каретки.
     /// becomeKey() принудительно включает key-вид с самого показа.
-    /// becomeKey зовётся безусловно: AzaSlidingWindow всегда отвечает
-    /// isKeyWindow=true, и с проверкой жизненный цикл key-окна (нотификации,
-    /// первый responder) не запускался бы вовсе.
+    /// isKeyWindow остаётся системным: скрытое окно не должно объявлять
+    /// себя получателем клавиш после закрытия настроек.
     private func forceKeyAppearance(_ window: NSWindow) {
         window.becomeKey()
     }
@@ -157,19 +150,24 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
 /// этом можно только переспросив систему.
 @MainActor
 final class SetupModel: ObservableObject {
+    @Published var showsOnboarding = false
+    let onboarding = OnboardingProgress()
     @Published private(set) var axTrusted = AXIsProcessTrusted()
     @Published private(set) var inputMonitoring = CGPreflightListenEventAccess()
     @Published private(set) var microphone = AVCaptureDevice.authorizationStatus(for: .audio)
     @Published private(set) var notifications: UNAuthorizationStatus = .notDetermined
     @Published private(set) var loginItem: SMAppService.Status = .notRegistered
     @Published private(set) var loginItemError: String?
+    @Published var clipboardHotKeyError: String?
+    @Published var phrasesHotKeyError: String?
 
     let prayer: PrayerStore
     let dictation: DictationController
     /// Перерегистрация сочетаний буфера и фраз: хоткеями владеет
     /// IslandStore, замыкания подставляются в AzaApp.
-    var rebindClipboardHotKey: () -> Void = {}
-    var rebindPhrasesHotKey: () -> Void = {}
+    var rebindClipboardHotKey: () -> OSStatus? = { OSStatus(unimpErr) }
+    var refreshInputAccess: () -> Void = {}
+    var rebindPhrasesHotKey: () -> OSStatus? = { OSStatus(unimpErr) }
     /// «Очистить историю» (§8.7): избранное сохраняется. Историей владеет
     /// IslandStore — замыкание подставляется в AzaApp, как ребинды выше.
     var clearClipboardHistory: () -> Void = {}
@@ -185,7 +183,8 @@ final class SetupModel: ObservableObject {
         // SwiftUI не видит вложенные ObservableObject: без форварда прогресс
         // загрузки модели замерзал, а busy-флаг в DataSheet устаревал и
         // разрешал удалить модели под живой диктовкой.
-        for publisher in [dictation.objectWillChange, prayer.objectWillChange] {
+        for publisher in [dictation.objectWillChange, prayer.objectWillChange,
+                          onboarding.objectWillChange] {
             publisher
                 .sink { [weak self] _ in self?.objectWillChange.send() }
                 .store(in: &cancellables)
@@ -194,6 +193,7 @@ final class SetupModel: ObservableObject {
     }
 
     func refresh() {
+        refreshInputAccess()
         axTrusted = AXIsProcessTrusted()
         inputMonitoring = CGPreflightListenEventAccess()
         microphone = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -223,8 +223,9 @@ final class SetupModel: ObservableObject {
     }
 
     func requestMicrophone() {
-        AVCaptureDevice.requestAccess(for: .audio) { _ in
-            Task { @MainActor [weak self] in self?.refresh() }
+        Task {
+            await dictation.requestMicrophoneAccess()
+            refresh()
         }
     }
 

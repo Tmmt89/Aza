@@ -1,5 +1,6 @@
 import Adhan
 import AVFoundation
+import UserNotifications
 import XCTest
 
 @MainActor
@@ -8,6 +9,63 @@ final class PrayerTests: XCTestCase {
         id: "grozny", name: "Грозный", latitude: 43.3169, longitude: 45.6981,
         timeZoneID: "Europe/Moscow", madhab: .shafi, method: .muslimWorldLeague
     )
+
+    func testMenuBarFormatsUseScheduleTimeAndRoundCountdownUp() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let next = PrayerOccurrence(kind: .dhuhr, time: "12:30", date: now.addingTimeInterval(3661))
+        XCTAssertNil(MenuBarDisplay.logo.text(for: next, now: now))
+        XCTAssertEqual(MenuBarDisplay.prayer.text(for: next, now: now), "Зухр 12:30")
+        XCTAssertEqual(MenuBarDisplay.time.text(for: next, now: now), "12:30")
+        XCTAssertEqual(MenuBarDisplay.countdown.text(for: next, now: now), "Зухр · 1 ч 2 мин")
+        XCTAssertEqual(MenuBarDisplay.countdown.text(for: next, now: next.date.addingTimeInterval(-60)),
+                       "Зухр · 1 мин")
+        XCTAssertEqual(MenuBarDisplay.countdown.text(for: next, now: next.date.addingTimeInterval(-0.1)),
+                       "Зухр · 1 мин")
+        for mode in MenuBarDisplay.allCases {
+            XCTAssertNil(mode.text(for: nil, now: now), "Без расписания остаётся знак Aza")
+            XCTAssertEqual(MenuBarDisplay(rawValue: mode.rawValue), mode)
+        }
+        for kind in PrayerKind.allCases {
+            let occurrence = PrayerOccurrence(kind: kind, time: "04:07", date: now.addingTimeInterval(86400))
+            XCTAssertEqual(MenuBarDisplay.prayer.text(for: occurrence, now: now), "\(kind.title) 04:07")
+        }
+    }
+
+    func testPrayerArrivalLastsTwoMinutesAndDoesNotCelebrateSunrise() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let fajr = PrayerOccurrence(kind: .fajr, time: "04:07", date: start)
+        let sunrise = PrayerOccurrence(kind: .sunrise, time: "05:30",
+                                       date: start.addingTimeInterval(4_980))
+        let schedule = [fajr, sunrise]
+        XCTAssertNil(PrayerOccurrence.current(in: schedule, at: start.addingTimeInterval(-1)))
+        XCTAssertEqual(PrayerOccurrence.current(in: schedule, at: start)?.kind, .fajr)
+        XCTAssertEqual(PrayerOccurrence.current(in: schedule, at: start.addingTimeInterval(119.9))?.kind, .fajr)
+        XCTAssertNil(PrayerOccurrence.current(in: schedule, at: start.addingTimeInterval(120)))
+        XCTAssertNil(PrayerOccurrence.current(in: schedule, at: sunrise.date))
+        XCTAssertNil(PrayerOccurrence.current(in: [], at: start))
+    }
+
+    func testDictationPauseWaitsForAddThenCancelsAndConfirmsEmpty() async {
+        var calls: [String] = []
+        let pendingAdd = Task { @MainActor in
+            await Task.yield()
+            calls.append("add finished")
+        }
+        let ready = await PrayerNotifications.pause(
+            after: pendingAdd,
+            cancel: { calls.append("cancel") },
+            pendingEmpty: { calls.append("confirmed empty"); return true })
+        XCTAssertTrue(ready)
+        XCTAssertEqual(calls, ["add finished", "cancel", "confirmed empty"],
+                       "микрофон ждёт завершения add и подтверждённого снятия очереди")
+
+        let uncleared = await PrayerNotifications.pause(
+            after: nil, cancel: {}, pendingEmpty: { false })
+        XCTAssertFalse(uncleared, "оставшиеся уведомления запрещают запуск микрофона")
+        let now = Date()
+        XCTAssertNil(PrayerNotifications.fireDate(kind: .fajr, at: now, now: now),
+                     "после паузы прошедший намаз не ставится заново")
+    }
 
     func testCalculatedGroznyTimesOnFixedDate() throws {
         let date = try XCTUnwrap(grozny.calendar.date(
@@ -57,6 +115,21 @@ final class PrayerTests: XCTestCase {
             cities: [malformedCity], sourceLabel: "ДУМ ЧР"
         )
         XCTAssertNil(ScheduleTablePrayerProvider(catalog: malformed).times(on: date, city: grozny))
+
+        for days in [
+            [PrayerDay(date: day.date, times: ["04:00", "04:00", "12:10", "16:00", "18:50", "20:30"])],
+            [day, PrayerDay(date: day.date, times: ["04:10", "05:30", "12:10", "16:00", "18:50", "20:30"])],
+        ] {
+            let invalid = CityPrayerSchedule(
+                id: grozny.id, name: grozny.name, timeZone: grozny.timeZoneID,
+                coverageStatus: "partial", coverageStart: day.date, coverageEnd: day.date,
+                releaseStatus: "test", source: source, days: days)
+            let catalog = PrayerCatalog(
+                schemaVersion: 1, year: 2026, cityCount: 1,
+                completeCityCount: 0, partialCityCount: 1, cities: [invalid], sourceLabel: nil)
+            XCTAssertNil(ScheduleTablePrayerProvider(catalog: catalog).times(on: date, city: grozny),
+                         "одновременные намазы и неоднозначные строки не являются выверенным расписанием")
+        }
     }
 
     /// Регрессия 02.09: кэш `today` пережил полночь (Mac спал), все его
@@ -217,6 +290,44 @@ final class PrayerTests: XCTestCase {
         XCTAssertNil(catalog.city(named: grozny.name))
     }
 
+    func testUserCatalogOverridesOnlyDatesItCovers() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func writeCatalog(_ name: String, year: Int, fajr: String) throws -> URL {
+            let url = directory.appendingPathComponent(name)
+            let city: [String: Any] = [
+                "id": "grozny", "name": "Грозный", "timeZone": "Europe/Moscow",
+                "coverageStatus": "complete", "coverageStart": "\(year)-01-01",
+                "coverageEnd": "\(year)-12-31", "releaseStatus": "test",
+                "source": ["name": name, "url": "https://example.org/calendar", "sha256": "fixture"],
+                "days": [["date": "\(year)-08-27",
+                          "times": [fajr, "05:30", "12:30", "16:00", "18:30", "20:00"]]],
+            ]
+            try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1, "year": year, "cityCount": 1,
+                "completeCityCount": 1, "partialCityCount": 0, "cities": [city],
+            ]).write(to: url)
+            return url
+        }
+        let bundled = try writeCatalog("bundled.json", year: 2026, fajr: "04:00")
+        let nextYear = try writeCatalog("next-year.json", year: 2027, fajr: "04:10")
+        let override = try writeCatalog("override.json", year: 2026, fajr: "04:20")
+        let today = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 27)))
+        let future = try XCTUnwrap(grozny.calendar.date(
+            from: DateComponents(year: 2027, month: 8, day: 27)))
+
+        let table = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(
+            bundledURLs: [bundled], userURLs: [nextYear]))
+        XCTAssertEqual(table.times(on: today, city: grozny)?.source.label, "bundled.json")
+        XCTAssertEqual(table.times(on: future, city: grozny)?.source.label, "next-year.json")
+
+        let overridden = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(
+            bundledURLs: [bundled], userURLs: [nextYear, override]))
+        XCTAssertEqual(overridden.times(on: today, city: grozny)?.fajr.map(grozny.formattedTime), "04:20")
+        XCTAssertEqual(overridden.times(on: future, city: grozny)?.source.label, "next-year.json")
+    }
+
     /// Годовые файлы переиспользуют одни и те же идентификаторы: провайдер
     /// обязан взять день ИЗ ВЫБРАННОГО снимка, а не из первого с таким id.
     func testCollidingIdentifiersDoNotLeakDaysAcrossSnapshots() throws {
@@ -314,9 +425,7 @@ final class PrayerTests: XCTestCase {
                        PrayerCatalog.normalized("ростов на дону"))
     }
 
-    /// Азан звучит ЧЕРЕЗ систему уведомлений — только так соблюдаются
-    /// Focus и «Не беспокоить». Файл обязан быть в бандле, иначе система
-    /// молча подставит стандартный звук.
+    /// Все записи поставляются целиком, без дублирующего системного звука.
     func testAdhanSoundIsBundledAndSelectable() {
         let bundle = Bundle(for: PrayerNotifications.self)
         // Каждый звук обязан лежать в бандле: иначе система молча
@@ -341,9 +450,26 @@ final class PrayerTests: XCTestCase {
         XCTAssertEqual(PrayerNotifications.sound, .system, "по умолчанию — системный звук")
         PrayerNotifications.setSound(.adhan2)
         XCTAssertEqual(PrayerNotifications.sound, .adhan2)
+        let notificationDate = Date()
+        let content = PrayerNotifications.content(
+            kind: .fajr, at: notificationDate, city: grozny,
+            source: PrayerTimesSource(label: "ДУМ ЧР", isVerifiedTable: true),
+            mode: .notification)
+        XCTAssertNil(content.sound, "плеер азана не должен дублироваться системным сигналом")
+        XCTAssertEqual(content.subtitle, "Грозный")
+        XCTAssertEqual(content.body, grozny.formattedTime(notificationDate))
 
-        // Азаны обязаны укладываться в системный предел уведомления,
-        // иначе запись оборвётся на полуслове.
+        PrayerNotifications.setSound(.system)
+        let reminder = PrayerNotifications.content(
+            kind: .fajr, at: Date(), city: grozny,
+            source: PrayerTimesSource(label: "Расчёт MWL", isVerifiedTable: false),
+            mode: .reminder)
+        XCTAssertEqual(reminder.subtitle, "Грозный")
+        XCTAssertTrue(reminder.body.contains("Расчёт MWL"))
+        XCTAssertTrue(reminder.title.contains("через"))
+        XCTAssertNotNil(reminder.sound)
+
+        // Защита от подмены азана двухсекундным сигналом.
         for option in PrayerNotifications.Sound.allCases where option.isAdhan {
             guard let name = option.fileName,
                   let url = bundle.url(forResource: (name as NSString).deletingPathExtension,
@@ -352,9 +478,34 @@ final class PrayerTests: XCTestCase {
                 return XCTFail("не прочитан звук \(option.rawValue)")
             }
             let seconds = Double(audio.length) / audio.fileFormat.sampleRate
-            XCTAssertLessThanOrEqual(seconds, 30, "\(option.rawValue) длиннее предела: \(seconds) с")
-            XCTAssertGreaterThan(seconds, 1, "\(option.rawValue) подозрительно короткий")
+            XCTAssertGreaterThan(seconds, 10, "\(option.rawValue) подозрительно короткий")
         }
+    }
+
+    /// «Напоминание заранее» сдвигает момент уведомления, «выключено»
+    /// и прошедшее время — убирают.
+    func testFireDateFollowsModeAndSkipsPast() {
+        let defaults = UserDefaults.standard
+        let key = PrayerNotifications.modeKey(for: .dhuhr)
+        let previous = defaults.string(forKey: key)
+        defer {
+            if let previous { defaults.set(previous, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
+        }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let prayer = now.addingTimeInterval(3600)
+
+        defaults.set(PrayerNotifications.Mode.notification.rawValue, forKey: key)
+        XCTAssertEqual(PrayerNotifications.fireDate(kind: .dhuhr, at: prayer, now: now), prayer)
+        XCTAssertNil(PrayerNotifications.fireDate(kind: .dhuhr, at: now, now: now),
+                     "наступивший момент уже не планируется")
+
+        defaults.set(PrayerNotifications.Mode.reminder.rawValue, forKey: key)
+        XCTAssertEqual(PrayerNotifications.fireDate(kind: .dhuhr, at: prayer, now: now),
+                       prayer.addingTimeInterval(-Double(PrayerNotifications.reminderMinutes) * 60))
+
+        defaults.set(PrayerNotifications.Mode.off.rawValue, forKey: key)
+        XCTAssertNil(PrayerNotifications.fireDate(kind: .dhuhr, at: prayer, now: now))
     }
 
     /// Прослушивание: у системного звука файла нет, играть нечего —
@@ -379,12 +530,57 @@ final class PrayerTests: XCTestCase {
         XCTAssertNil(preview.playing)
     }
 
+    func testScheduledSoundSkipsSuppressedDeniedAndMissedEvents() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        func allowed(_ offset: TimeInterval, suppressed: Bool = false,
+                     authorization: UNAuthorizationStatus = .authorized,
+                     setting: UNNotificationSetting = .enabled) -> Bool {
+            PrayerNotifications.shouldPlaySound(
+                at: date, now: date.addingTimeInterval(offset), suppressed: suppressed,
+                authorization: authorization, soundSetting: setting)
+        }
+        XCTAssertTrue(allowed(0))
+        XCTAssertTrue(allowed(1))
+        XCTAssertTrue(allowed(-0.05), "коррекция часов не должна отменять единственный callback таймера")
+        XCTAssertTrue(allowed(-0.001))
+        XCTAssertFalse(allowed(-1))
+        XCTAssertFalse(allowed(5), "после сна пропущенное аудио не запускается")
+        XCTAssertFalse(allowed(0, suppressed: true))
+        XCTAssertFalse(allowed(0, authorization: .denied))
+        XCTAssertFalse(allowed(0, setting: .disabled))
+    }
+
+    func testAllAdhansFinishNaturallyAndPausePreservesTheRemainingAudio() async throws {
+        let preview = PrayerSoundPreview()
+        defer { preview.stop() }
+        for sound in PrayerNotifications.Sound.allCases where sound.isAdhan {
+            preview.play(sound)
+            let audio = try XCTUnwrap(preview.player, sound.title)
+            audio.volume = 0
+            try await Task.sleep(for: .milliseconds(200))
+            preview.pause()
+            let position = audio.currentTime
+            XCTAssertGreaterThan(position, 0, sound.title)
+            try await Task.sleep(for: .seconds(1))
+            XCTAssertEqual(audio.currentTime, position, accuracy: 0.05, sound.title)
+            XCTAssertEqual(preview.playing, sound)
+            preview.resume()
+            try await Task.sleep(for: .seconds(audio.duration - position - 0.5))
+            XCTAssertTrue(audio.isPlaying, "\(sound.title) не должен обрываться до конца файла")
+            XCTAssertGreaterThan(audio.currentTime, audio.duration - 1, sound.title)
+            XCTAssertEqual(preview.playing, sound)
+            try await Task.sleep(for: .seconds(1))
+            XCTAssertNil(preview.playing, "\(sound.title): состояние сбрасывается после конца файла")
+            print("\(sound.title): \(audio.duration) seconds, natural playback completion verified")
+        }
+    }
+
     /// Каталог, который реально поставляется с приложением: города
     /// Кавказа обязаны разрешаться в ТАБЛИЦУ, а не в расчёт. Тест ходит
     /// по настоящему файлу ресурсов — подделка фикстурой не показала бы,
     /// что данные доехали до бандла.
     func testBundledCatalogResolvesCaucasusCitiesToTables() throws {
-        let provider = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(),
+        let provider = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(userURLs: []),
                                      "каталог не найден в бандле")
         // Подпись обязана называть ФАКТИЧЕСКИЙ источник записи. Казань и
         // Грозный — таблицы муфтиятов; пять городов заменены по решению
@@ -423,7 +619,7 @@ final class PrayerTests: XCTestCase {
     /// ДУМ ЧР публикует одно расписание на республику: города Чечни
     /// обязаны показывать таблицу Грозного, с честной оговоркой об этом.
     func testChechenCitiesUseGroznySchedule() throws {
-        let provider = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(),
+        let provider = try XCTUnwrap(ScheduleTablePrayerProvider.userProvided(userURLs: []),
                                      "каталог не найден в бандле")
         let date = try XCTUnwrap(grozny.calendar.date(
             from: DateComponents(year: 2026, month: 8, day: 28)))

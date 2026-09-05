@@ -54,6 +54,7 @@ final class PhraseStore: ObservableObject {
     }
 
     @Published private(set) var phrases: [String]
+    @Published private(set) var saveError: String?
 
     private let fileURL: URL
     /// Нечитаемый файл не удалось отложить в карантин: он всё ещё лежит на
@@ -88,6 +89,7 @@ final class PhraseStore: ObservableObject {
                     try manager.moveItem(at: fileURL, to: backup)
                 } catch {
                     quarantineFailed = true
+                    saveError = "Файл фраз не читается и не удалось сохранить его копию. Восстановите исходные фразы или проверьте доступ к папке Aza."
                 }
             }
         }
@@ -98,16 +100,36 @@ final class PhraseStore: ObservableObject {
     func update(_ index: Int, text: String) {
         guard phrases.indices.contains(index), phrases[index] != text else { return }
         phrases[index] = text
-        guard !quarantineFailed,
-              let data = try? JSONEncoder().encode(phrases) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        save()
+    }
+
+    /// Не теряем набранный текст при отказе диска; ошибка остаётся видимой
+    /// до успешной записи, которую можно повторить без нового редактирования.
+    func save() {
+        guard !quarantineFailed else {
+            saveError = "Фразы не сохранены: прежний файл не читается. Восстановите исходные фразы или проверьте доступ к папке Aza."
+            return
+        }
+        do {
+            let data = try JSONEncoder().encode(phrases)
+            try data.write(to: fileURL, options: .atomic)
+            saveError = nil
+        } catch {
+            saveError = "Фразы не сохранены: \(error.localizedDescription)"
+        }
     }
 
     func resetToFactory() {
-        try? FileManager.default.removeItem(at: fileURL)
-        // Сброс — осознанное решение: файл удалён, запрет записи снимается.
-        quarantineFailed = FileManager.default.fileExists(atPath: fileURL.path)
-        phrases = Self.factoryPhrases
+        do {
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+            quarantineFailed = false
+            phrases = Self.factoryPhrases
+            saveError = nil
+        } catch {
+            saveError = "Не удалось восстановить исходные фразы: \(error.localizedDescription)"
+        }
     }
 
     nonisolated static func defaultFileURL() -> URL {

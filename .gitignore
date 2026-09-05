@@ -8,6 +8,7 @@ xcuserdata/
 .superdesign/tmp/
 .superdesign/resume.json
 outputs/
+output/
 work/
 
 # Датасеты и промежуточные файлы конвейера чеченского лексикона
@@ -24,8 +25,8 @@ Tools/BuildChechenLexicon/config.json
 # лежат в Application Support и в репозиторий не попадают по своей природе.
 build_rel/
 build_release/
+/build*.log
 dist/
 build/
 Tools/BuildChechenLexicon/out_lexicon_new/
 Tools/BuildChechenLexicon/out_lexicon_calibrated/
-Tools/BuildChechenLexicon/out_lexicon_new/

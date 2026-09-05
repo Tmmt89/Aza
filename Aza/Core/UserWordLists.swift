@@ -25,8 +25,9 @@ final class UserWordLists {
     /// больше не пишем — иначе первая же правка затрёт его пустым.
     private(set) var isUnreadable = false
 
-    private init() {
-        fileURL = Self.defaultFileURL()
+    init(fileURL: URL? = nil) {
+        let fileURL = fileURL ?? Self.defaultFileURL()
+        self.fileURL = fileURL
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         guard let data = try? Data(contentsOf: fileURL),
               let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
@@ -49,7 +50,7 @@ final class UserWordLists {
     /// Форма хранения: нижний регистр + каноническая палочка, чтобы
     /// «Г1ала», «г1ала», «гІала» и «гӏала» считались одним словом.
     static func storageForm(_ word: String) -> String {
-        LayoutCorrectionEngine.canonicalPalochkaForm(of: word.lowercased())
+        LayoutCorrectionEngine.canonicalPalochkaForm(of: word)
     }
 
     /// Тесты движка (AzaTests) прогоняют эталонные слова; реальные
@@ -95,7 +96,10 @@ final class UserWordLists {
     private(set) var lastSaveFailed = false
 
     private func save() {
-        guard !isUnreadable else { return }
+        guard !isUnreadable else {
+            lastSaveFailed = true
+            return
+        }
         let payload = Payload(
             neverCorrect: neverCorrect.sorted(),
             confirmed: confirmed.sorted()

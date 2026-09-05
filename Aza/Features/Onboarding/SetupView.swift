@@ -5,10 +5,7 @@ import UserNotifications
 
 /// Настройка и состояние разрешений (§9) в дизайн-системе Aza.
 ///
-/// Компактная группировка: разрешения — строками в одной карточке, а не
-/// семь крупных блоков; объяснение показывается там, где от пользователя
-/// ещё требуется действие, а выданное разрешение сворачивается в строку
-/// со статусом.
+/// Группы настроек соответствуют задачам, а пояснения доступны без наведения.
 extension Notification.Name {
     /// Просьба открыть настройки сразу на разделе «Намаз» (клик по городу
     /// в острове).
@@ -28,26 +25,29 @@ struct SetupView: View {
         PrayerNotifications.Sound.system.rawValue
     @StateObject private var soundPreview = PrayerSoundPreview()
     @AppStorage(DictationController.profileStorageKey) private var profile = "balanced"
+    @AppStorage(OmniASR.variantStorageKey) private var omniVariant = "ctc"
     @StateObject private var locator = CityLocator()
-    @State private var showPermissions = false
-    @AppStorage(ChechenAutocorrect.layoutStorageKey) private var layoutCorrection = true
+    @AppStorage(ChechenAutocorrect.layoutStorageKey) private var layoutCorrection = false
     @AppStorage(ChechenAutocorrect.typoStorageKey) private var typoCorrection = false
     @AppStorage(ChechenAutocorrect.ambiguityStorageKey) private var ambiguityAbstention = true
-    @AppStorage(ChechenAutocorrect.latinizationStorageKey) private var latinization = true
+    @AppStorage(ChechenAutocorrect.latinizationStorageKey) private var latinization = false
+    @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
     @AppStorage(IslandStore.copyFlashKey) private var copyFlash = true
     @AppStorage(IslandStore.copySoundKey) private var copySound = ""
     @AppStorage(IslandStore.compactModeKey) private var islandMode = "auto"
     @AppStorage(AzaApp.menuBarIconKey) private var menuBarIconVisible = true
+    @AppStorage(MenuBarDisplay.storageKey) private var menuBarDisplay = MenuBarDisplay.logo
     @State private var dictationHotKey = HotKeyBinding.load(
         HotKeyBinding.dictationKey, fallback: .dictationDefault)
+    @State private var omniHotKey = HotKeyBinding.load(
+        HotKeyBinding.omniDictationKey, fallback: .omniDictationDefault)
     @State private var clipboardHotKey = HotKeyBinding.load(
         HotKeyBinding.clipboardKey, fallback: .clipboardDefault)
     @State private var phrasesHotKey = HotKeyBinding.load(
         HotKeyBinding.phrasesKey, fallback: .phrasesDefault)
     @ObservedObject private var phraseStore = PhraseStore.shared
-    /// Сброс фраз требует второго нажатия: молчаливая потеря правок —
-    /// ловушка.
+    /// Необратимые действия подтверждаются отдельным системным диалогом.
     @State private var confirmPhraseReset = false
     @State private var confirmHistoryClear = false
     /// Ошибка удаления модели; заодно любое изменение перечитывает
@@ -63,9 +63,7 @@ struct SetupView: View {
     @AppStorage(DictationController.toneSetStorageKey) private var toneSet =
         DictationController.ToneSet.marimba.rawValue
     @State private var tonePreviewTask: Task<Void, Never>?
-    /// Разделы, переехавшие из меню: там они дублировали настройки и
-    /// растягивали список на два экрана. Здесь — за кнопкой, чтобы окно
-    /// по-прежнему помещалось целиком.
+    /// Второстепенные редакторы открываются поверх текущего раздела.
     @State private var showDataSheet = false
     @State private var showAppsSheet = false
     @State private var showExceptionWords = false
@@ -73,64 +71,96 @@ struct SetupView: View {
     /// Характеристики этого Mac — под них подбирается рекомендация.
     private let capabilities = MacCapabilities.current()
 
-    /// Разделы окна: сайдбар слева, содержимое справа — вместо ленты из
-    /// шести карточек на одном экране.
-    ///
-    /// Раздел = фича, а не тип контрола: хоткей диктовки лежит в
-    /// «Диктовке», настройки буфера — в «Буфере обмена». Отдельная вкладка
-    /// «Горячие клавиши» из двух строк заставляла искать настройку одной
-    /// фичи в двух местах. «Общее» — только про само приложение.
+    /// Настройки сгруппированы по задачам; сочетания остаются рядом со своей функцией.
     private enum Section: String, CaseIterable {
-        case prayer, dictation, correction, clipboard, phrases, general, permissions
+        case general, permissions, dictation, correction, clipboard, phrases, prayer
 
         var title: String {
             switch self {
-            case .prayer: "Намаз"
+            case .general: "Общее"
+            case .permissions: "Доступ и данные"
             case .dictation: "Диктовка"
             case .correction: "Автозамена"
             case .clipboard: "Буфер обмена"
             case .phrases: "Фразы"
-            case .general: "Общее"
-            case .permissions: "Разрешения"
+            case .prayer: "Намаз"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .general: "Запуск Aza и поведение острова на экране."
+            case .permissions: "Доступ к функциям macOS, исключения и локальные данные."
+            case .dictation: "Превращайте речь в текст прямо на этом Mac."
+            case .correction: "Исправляйте раскладку и опечатки во время набора."
+            case .clipboard: "Возвращайтесь к скопированному и управляйте историей."
+            case .phrases: "Частые ответы и приветствия — одним сочетанием."
+            case .prayer: "Расписание вашего города и напоминания о намазе."
             }
         }
 
         var symbol: String {
             switch self {
-            case .prayer: "moon.stars.fill"
+            case .general: "slider.horizontal.3"
+            case .permissions: "lock.shield"
             case .dictation: "mic"
             case .correction: "keyboard"
             case .clipboard: "doc.on.clipboard"
             case .phrases: "text.bubble"
-            case .general: "gearshape"
-            case .permissions: "checkmark.shield"
+            case .prayer: "moon.stars"
             }
         }
     }
 
-    @State private var section: Section = .prayer
+    @State private var section: Section = .general
+    @State private var returnToGuide = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            content
+        Group {
+            if model.showsOnboarding {
+                OnboardingView(model: model, progress: model.onboarding) { step in
+                    section = Section(rawValue: step.rawValue) ?? .general
+                    returnToGuide = true
+                    model.showsOnboarding = false
+                }
+            } else {
+                HStack(spacing: 0) {
+                    sidebar
+                    content
+                }
+            }
         }
-        // Высота — по самому длинному разделу («Диктовка»): настройки
-        // должны помещаться целиком, скролл остаётся только страховкой
-        // для маленьких экранов.
-        .frame(width: 680, height: 620)
+        .frame(minWidth: 700, idealWidth: 820, maxWidth: .infinity,
+               minHeight: 560, idealHeight: 680, maxHeight: .infinity)
         .background(AzaStyle.stage)
+        .tint(AzaStyle.rise)
         .preferredColorScheme(.dark)
         // Закрыли настройки — прослушивание смолкло. Звук, доигрывающий
         // за закрытым окном, пользователь остановить уже не может.
-        .onDisappear { soundPreview.stop() }
+        .onDisappear {
+            soundPreview.stop()
+            tonePreviewTask?.cancel()
+        }
+        .onChange(of: model.showsOnboarding) { _, showing in
+            if showing { returnToGuide = false }
+        }
         // Клик по городу в острове ведёт именно к выбору города, а не к
         // разделу, оставшемуся открытым с прошлого раза.
         .onReceive(NotificationCenter.default.publisher(for: .azaShowPrayerSettings)) { _ in
+            model.showsOnboarding = false
             section = .prayer
         }
         .onReceive(NotificationCenter.default.publisher(for: .azaShowPhraseSettings)) { _ in
+            model.showsOnboarding = false
             section = .phrases
+        }
+        // Взведённое «Точно очистить/сбросить» не должно ждать в засаде
+        // до следующего визита в раздел.
+        .onChange(of: section) { _, _ in
+            confirmHistoryClear = false
+            confirmPhraseReset = false
+            soundPreview.stop()
+            tonePreviewTask?.cancel()
         }
         .sheet(isPresented: $showDataSheet) { DataSheet(model: model) }
         .sheet(isPresented: $showAppsSheet) { AppExclusionsSheet() }
@@ -142,153 +172,171 @@ struct SetupView: View {
     // MARK: Сайдбар и содержимое
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(AzaStyle.acid)
-                    .frame(width: 28, height: 28)
-                    .background(AzaStyle.acidSurface, in: RoundedRectangle(
-                        cornerRadius: 8, style: .continuous))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Aza").font(AzaStyle.sectionTitle).foregroundStyle(AzaStyle.ink)
-                    Text("Всё локально")
-                        .font(AzaStyle.caption)
-                        .foregroundStyle(AzaStyle.faint)
+                Image(nsImage: NSImage(named: NSImage.applicationIconName) ?? NSImage())
+                    .resizable()
+                    .frame(width: 34, height: 34)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Aza").font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(AzaStyle.ink)
+                    Text("Настройки").font(AzaStyle.caption)
+                        .foregroundStyle(AzaStyle.muted)
                 }
             }
-            .padding(.bottom, 14)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 26)
 
-            ForEach(Section.allCases, id: \.self) { item in
-                sidebarRow(item)
-            }
+            sidebarGroup("Приложение", items: [.general, .permissions])
+            sidebarGroup("Работа с текстом", items: [.dictation, .correction, .clipboard, .phrases])
+            sidebarGroup("Напоминания", items: [.prayer])
+            Spacer(minLength: 20)
+            Label("Работает на вашем Mac", systemImage: "desktopcomputer")
+                .font(AzaStyle.caption)
+                .foregroundStyle(AzaStyle.faint)
+                .padding(10)
+        }
+        .padding(12)
+        .frame(width: 212)
+        .background(AzaStyle.card)
+        .overlay(alignment: .trailing) { AzaStyle.line.opacity(0.5).frame(width: 1) }
+    }
 
-            Spacer(minLength: 0)
+    private func sidebarGroup(_ title: String, items: [Section]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(AzaStyle.faint)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
+            ForEach(items, id: \.self) { sidebarRow($0) }
         }
-        .padding(14)
-        .frame(width: 200, alignment: .topLeading)
-        .background(AzaStyle.deep)
-        .overlay(alignment: .trailing) {
-            AzaStyle.line.frame(width: 1)
-        }
+        .padding(.bottom, 22)
     }
 
     private func sidebarRow(_ item: Section) -> some View {
         Button {
             section = item
         } label: {
-            HStack(spacing: 9) {
+            HStack(spacing: 10) {
                 Image(systemName: item.symbol)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .medium))
                     .frame(width: 18)
-                    .foregroundStyle(section == item ? Color.black : AzaStyle.muted)
+                    .accessibilityHidden(true)
                 Text(item.title)
-                    .font(AzaStyle.body)
-                    .foregroundStyle(section == item ? Color.black : AzaStyle.ink)
+                    .font(.system(size: 12, weight: section == item ? .semibold : .regular))
                 Spacer(minLength: 0)
-                // Невыданные права видны прямо из сайдбара.
-                if item == .permissions, !missingPermissions.isEmpty {
-                    Circle().fill(section == item ? Color.black : AzaStyle.warning)
-                        .frame(width: 6, height: 6)
+                if item == .permissions, needsPermissions {
+                    Image(systemName: "exclamationmark.circle")
+                        .font(.system(size: 11))
+                        .accessibilityLabel("Есть невыданные разрешения")
                 }
             }
+            .foregroundStyle(section == item ? AzaStyle.ink : AzaStyle.muted)
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(section == item ? AzaStyle.acid : .clear,
-                        in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .frame(height: 36)
+            .background(section == item ? AzaStyle.control : .clear,
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(alignment: .leading) {
+                if section == item {
+                    Capsule().fill(AzaStyle.rise).frame(width: 3, height: 14)
+                        .padding(.leading, 1)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(section == item ? .isSelected : [])
+        .accessibilityIdentifier("settings.\(item.rawValue)")
     }
 
     private var content: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(section.title)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(AzaStyle.ink)
+                    .accessibilityAddTraits(.isHeader)
+                Text(section.subtitle)
+                    .font(AzaStyle.body)
+                    .foregroundStyle(AzaStyle.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 28)
+            .padding(.top, 28)
+            .padding(.bottom, 24)
+
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(section.title)
-                        .font(AzaStyle.title)
-                        .foregroundStyle(AzaStyle.ink)
-                        .padding(.bottom, 2)
+                VStack(alignment: .leading, spacing: 22) {
                     switch section {
-                    case .prayer: prayerCard
+                    case .general: generalCard
+                    case .permissions: permissionsCard
                     case .dictation: dictationCard
                     case .correction: correctionCard
                     case .clipboard: clipboardCard
                     case .phrases: phrasesCard
-                    case .general: generalCard
-                    case .permissions: permissionsCard
+                    case .prayer: prayerCard
                     }
                 }
-                .padding(18)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(maxWidth: 680, alignment: .leading)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            // Главное действие окна — в правом нижнем углу, как принято
-            // на macOS, а не в сайдбаре.
+            .id(section)
+
             HStack {
-                Spacer()
-                Button("Готово") {
-                    UserDefaults.standard.set(true, forKey: SetupWindowController.completedKey)
-                    // performClose, а не close: закрытие идёт через делегата
-                    // окна — с анимацией ухода вверх. Окно ищем по делегату,
-                    // а не через keyWindow: приложение может быть неактивным
-                    // (кооперативная активация на этой macOS не проходит),
-                    // и keyWindow == nil молча съедал закрытие.
-                    NSApp.windows
-                        .first { $0.delegate is SetupWindowController }?
-                        .performClose(nil)
+                if returnToGuide || !model.onboarding.completed {
+                    Button("Продолжить знакомство") { model.showsOnboarding = true }
+                        .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
+                } else {
+                    Text("Изменения сохраняются автоматически")
+                        .font(AzaStyle.caption)
+                        .foregroundStyle(AzaStyle.faint)
                 }
-                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                Spacer(minLength: 8)
+                Button("Готово") {
+                    NSApp.windows.first { $0.delegate is SetupWindowController }?.performClose(nil)
+                }
+                .buttonStyle(AzaCapsuleButtonStyle())
                 .keyboardShortcut(.defaultAction)
             }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 14)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 14)
+            .overlay(alignment: .top) { AzaStyle.line.opacity(0.5).frame(height: 1) }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AzaStyle.stage)
     }
 
-    // MARK: Разрешения — одной группой
+    // MARK: Доступ и данные
 
-    /// Выданные разрешения не занимают экран: пока всё в порядке, это
-    /// одна строка с кнопкой. Невыданные показываются сразу — их видеть
-    /// нужно, иначе функция молча не работает.
     private var permissionsCard: some View {
-        card("Разрешения") {
-            let missing = missingPermissions
-            HStack(spacing: 8) {
-                Image(systemName: missing.isEmpty ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(missing.isEmpty ? AzaStyle.acid : AzaStyle.warning)
-                Text(missing.isEmpty
-                     ? "Все выданы"
-                     : "Не выдано: \(missing.joined(separator: ", "))")
-                    .font(AzaStyle.label)
-                    .foregroundStyle(missing.isEmpty ? AzaStyle.ink : AzaStyle.warning)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                Button(showPermissions ? "Скрыть" : "Показать") {
-                    withAnimation(.easeOut(duration: AzaMotion.micro)) {
-                        showPermissions.toggle()
-                    }
-                }
-                .buttonStyle(AzaCapsuleButtonStyle())
-            }
-            if showPermissions || !missing.isEmpty {
+        Group {
+            card("Разрешения macOS") {
+                hint("Выдайте доступ только к тем функциям, которыми пользуетесь.")
                 divider
                 permissionRows
+            }
+            card("Исключения и хранение") {
+                settingRow("Приложения-исключения", detail: "Не исправлять текст и не сохранять скопированное в выбранных приложениях.") {
+                    Button("Настроить…") { showAppsSheet = true }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                }
+                divider
+                settingRow("Данные на этом Mac", detail: "Занятое место, история буфера, модели и удаление данных.") {
+                    Button("Показать…") { showDataSheet = true }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                }
             }
         }
     }
 
-    /// Названия невыданных разрешений — для сводки.
-    private var missingPermissions: [String] {
-        var result: [String] = []
-        // Незапрошенное разрешение (.unknown) тоже не выдано: иначе
-        // сводка сказала бы «все выданы», спрятав нужную кнопку.
-        if status(model.notifications) != .granted { result.append("уведомления") }
-        if status(model.microphone) != .granted { result.append("микрофон") }
-        if !model.axTrusted { result.append("управление компьютером") }
-        if !model.inputMonitoring { result.append("мониторинг ввода") }
-        return result
+    private var needsPermissions: Bool {
+        status(model.notifications) != .granted || status(model.microphone) != .granted
+            || !model.axTrusted || !model.inputMonitoring
     }
 
     @ViewBuilder
@@ -296,29 +344,28 @@ struct SetupView: View {
         Group {
             permissionRow(
                 "Уведомления", symbol: "bell",
-                visible: showPermissions || status(model.notifications) != .granted,
                 status: status(model.notifications),
                 detail: "Напоминание ко времени намаза.",
                 denied: "Включается в Системных настройках → Уведомления"
             ) {
                 Button("Разрешить") { Task { await model.requestNotifications() } }
-                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
             }
 
+            divider
             permissionRow(
                 "Микрофон", symbol: "mic",
-                visible: showPermissions || status(model.microphone) != .granted,
                 status: status(model.microphone),
                 detail: "Нужен для диктовки; аудио не сохраняется на диск.",
                 denied: "Включается в Системных настройках → Микрофон"
             ) {
                 Button("Разрешить") { model.requestMicrophone() }
-                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
             }
 
+            divider
             permissionRow(
                 "Управление компьютером", symbol: "hand.tap",
-                visible: showPermissions || !model.axTrusted,
                 status: model.axTrusted ? .granted : .missing,
                 detail: "Вставка текста прямо в поле. Без него текст остаётся в буфере."
             ) {
@@ -326,15 +373,15 @@ struct SetupView: View {
                     .buttonStyle(AzaCapsuleButtonStyle())
             }
 
+            divider
             permissionRow(
                 "Мониторинг ввода", symbol: "keyboard",
-                visible: showPermissions || !model.inputMonitoring,
                 status: model.inputMonitoring ? .granted : .missing,
                 detail: "Нужен для исправления раскладки. Действует после перезапуска Aza."
             ) {
                 HStack(spacing: 6) {
                     Button("Разрешить") { model.requestInputMonitoring() }
-                        .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                        .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
                     Button("Перезапустить") { model.restartApp() }
                         .buttonStyle(AzaCapsuleButtonStyle())
                 }
@@ -345,14 +392,16 @@ struct SetupView: View {
     // MARK: Остальные разделы
 
     private var prayerCard: some View {
-        card("Намаз") {
-            HStack(spacing: 8) {
-                CityPickerView(cityID: $cityID, cities: model.prayer.allCities)
-                    .buttonStyle(AzaCapsuleButtonStyle())
-                    .onChange(of: cityID) { _, value in
-                        model.prayer.selectedCityID = value.isEmpty ? nil : value
-                    }
-                Button(locator.state == .locating ? "Определяю…" : "По геопозиции") {
+        Group {
+            card("Город и расписание") {
+                settingRow("Город", detail: "По нему Aza выбирает расписание намаза.") {
+                    CityPickerView(cityID: $cityID, cities: model.prayer.allCities)
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                        .onChange(of: cityID) { _, value in
+                            model.prayer.selectedCityID = value.isEmpty ? nil : value
+                        }
+                }
+                Button(locator.state == .locating ? "Определяю город…" : "Определить по геопозиции") {
                     Task {
                         if let match = await locator.locate() {
                             cityID = match.city.id
@@ -362,42 +411,31 @@ struct SetupView: View {
                 }
                 .buttonStyle(AzaCapsuleButtonStyle())
                 .disabled(locator.state == .locating)
-                HelpDot(text: "Город, по которому берутся времена намаза. «По геопозиции» подбирает ближайший профиль из списка.")
-            }
-            switch locator.state {
-            case let .found(id, distance):
-                // Честно: ближайший ПРОФИЛЬ из списка, а не «ваш город».
-                hint("Ближайший профиль: \(model.prayer.allCities.first { $0.id == id }?.name ?? id) · \(distance) км")
-            case .denied:
-                warn("Геолокация запрещена — выберите город вручную")
-            case let .failed(message):
-                warn(message)
-            default:
-                EmptyView()
+                switch locator.state {
+                case let .found(id, distance):
+                    hint("Ближайший профиль: \(model.prayer.allCities.first { $0.id == id }?.name ?? id) · \(distance) км")
+                case let .failed(message): warn(message)
+                default: EmptyView()
+                }
+                if !cityID.isEmpty {
+                    divider
+                    sourceStatus
+                }
             }
             if !cityID.isEmpty {
-                divider
-                sourceStatus
-                divider
-                soundPicker
-                divider
-                HStack(spacing: 6) {
-                    Text("Уведомления")
-                        .font(AzaStyle.body)
-                        .foregroundStyle(AzaStyle.ink)
-                    HelpDot(text: "Главный тумблер уведомлений о намазе; включение спрашивает разрешение системы. Режим по каждому намазу — за кнопкой «Настроить…».")
-                    Spacer(minLength: 8)
-                    // Единственный путь, включающий уведомления (пишет
-                    // PrayerNotificationsEnabled и планирует расписание).
-                    // Раньше тумблера не было, и функция была невключаемой.
-                    Toggle(isOn: Binding(
+                card("Напоминания") {
+                    settingToggle("Уведомлять о намазе", isOn: Binding(
                         get: { model.prayer.notificationsEnabled },
                         set: { on in Task { await model.prayer.setNotifications(enabled: on) } }
-                    )) { EmptyView() }
-                        .toggleStyle(AzaToggleStyle())
-                    Button("Настроить…") { showPrayerNotifSheet = true }
-                        .buttonStyle(AzaCapsuleButtonStyle())
-                        .disabled(!model.prayer.notificationsEnabled)
+                    ), help: "Напоминания приходят через уведомления macOS.")
+                    divider
+                    settingRow("Для каждого намаза", detail: "Выберите, о каких намазах напоминать и за сколько минут.") {
+                        Button("Настроить…") { showPrayerNotifSheet = true }
+                            .buttonStyle(AzaCapsuleButtonStyle())
+                            .disabled(!model.prayer.notificationsEnabled)
+                    }
+                    divider
+                    soundPicker
                 }
             }
         }
@@ -417,7 +455,7 @@ struct SetupView: View {
                     .foregroundStyle(AzaStyle.ink)
                 HelpDot(text: "Чем звучит уведомление о намазе. Кнопка ▶ — прослушать выбранный азан.")
                 Spacer(minLength: 8)
-                Picker("", selection: $prayerSound) {
+                Picker("Звук уведомления о намазе", selection: $prayerSound) {
                     ForEach(PrayerNotifications.Sound.allCases, id: \.rawValue) { option in
                         Text(option.title).tag(option.rawValue)
                     }
@@ -442,16 +480,17 @@ struct SetupView: View {
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(soundPreview.playing != nil ? AzaStyle.acid : AzaStyle.muted)
+                .foregroundStyle(soundPreview.playing != nil ? AzaStyle.rise : AzaStyle.muted)
                 .background(AzaStyle.control, in: Circle())
                 .overlay(Circle().stroke(AzaStyle.line))
                 .help(soundPreview.playing != nil ? "Остановить" : "Прослушать")
+                .accessibilityLabel(soundPreview.playing != nil ? "Остановить звук" : "Прослушать звук")
                 // У системного звука файла нет — играть нечего.
                 .disabled(PrayerNotifications.Sound(rawValue: prayerSound)?.fileName == nil)
             }
-            if PrayerNotifications.Sound(rawValue: prayerSound)?.isAdhan == true {
-                hint("Азан звучит целиком: запись укладывается в системный "
-                     + "предел уведомления в 30 секунд.")
+            if PrayerNotifications.Sound(rawValue: prayerSound)?.fileName != nil {
+                hint("Запись звучит целиком, пока Aza запущена, даже при скрытом баннере. "
+                     + "Focus и «Не беспокоить» её не приглушают. Во время диктовки — пауза.")
             }
         }
     }
@@ -474,7 +513,7 @@ struct SetupView: View {
                                         : (table ? "checkmark.seal.fill" : "function"))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(!hasTimes ? AzaStyle.warning
-                                           : (table ? AzaStyle.acid : AzaStyle.muted))
+                                           : AzaStyle.muted)
             VStack(alignment: .leading, spacing: 2) {
                 Text(!hasTimes ? "Времён на сегодня нет"
                      : table ? "Источник: \(model.prayer.source?.label ?? "расписание")"
@@ -495,154 +534,224 @@ struct SetupView: View {
         }
     }
 
-    // Порядок строк — путь пользователя: как включить (клавиша), что
-    // распознаётся (язык, свои слова, модель), и в конце — чем звучит.
     private var dictationCard: some View {
-        card("Диктовка") {
-            HotKeyRecorder(title: "Клавиша", binding: $dictationHotKey, allowModifierKeys: true) { binding in
-                binding.save(HotKeyBinding.dictationKey)
-                model.dictation.rebindHotKey()
-            }
-            hint("Удерживайте для записи; двойное нажатие фиксирует — фиксацию остановят сочетание, Пробел или Enter.")
-            divider
-            HStack {
-                Text("Язык")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Язык распознавания диктовки. Авто определяет по речи; при сомнении выбирается русский.")
-                Spacer(minLength: 8)
-                Picker("", selection: $dictationLanguage) {
-                    Text("Авто").tag("auto")
-                    Text("Русский").tag("ru")
-                    Text("English").tag("en")
+        Group {
+            card("Запуск") {
+                HotKeyRecorder(title: "Whisper · русский / English", binding: $dictationHotKey,
+                               allowModifierKeys: true,
+                               registrationError: model.dictation.hotKeyError) { binding in
+                    binding.save(HotKeyBinding.dictationKey,
+                                 registering: model.dictation.rebindHotKey)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 200)
-            }
-            divider
-            HStack {
-                Text("Свои слова")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Имена и термины через запятую. Whisper получает их как подсказку и реже коверкает такие слова.")
-                Spacer(minLength: 8)
-                TextField("Ахьмад, Соьлжа-ГӀала", text: $dictationCustomWords)
-                    .textFieldStyle(.roundedBorder)
-                    .font(AzaStyle.body)
-                    .frame(width: 200)
-            }
-            divider
-            settingToggle("Убирать звуки-паразиты", isOn: $removeFillers,
-                          help: "«Эм», «э-э», “uh” вырезаются из текста. Настоящие слова («ну», «вот») не трогаются никогда.")
-            divider
-            settingToggle("Распознавать во время записи", isOn: $streamingDictation,
-                          help: "Текст распознаётся, пока вы говорите, — после отпускания остаётся дораспознать только хвост. Работает при явно выбранном языке (не «Авто»). Тратит чуть больше энергии во время записи.")
-            divider
-            HStack {
-                Text("Выгружать модель")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Модель держит сотни мегабайт — гигабайты памяти. После простоя она выгружается; следующая диктовка стартует сразу, но распознавание чуть подождёт её подъёма. «Никогда» — максимум скорости ценой памяти.")
-                Spacer(minLength: 8)
-                // Чтение через валидированный аксессор: чужое значение в
-                // defaults иначе оставляло бы Picker без выбранного пункта,
-                // хотя контроллер уже считает его тридцатью минутами.
-                Picker("", selection: Binding(
-                    get: { DictationController.unloadMinutes },
-                    set: { unloadMinutes = $0 }
-                )) {
-                    Text("Через 5 мин").tag(5)
-                    Text("Через 30 мин").tag(30)
-                    Text("Через час").tag(60)
-                    Text("Никогда").tag(0)
+                .disabled(model.dictation.state != .idle)
+                divider
+                HotKeyRecorder(title: "OmniASR · чеченский", binding: $omniHotKey,
+                               allowModifierKeys: true,
+                               registrationError: model.dictation.omniHotKeyError) { binding in
+                    binding.save(HotKeyBinding.omniDictationKey) {
+                        model.dictation.rebindHotKey(for: .omni)
+                    }
                 }
-                .labelsHidden()
-                .frame(width: 140)
-                .onChange(of: unloadMinutes) { _, _ in
-                    model.dictation.unloadTimeoutChanged()
+                .disabled(model.dictation.state != .idle)
+                hint("Удерживайте клавишу нужной модели для записи. Двойное нажатие той же клавиши включает запись без удержания; она же, Пробел или Enter останавливают её. Следующую запись начинайте после вставки текста.")
+            }
+            card("Распознавание") {
+                settingRow("Язык") {
+                    Picker("Язык диктовки", selection: $dictationLanguage) {
+                        Text("Авто").tag("auto")
+                        Text("Русский").tag("ru")
+                        Text("English").tag("en")
+                        Text("Чеченский").tag("ce")
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                    .disabled(!model.dictation.canChangeEngine)
+                    .onChange(of: dictationLanguage) { _, _ in model.dictation.languageChanged() }
                 }
+                if dictationLanguage == "ce" {
+                    hint("Для запуска из меню выбран OmniASR. Клавиша Whisper всё равно запускает Whisper с автоопределением русского / English. Качество чеченской речи пока экспериментальное.")
+                } else {
+                    hint("Этот язык используется Whisper и запуском из меню. Горячая клавиша OmniASR всегда включает чеченскую модель.")
+                }
+                divider
+                VStack(alignment: .leading, spacing: 8) {
+                    settingLabel("Свои слова", detail: "Имена и термины через запятую помогают точнее распознавать речь.")
+                    TextField("Например: Ахьмад, Соьлжа-Гӏала", text: $dictationCustomWords)
+                        .textFieldStyle(.roundedBorder)
+                        .font(AzaStyle.body)
+                        .accessibilityLabel("Свои слова для диктовки")
+                }
+                .disabled(dictationLanguage == "ce")
+                divider
+                settingToggle("Убирать звуки-паразиты", isOn: $removeFillers,
+                              help: "Убирает «эм», «э-э» и “uh”. Слова «ну» и «вот» остаются.")
+                    .disabled(dictationLanguage == "ce")
+                divider
+                settingToggle("Распознавать во время записи", isOn: $streamingDictation,
+                              help: "Сокращает ожидание после записи с Whisper. Работает для русского и английского; чеченская речь распознаётся после остановки.")
+                    .disabled(dictationLanguage == "auto" || dictationLanguage == "ce")
             }
-            divider
-            ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in
-                if index > 0 { divider }
-                modelRow(item)
-            }
-            if let modelDeleteError {
-                warn(modelDeleteError)
-            }
-            hint(capabilities.recommendationReason)
+            card("Whisper · русский и английский") {
+                ForEach(Array(DictationController.Profile.allCases.enumerated()), id: \.element) { index, item in
+                    if index > 0 { divider }
+                    modelRow(item)
+                }
+                if let modelDeleteError {
+                    warn(modelDeleteError)
+                }
+                hint(capabilities.recommendationReason)
 
-            // Загрузка выбранной модели: кнопка и полоса прогресса —
-            // раньше загрузка шла молча при первой диктовке.
-            // Полоса живёт только пока идёт скачивание. Ровно 100% —
-            // это уже подготовка модели, и полосу надо убрать: иначе она
-            // выглядит зависшей всё время прогрева.
-            if let progress = model.dictation.downloadProgress, progress < 0.999 {
-                VStack(alignment: .leading, spacing: 4) {
-                    ProgressView(value: progress)
-                        .tint(AzaStyle.acid)
-                    Text("Загрузка: \(Int(progress * 100))%")
+                // Загрузка выбранной модели: кнопка и полоса прогресса —
+                // раньше загрузка шла молча при первой диктовке.
+                // Полоса живёт только пока идёт скачивание. Ровно 100% —
+                // это уже подготовка модели, и полосу надо убрать: иначе она
+                // выглядит зависшей всё время прогрева.
+                if !model.dictation.isInstallingOmni, let progress = model.dictation.downloadProgress, progress < 0.999 {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ProgressView(value: progress)
+                            .tint(AzaStyle.rise)
+                        Text("Загрузка: \(Int(progress * 100))%")
+                            .font(AzaStyle.caption)
+                            .foregroundStyle(AzaStyle.faint)
+                    }
+                } else if !model.dictation.isInstallingOmni, case .loadingModel = model.dictation.state {
+                    Text("Готовлю модель…")
                         .font(AzaStyle.caption)
                         .foregroundStyle(AzaStyle.faint)
+                } else if let selected = DictationController.Profile(rawValue: profile),
+                          !DictationController.isModelCached(selected) {
+                    Button("Скачать модель · \(selected.sizeLabel)") {
+                        model.dictation.downloadSelectedModel()
+                    }
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
+                    // Скачивание обнуляет модель в памяти — во время диктовки
+                    // нельзя, как и удаление (guard дублируется в контроллере).
+                    .disabled(!model.dictation.canChangeEngine || dictationLanguage == "ce")
                 }
-            } else if case .loadingModel = model.dictation.state {
-                Text("Готовлю модель…")
-                    .font(AzaStyle.caption)
-                    .foregroundStyle(AzaStyle.faint)
-            } else if let selected = DictationController.Profile(rawValue: profile),
-                      !DictationController.isModelCached(selected) {
-                Button("Скачать модель · \(selected.sizeLabel)") {
-                    model.dictation.downloadSelectedModel()
-                }
-                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
-                // Скачивание обнуляет модель в памяти — во время диктовки
-                // нельзя, как и удаление (guard дублируется в контроллере).
-                .disabled(model.dictation.state != .idle)
-            }
-            divider
-            HStack {
-                Text("Звук сигналов")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Пара звуков начала и конца диктовки: вверх — запись пошла, вниз — распознаю.")
-                Spacer(minLength: 8)
-                Picker("", selection: $toneSet) {
-                    ForEach(DictationController.ToneSet.allCases, id: \.rawValue) { set in
-                        Text(set.title).tag(set.rawValue)
+                divider
+                HStack {
+                    Text("Выгружать модель")
+                        .font(AzaStyle.body)
+                        .foregroundStyle(AzaStyle.ink)
+                    HelpDot(text: "Модель держит сотни мегабайт — гигабайты памяти. После простоя она выгружается; следующая диктовка стартует сразу, но распознавание чуть подождёт её подъёма. «Никогда» — максимум скорости ценой памяти.")
+                    Spacer(minLength: 8)
+                    // Чтение через валидированный аксессор: чужое значение в
+                    // defaults иначе оставляло бы Picker без выбранного пункта,
+                    // хотя контроллер уже считает его тридцатью минутами.
+                    Picker("Выгружать модель из памяти", selection: Binding(
+                        get: { DictationController.unloadMinutes },
+                        set: { unloadMinutes = $0 }
+                    )) {
+                        Text("Через 5 мин").tag(5)
+                        Text("Через 30 мин").tag(30)
+                        Text("Через час").tag(60)
+                        Text("Никогда").tag(0)
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                    .onChange(of: unloadMinutes) { _, _ in
+                        model.dictation.unloadTimeoutChanged()
                     }
                 }
-                .labelsHidden()
-                .frame(width: 140)
-                .onChange(of: toneSet) { _, _ in
-                    DictationController.playTone(start: false)
-                }
+
             }
-            divider
-            HStack {
-                Text("Громкость сигналов")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Звуки начала и конца диктовки. В нуле — без звука.")
-                Spacer(minLength: 8)
-                Image(systemName: toneVolume == 0 ? "speaker.slash" : "speaker.wave.2")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(AzaStyle.muted)
-                    .frame(width: 16)
-                Slider(value: $toneVolume, in: 0...1)
-                    .controlSize(.small)
-                    .tint(AzaStyle.acid)
-                    .frame(width: 140)
-                    // Отпустили бегунок — проигрываем сигнал на новой
-                    // громкости, чтобы её можно было подобрать на слух.
-                    .onChange(of: toneVolume) { _, _ in
-                        tonePreviewTask?.cancel()
-                        tonePreviewTask = Task {
-                            try? await Task.sleep(for: .milliseconds(250))
-                            guard !Task.isCancelled else { return }
-                            DictationController.playTone(start: false)
+            card("Чеченский · OmniASR") {
+                let variant = OmniASR.Variant(rawValue: omniVariant) ?? .ctc
+                Picker("Вариант OmniASR", selection: $omniVariant) {
+                    ForEach(OmniASR.Variant.allCases) { option in
+                        Text(option.title).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(!model.dictation.canChangeEngine)
+                .onChange(of: omniVariant) { _, _ in model.dictation.languageChanged() }
+                hint(variant == .ctc
+                     ? "Быстрый вариант. Разрешены только русские и чеченские буквы, цифры и знаки. Ограничение алфавита не гарантирует правильные слова."
+                     : "Языковая подсказка: чеченский. Русские буквы тоже разрешены. Этот вариант требует больше памяти и работает медленнее; смешанную речь нужно проверить на своих записях.")
+                divider
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(variant.modelName).font(AzaStyle.label)
+                        Text(OmniASR.isInstalled(variant) ? "Скачана · работает без интернета" : "\(variant.sizeLabel) + общие компоненты")
+                            .font(AzaStyle.caption).foregroundStyle(AzaStyle.faint)
+                    }
+                    Spacer()
+                    if model.dictation.isInstallingOmni {
+                        Button("Отменить") { model.dictation.cancelOmniDownload() }
+                    } else {
+                        if !OmniASR.isInstalled(variant) {
+                            Button("Скачать") { model.dictation.downloadOmniModel() }
+                                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
+                                .disabled(!model.dictation.canChangeEngine || !OmniASR.supported)
+                        }
+                        if FileManager.default.fileExists(atPath: OmniASR.directory.path) {
+                            Button("Удалить OmniASR", role: .destructive) {
+                                Task { modelDeleteError = await model.dictation.deleteOmniModel() }
+                            }
+                            .help("Удаляет оба варианта OmniASR и общие компоненты распознавания")
+                            .disabled(!model.dictation.canDeleteModels)
                         }
                     }
+                }
+                if model.dictation.isInstallingOmni {
+                    if let progress = model.dictation.downloadProgress {
+                        ProgressView(value: progress).tint(AzaStyle.rise)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                Text(model.dictation.status)
+                    .font(AzaStyle.caption).foregroundStyle(AzaStyle.muted)
+                    .textSelection(.enabled)
+                hint(OmniASR.supported
+                     ? "Скачивается только выбранный вариант, по кнопке. Горячая клавиша \(omniHotKey.display) запускает вариант, выбранный выше. Память освобождается после каждой записи; настройка выгрузки выше относится к Whisper."
+                     : "Для чеченской модели нужен Mac с Apple Silicon.")
+            }
+            card("Звуковые сигналы") {
+                HStack {
+                    Text("Звук сигналов")
+                        .font(AzaStyle.body)
+                        .foregroundStyle(AzaStyle.ink)
+                    HelpDot(text: "Пара звуков начала и конца диктовки: вверх — запись пошла, вниз — распознаю.")
+                    Spacer(minLength: 8)
+                    Picker("Звук сигналов диктовки", selection: $toneSet) {
+                        ForEach(DictationController.ToneSet.allCases, id: \.rawValue) { set in
+                            Text(set.title).tag(set.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                    .onChange(of: toneSet) { _, _ in
+                        DictationController.playTone(start: false)
+                    }
+                }
+                divider
+                HStack {
+                    Text("Громкость сигналов")
+                        .font(AzaStyle.body)
+                        .foregroundStyle(AzaStyle.ink)
+                    HelpDot(text: "Звуки начала и конца диктовки. В нуле — без звука.")
+                    Spacer(minLength: 8)
+                    Image(systemName: toneVolume == 0 ? "speaker.slash" : "speaker.wave.2")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(AzaStyle.muted)
+                        .frame(width: 16)
+                    Slider(value: $toneVolume, in: 0...1)
+                        .accessibilityLabel("Громкость сигналов диктовки")
+                        .controlSize(.small)
+                        .tint(AzaStyle.rise)
+                        .frame(width: 140)
+                        // Отпустили бегунок — проигрываем сигнал на новой
+                        // громкости, чтобы её можно было подобрать на слух.
+                        .onChange(of: toneVolume) { _, _ in
+                            tonePreviewTask?.cancel()
+                            tonePreviewTask = Task {
+                                try? await Task.sleep(for: .milliseconds(250))
+                                guard !Task.isCancelled else { return }
+                                DictationController.playTone(start: false)
+                            }
+                        }
+                }
             }
         }
     }
@@ -655,42 +764,43 @@ struct SetupView: View {
 
         return HStack(alignment: .top, spacing: 8) {
             Button {
-            profile = item.rawValue
-            model.dictation.profileChanged()
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isSelected ? AzaStyle.acid : AzaStyle.faint)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(item.title)
-                            .font(AzaStyle.label)
-                            .foregroundStyle(AzaStyle.ink)
-                        if isRecommended {
-                            tag("Рекомендуем", color: AzaStyle.acid,
-                                background: AzaStyle.acidSurface)
+                profile = item.rawValue
+                model.dictation.profileChanged()
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isSelected ? AzaStyle.rise : AzaStyle.faint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(item.title)
+                                .font(AzaStyle.label)
+                                .foregroundStyle(AzaStyle.ink)
+                            if isRecommended {
+                                tag("Для этого Mac", color: AzaStyle.muted,
+                                    background: AzaStyle.control)
+                            }
+                            if isDownloaded {
+                                tag("Скачана", color: AzaStyle.faint,
+                                    background: AzaStyle.control)
+                            }
                         }
-                        if isDownloaded {
-                            tag("Скачана", color: AzaStyle.faint,
-                                background: AzaStyle.control)
-                        }
-                    }
-                    Text(item.summary)
-                        .font(AzaStyle.caption)
-                        .foregroundStyle(tooHeavy ? AzaStyle.warning : AzaStyle.faint)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if tooHeavy {
-                        Text("Может не хватить ресурсов этого Mac")
+                        Text(item.summary)
                             .font(AzaStyle.caption)
-                            .foregroundStyle(AzaStyle.warning)
+                            .foregroundStyle(tooHeavy ? AzaStyle.warning : AzaStyle.faint)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if tooHeavy {
+                            Text("Может не хватить ресурсов этого Mac")
+                                .font(AzaStyle.caption)
+                                .foregroundStyle(AzaStyle.warning)
+                        }
                     }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+            .buttonStyle(.plain)
+            .disabled(!model.dictation.canChangeEngine || dictationLanguage == "ce")
 
             // Удаление одной модели, не трогая остальные: выгружаем из
             // памяти только её и стираем только её папку в кэше.
@@ -705,8 +815,9 @@ struct SetupView: View {
                 .buttonStyle(.plain)
                 // Во время диктовки unloadModel — no-op (guard state == .idle),
                 // и удаление папки выдернуло бы файлы из-под WhisperKit.
-                .disabled(model.dictation.state != .idle)
+                .disabled(!model.dictation.canDeleteModels)
                 .help("Удалить скачанную модель «\(item.title)» (\(item.sizeLabel))")
+                .accessibilityLabel("Удалить модель «\(item.title)»")
             }
         }
     }
@@ -720,23 +831,28 @@ struct SetupView: View {
             .background(background, in: Capsule())
     }
 
-    /// Автозамена (§10 «Раскладка»): главный тумблер и отдельно —
-    /// исправление опечаток, самая рискованная стадия.
+    /// Раскладка и чеченские опечатки включаются независимо.
     private var correctionCard: some View {
-        card("Автозамена") {
-            settingToggle("Раскладка", isOn: $layoutCorrection,
-                          help: "ghbdtn → привет, [mj → хьо, 1алам → ӏалам")
-            if layoutCorrection {
-                settingToggle("Опечатки", isOn: $typoCorrection,
-                              help: "Чеченские слова с опечаткой — только когда в словаре ровно один похожий вариант.")
-                settingToggle("Пропускать спорные", isOn: $ambiguityAbstention,
-                              help: "Если слово читается и как русское, и как чеченское — Aza промолчит.")
-                settingToggle("Латинизация", isOn: $latinization,
-                              help: "Обратное направление: ыфдфв → salad. Выключите, если Aza мешает при наборе кириллицей.")
+        Group {
+            card("Автоматическое исправление") {
+                settingToggle("Исправлять раскладку", isOn: $layoutCorrection,
+                              help: "Например, ghbdtn → привет. Двойной правый Shift отменяет последнее исправление.")
+                divider
+                settingToggle("Опечатки в чеченском", isOn: $typoCorrection,
+                              help: "Исправлять опечатки, если в словаре есть ровно один похожий вариант. Работает независимо от исправления раскладки.")
+            }
+            card("Правила исправления раскладки") {
+                settingToggle("Пропускать неоднозначные слова", isOn: $ambiguityAbstention,
+                              help: "Не менять слово, если оно может быть и русским, и чеченским.")
+                divider
+                settingToggle("Исправлять в латиницу", isOn: $latinization,
+                              help: "Обратное направление: ыфдфв → salad. Отключите, если это мешает набору кириллицей.")
+            }
+            .disabled(!layoutCorrection)
+            card("Исключения") {
                 // Строка видна всегда, даже при пустом списке — иначе
                 // непонятно, куда деваются отменённые исправления.
                 let exceptions = UserWordLists.shared.neverCorrect
-                divider
                 HStack {
                     // Перед «Очистить» список можно посмотреть: клик
                     // по счётчику раскрывает слова в поповере.
@@ -780,141 +896,144 @@ struct SetupView: View {
                     }
                 }
                 .help("Двойной правый Shift отменяет исправление и заносит слово сюда")
+                hint("Двойной правый Shift отменяет исправление и добавляет слово в исключения.")
+                divider
+                settingRow("Приложения-исключения", detail: "Общий список для автозамены и истории буфера.") {
+                    Button("Настроить…") { showAppsSheet = true }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                }
             }
         }
     }
 
-    /// Компактная строка настройки: подпись, «?» с пояснением,
-    /// переключатель. Пояснение — по клику, не только по наведению:
-    /// подсказки при наведении никто не находит.
     private func settingToggle(_ title: String, isOn: Binding<Bool>,
                                help: String) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(AzaStyle.body)
-                .foregroundStyle(AzaStyle.ink)
-            HelpDot(text: help)
-            Spacer(minLength: 8)
-            Toggle(isOn: isOn) { EmptyView() }
-                .toggleStyle(AzaToggleStyle())
+        Toggle(isOn: isOn) { settingLabel(title, detail: help) }
+            .toggleStyle(AzaToggleStyle())
+            .accessibilityLabel(title)
+            .accessibilityHint(help)
+    }
+
+    private func settingLabel(_ title: String, detail: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(AzaStyle.body).foregroundStyle(AzaStyle.ink)
+            if let detail { hint(detail) }
         }
     }
 
-    /// Буфер обмена: всё про историю копирований в одном месте — клавиша,
-    /// срок хранения и обратная связь при копировании. Раньше это было
-    /// размазано между «Общее» и «Горячие клавиши».
+    private func settingRow<Control: View>(_ title: String, detail: String? = nil,
+                                          @ViewBuilder control: () -> Control) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            settingLabel(title, detail: detail)
+            Spacer(minLength: 0)
+            control().fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
     private var clipboardCard: some View {
-        card("Буфер обмена") {
-            HotKeyRecorder(title: "Клавиша", binding: $clipboardHotKey) { binding in
-                binding.save(HotKeyBinding.clipboardKey)
-                model.rebindClipboardHotKey()
-            }
-            hint("Открывает и закрывает историю буфера в острове.")
-            divider
-            HStack {
-                Text("Хранить историю")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Сколько живёт история буфера обмена: записи старше срока удаляются. Избранные (со звёздочкой) остаются навсегда.")
-                Spacer(minLength: 8)
-                Picker("", selection: $retentionDays) {
-                    Text("Неделю").tag(7)
-                    Text("Месяц").tag(30)
-                    Text("Полгода").tag(180)
+        Group {
+            card("История") {
+                settingToggle("Сохранять историю буфера", isOn: $clipboardHistoryEnabled,
+                              help: "Запоминает скопированное на этом Mac. При выключении новые записи не добавляются.")
+                divider
+                HotKeyRecorder(title: "Открыть историю", binding: $clipboardHotKey,
+                               registrationError: model.clipboardHotKeyError) { binding in
+                    binding.save(HotKeyBinding.clipboardKey,
+                                 registering: model.rebindClipboardHotKey)
                 }
-                .labelsHidden()
-                .frame(width: 110)
-            }
-            divider
-            settingToggle("Показывать «Скопировано»", isOn: $copyFlash,
-                          help: "Остров у выреза на пару секунд подтверждает, что запись попала в историю буфера.")
-            HStack {
-                Text("Звук копирования")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Короткий системный звук при каждой новой записи в истории буфера.")
-                Spacer(minLength: 8)
-                Picker("", selection: $copySound) {
-                    Text("Без звука").tag("")
-                    Text("Тик").tag("tick")
-                    Text("Бум").tag("pop")
-                    Text("Динь").tag("ding")
-                    Text("Маримба").tag("marimba")
-                }
-                .labelsHidden()
-                .frame(width: 130)
-                // Выбор сразу проигрывается — иначе звук не подобрать.
-                .onChange(of: copySound) { _, sound in
-                    IslandStore.playCopySound(sound)
-                }
-            }
-            divider
-            HStack {
-                if confirmHistoryClear {
-                    Text("Избранное останется")
-                        .font(AzaStyle.caption)
-                        .foregroundStyle(AzaStyle.warning)
-                }
-                Spacer(minLength: 8)
-                // §8.7: очистка истории с подтверждением, как сброс фраз.
-                Button(confirmHistoryClear ? "Точно очистить" : "Очистить историю") {
-                    if confirmHistoryClear {
-                        model.clearClipboardHistory()
+                divider
+                settingRow("Срок хранения", detail: "Старые записи удаляются автоматически. Избранное хранится без ограничения срока.") {
+                    Picker("Срок хранения истории", selection: $retentionDays) {
+                        Text("7 дней").tag(7)
+                        Text("30 дней").tag(30)
+                        Text("180 дней").tag(180)
                     }
-                    confirmHistoryClear.toggle()
+                    .labelsHidden()
+                    .frame(width: 118)
                 }
-                .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.warning,
-                                                   prominent: confirmHistoryClear))
             }
+            card("При копировании") {
+                settingToggle("Показывать «Скопировано»", isOn: $copyFlash,
+                              help: "Короткое подтверждение в острове, когда запись добавлена в историю.")
+                divider
+                settingRow("Звук", detail: "Проигрывается при добавлении новой записи.") {
+                    Picker("Звук копирования", selection: $copySound) {
+                        Text("Без звука").tag("")
+                        Text("Тик").tag("tick")
+                        Text("Бум").tag("pop")
+                        Text("Динь").tag("ding")
+                        Text("Маримба").tag("marimba")
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                    .onChange(of: copySound) { _, sound in IslandStore.playCopySound(sound) }
+                }
+            }
+            card("Очистка") {
+                settingRow("Очистить историю", detail: "Удалятся все записи, кроме избранного.") {
+                    Button("Очистить…", role: .destructive) { confirmHistoryClear = true }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                }
+            }
+        }
+        .alert("Очистить историю буфера?", isPresented: $confirmHistoryClear) {
+            Button("Отмена", role: .cancel) {}
+            Button("Очистить историю", role: .destructive) { model.clearClipboardHistory() }
+        } message: {
+            Text("Все записи, кроме избранного, будут удалены. Это действие нельзя отменить.")
         }
     }
 
-    /// Фразы быстрой вставки: клавиша, десять слотов и сброс до заводских.
     private var phrasesCard: some View {
-        card("Фразы") {
-            HotKeyRecorder(title: "Клавиша", binding: $phrasesHotKey) { binding in
-                binding.save(HotKeyBinding.phrasesKey)
-                model.rebindPhrasesHotKey()
+        Group {
+            card("Быстрая вставка") {
+                HotKeyRecorder(title: "Открыть фразы", binding: $phrasesHotKey,
+                               registrationError: model.phrasesHotKeyError) { binding in
+                    binding.save(HotKeyBinding.phrasesKey,
+                                 registering: model.rebindPhrasesHotKey)
+                }
+                hint("Удерживайте правую ⌥ или сочетание выше и нажмите цифру 1–0. С зажатым ⇧ вставляется вариант фразы, без ⇧ — основная фраза. Если ⇧ входит в сочетание открытия, отпустите его для основной фразы. Можно выбрать фразу кликом.")
             }
-            hint("Удерживайте правую ⌥ (или сочетание выше) — остров "
-                 + "покажет фразы. Вставляет клик или цифра 1–0, нажатая "
-                 + "не отпуская клавишу. Правое поле — необязательный "
-                 + "вариант фразы (женская форма, полное приветствие): "
-                 + "он вставляется той же цифрой с ⇧.")
-            divider
-            ForEach(0..<PhraseStore.slotCount, id: \.self) { index in
+            card("Ваши фразы") {
                 HStack(spacing: 8) {
-                    Text("\((index + 1) % 10)")
-                        .font(AzaStyle.caption.monospacedDigit())
-                        .foregroundStyle(AzaStyle.acid)
-                        .frame(width: 16)
-                    TextField("Фраза \(index + 1)",
-                              text: phraseField(index, alternate: false))
-                    TextField("⇧-вариант",
-                              text: phraseField(index, alternate: true))
+                    Text("№").frame(width: 20)
+                    Text("Основная фраза").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Вариант с ⇧").frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .textFieldStyle(.roundedBorder)
-                .font(AzaStyle.body)
-            }
-            HStack {
-                if confirmPhraseReset {
-                    Text("Ваши правки будут потеряны")
-                        .font(AzaStyle.caption)
-                        .foregroundStyle(AzaStyle.warning)
-                }
-                Spacer(minLength: 8)
-                Button(confirmPhraseReset ? "Точно сбросить" : "Сбросить до заводских") {
-                    if confirmPhraseReset {
-                        phraseStore.resetToFactory()
+                .font(AzaStyle.caption)
+                .foregroundStyle(AzaStyle.muted)
+                ForEach(0..<PhraseStore.slotCount, id: \.self) { index in
+                    HStack(spacing: 8) {
+                        Text("\((index + 1) % 10)")
+                            .font(AzaStyle.caption.monospacedDigit())
+                            .foregroundStyle(AzaStyle.muted)
+                            .frame(width: 20)
+                        TextField("Фраза \(index + 1)", text: phraseField(index, alternate: false))
+                            .accessibilityLabel("Фраза \(index + 1)")
+                        TextField("Необязательно", text: phraseField(index, alternate: true))
+                            .accessibilityLabel("Вариант фразы \(index + 1) с Shift")
                     }
-                    confirmPhraseReset.toggle()
+                    .textFieldStyle(.roundedBorder)
+                    .font(AzaStyle.body)
                 }
-                .buttonStyle(AzaCapsuleButtonStyle())
-                .disabled(!phraseStore.isCustomized)
+                divider
+                if let error = phraseStore.saveError {
+                    Text(error).foregroundStyle(.red).font(AzaStyle.caption)
+                    Button("Повторить сохранение") { phraseStore.save() }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                }
+                settingRow("Исходные фразы", detail: "Восстановить стандартный набор Aza.") {
+                    Button("Восстановить…") { confirmPhraseReset = true }
+                        .buttonStyle(AzaCapsuleButtonStyle())
+                        .disabled(!phraseStore.isCustomized && phraseStore.saveError == nil)
+                }
             }
         }
-        .onChange(of: phraseStore.isCustomized) { _, _ in
-            confirmPhraseReset = false
+        .alert("Восстановить исходные фразы?", isPresented: $confirmPhraseReset) {
+            Button("Отмена", role: .cancel) {}
+            Button("Восстановить", role: .destructive) { phraseStore.resetToFactory() }
+        } message: {
+            Text("Ваши изменения во всех десяти фразах будут потеряны. Это действие нельзя отменить.")
         }
     }
 
@@ -936,66 +1055,51 @@ struct SetupView: View {
         )
     }
 
-    /// Общее — только про само приложение: запуск, иконка, остров,
-    /// данные. Настройки конкретных фич живут в своих разделах.
     private var generalCard: some View {
-        card("Общее") {
-            HStack(spacing: 6) {
-                Text("Запускать вместе с macOS")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Aza стартует в фоне при входе в систему — намаз, автозамена и буфер работают без ручного запуска.")
-                Spacer(minLength: 8)
-                Toggle(isOn: Binding(
+        Group {
+            card("Знакомство с Aza") {
+                settingRow("Возможности и примеры", detail: "Диктовка, автозамена, буфер, фразы и намаз — попробуйте каждый шаг.") {
+                    Button(model.onboarding.completed ? "Посмотреть" : "Продолжить") {
+                        if model.onboarding.step == .finish { model.onboarding.go(to: .welcome) }
+                        model.showsOnboarding = true
+                    }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+                }
+            }
+            card("Запуск") {
+                settingToggle("Запускать вместе с macOS", isOn: Binding(
                     get: { model.loginItem == .enabled },
                     set: { model.setLoginItem($0) }
-                )) { EmptyView() }
-                .toggleStyle(AzaToggleStyle())
-            }
-            if let error = model.loginItemError {
-                warn("Не удалось: \(error)")
-            }
-            if model.loginItem == .requiresApproval {
-                hint("Подтвердите в Системных настройках → Элементы входа.")
-            }
-            divider
-            settingToggle("Иконка в строке меню", isOn: $menuBarIconVisible,
-                          help: "Уберите, если иконка не нужна: остров и горячие клавиши работают без неё, а настройки открываются из панели острова.")
-            HStack {
-                Text("Остров у выреза")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "«По событиям» — появляется на несколько секунд при копировании и перед намазом. «Всегда» — закреплён и не прячется. «Скрыт» — не показывается вовсе; панели буфера и диктовки работают как обычно.")
-                Spacer(minLength: 8)
-                Picker("", selection: $islandMode) {
-                    Text("По событиям").tag("auto")
-                    Text("Всегда").tag("pinned")
-                    Text("Скрыт").tag("hidden")
+                ), help: "Aza будет готова к работе сразу после входа в систему.")
+                if let error = model.loginItemError { warn("Не удалось: \(error)") }
+                if model.loginItem == .requiresApproval {
+                    hint("Подтвердите в Системных настройках → Элементы входа.")
                 }
-                .labelsHidden()
-                .frame(width: 130)
             }
-            divider
-            // Тот же паттерн строки, что и у остальных настроек: подпись
-            // слева, действие справа — а не безымянные кнопки в ряд.
-            HStack(spacing: 6) {
-                Text("Приложения-исключения")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Приложения, в которых Aza не исправляет текст и не записывает историю буфера.")
-                Spacer(minLength: 8)
-                Button("Настроить…") { showAppsSheet = true }
-                    .buttonStyle(AzaCapsuleButtonStyle())
-            }
-            divider
-            HStack(spacing: 6) {
-                Text("Данные на диске")
-                    .font(AzaStyle.body)
-                    .foregroundStyle(AzaStyle.ink)
-                HelpDot(text: "Что Aza хранит на диске: история буфера, модели диктовки, слова, расписания. Там же — удаление всех данных.")
-                Spacer(minLength: 8)
-                Button("Показать…") { showDataSheet = true }
-                    .buttonStyle(AzaCapsuleButtonStyle())
+            card("На экране") {
+                settingToggle("Aza в строке меню", isOn: $menuBarIconVisible,
+                              help: "Быстрый доступ к действиям и настройкам. Настройки также доступны из острова.")
+                divider
+                settingRow("Содержимое строки меню", detail: "Время ближайшего намаза обновляется автоматически для выбранного города.") {
+                    Picker("Содержимое строки меню", selection: $menuBarDisplay) {
+                        ForEach(MenuBarDisplay.allCases, id: \.self) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 155)
+                    .disabled(!menuBarIconVisible)
+                }
+                divider
+                settingRow("Показывать остров", detail: "Компактная панель у выреза экрана. История и диктовка доступны при любом режиме.") {
+                    Picker("Показывать остров", selection: $islandMode) {
+                        Text("По событиям").tag("auto")
+                        Text("Всегда").tag("pinned")
+                        Text("Скрывать").tag("hidden")
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
             }
         }
     }
@@ -1021,40 +1125,33 @@ struct SetupView: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(AzaStyle.line).frame(height: 1).padding(.vertical, 1)
+        Rectangle().fill(AzaStyle.line.opacity(0.6)).frame(height: 1)
     }
 
-    /// Строка разрешения: выданное сворачивается в одну строку, остальные
-    /// показывают объяснение и действие — место тратится там, где нужно.
+    /// Назначение разрешения видно всегда, действие — только если доступ не выдан.
     @ViewBuilder
     private func permissionRow<Actions: View>(
         _ title: String,
         symbol: String,
-        visible: Bool,
         status: Status,
         detail: String,
         denied: String? = nil,
         @ViewBuilder actions: () -> Actions
     ) -> some View {
-        // Свёрнутая группа показывает только то, что требует внимания.
-        if visible {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: symbol)
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(status == .granted ? AzaStyle.acid : AzaStyle.muted)
+                    .foregroundStyle(AzaStyle.muted)
                     .frame(width: 20, height: 20)
-                    .background(status == .granted ? AzaStyle.acidSurface : AzaStyle.control,
+                    .background(AzaStyle.control,
                                 in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 Text(title).font(AzaStyle.label).foregroundStyle(AzaStyle.ink)
                 Spacer()
                 statusBadge(status)
             }
+            hint(detail)
             if status != .granted {
-                Text(detail)
-                    .font(AzaStyle.caption)
-                    .foregroundStyle(AzaStyle.faint)
-                    .fixedSize(horizontal: false, vertical: true)
                 // Отклонённое разрешение система повторно не спрашивает —
                 // вместо бесполезной кнопки говорим, где его включить.
                 if status == .missing, let denied {
@@ -1064,18 +1161,17 @@ struct SetupView: View {
                 }
             }
         }
-        }
     }
 
     @ViewBuilder
     private func statusBadge(_ status: Status) -> some View {
         switch status {
         case .granted:
-            Text("Выдано")
+            Label("Выдано", systemImage: "checkmark")
                 .font(AzaStyle.caption)
-                .foregroundStyle(AzaStyle.acid)
+                .foregroundStyle(AzaStyle.muted)
                 .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(AzaStyle.acidSurface, in: Capsule())
+                .background(AzaStyle.control, in: Capsule())
         case .missing:
             Text("Не выдано")
                 .font(AzaStyle.caption)
@@ -1083,7 +1179,7 @@ struct SetupView: View {
                 .padding(.horizontal, 7).padding(.vertical, 2)
                 .background(AzaStyle.control, in: Capsule())
         case .unknown:
-            EmptyView()
+            Text("Не запрошено").font(AzaStyle.caption).foregroundStyle(AzaStyle.faint)
         }
     }
 
@@ -1092,15 +1188,21 @@ struct SetupView: View {
         _ title: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        // Заголовок раздела теперь над панелью (сайдбарная структура) —
-        // внутри карточки он бы дублировался.
-        VStack(alignment: .leading, spacing: 8) {
-            content()
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AzaStyle.muted)
+                .padding(.leading, 2)
+                .accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 14) {
+                content()
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AzaStyle.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(AzaStyle.line.opacity(0.65)))
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AzaStyle.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(AzaStyle.line))
     }
 
     private func hint(_ text: String) -> some View {
@@ -1126,119 +1228,107 @@ private struct DataSheet: View {
     @State private var items: [PrivacyCleanup.Item] = []
     @State private var error: String?
     @State private var confirmWipe = false
+    /// У каждого удаления — отдельное подтверждение с описанием последствий.
+    @State private var confirmModels = false
+    @State private var confirmHistory = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Данные на этом компьютере")
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Данные на этом Mac")
                 .font(AzaStyle.sectionTitle)
                 .foregroundStyle(AzaStyle.ink)
-
-            ForEach(items) { item in
-                HStack {
-                    Text(item.title)
-                        .font(AzaStyle.body)
-                        .foregroundStyle(AzaStyle.ink)
-                    Spacer(minLength: 8)
-                    Text(PrivacyCleanup.humanSize(item.bytes))
-                        .font(AzaStyle.caption.monospacedDigit())
-                        .foregroundStyle(AzaStyle.muted)
+            VStack(spacing: 12) {
+                ForEach(items) { item in
+                    HStack {
+                        Text(item.title).font(AzaStyle.body)
+                        Spacer(minLength: 8)
+                        Text(PrivacyCleanup.humanSize(item.bytes))
+                            .font(AzaStyle.caption.monospacedDigit())
+                            .foregroundStyle(AzaStyle.muted)
+                    }
                 }
             }
+            .padding(16)
+            .background(AzaStyle.card, in: RoundedRectangle(cornerRadius: 10))
 
             Text(PrivacyCleanup.outboundTraffic)
                 .font(AzaStyle.caption)
-                .foregroundStyle(AzaStyle.faint)
+                .foregroundStyle(AzaStyle.muted)
                 .fixedSize(horizontal: false, vertical: true)
-
             if let error {
                 Text("Не удалось удалить — \(error)")
                     .font(AzaStyle.caption)
                     .foregroundStyle(AzaStyle.danger)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
             Divider().overlay(AzaStyle.line)
-
-            // Удаление доступно только когда диктовка свободна: иначе она
-            // допишет файлы уже после удаления.
-            let busy = model.dictation.state != .idle
-            HStack(spacing: 8) {
-                Button("Удалить модели") {
-                    Task {
-                        model.dictation.unloadModel()
-                        // Дождаться остановки ВСЕХ загрузчиков (включая
-                        // поднятых уборкой отменённого): иначе докачка
-                        // пересоздаст только что стёртые файлы.
-                        await model.dictation.shutdownLoadersForDeletion()
-                        error = PrivacyCleanup.deleteModels()
-                        refresh()
-                    }
-                }
-                .buttonStyle(AzaCapsuleButtonStyle())
-                .disabled(busy)
-                Button("Удалить историю буфера") {
-                    Task {
-                        // Намаз здесь не глушится: удаление буфера его не
-                        // касается, а превентивный shutdown при СБОЕ удаления
-                        // оставлял приложение без напоминаний до перезапуска.
-                        error = PrivacyCleanup.deleteClipboardHistory()
-                    }
-                }
-                .buttonStyle(AzaCapsuleButtonStyle())
+            let busy = !model.dictation.canDeleteModels
+            HStack {
+                Text("Модели диктовки").font(AzaStyle.body)
                 Spacer()
-            }
-            if confirmWipe {
-                Text("Удалить историю, модели, слова, расписания и настройки? Aza закроется.")
-                    .font(AzaStyle.caption)
-                    .foregroundStyle(AzaStyle.warning)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 8) {
-                    Button("Да, удалить всё") {
-                        guard !busy else {
-                            error = "диктовка занята — попробуйте снова"
-                            confirmWipe = false
-                            return
-                        }
-                        Task {
-                            // Остановка загрузчиков — ПОСЛЕДНЯЯ, впритык к
-                            // удалению: между сбросом её защитного флага и
-                            // deleteEverything не должно быть ни одного
-                            // await, где нажатие клавиши подняло бы новую
-                            // загрузку под сносимую папку.
-                            await model.prayer.shutdownForCleanup()
-                            model.dictation.unloadModel()
-                            await model.dictation.shutdownLoadersForDeletion()
-                            error = PrivacyCleanup.deleteEverything()
-                        }
-                    }
-                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.danger, prominent: true))
-                    Button("Отмена") { confirmWipe = false }
-                        .buttonStyle(AzaCapsuleButtonStyle())
-                    Spacer()
-                }
-            } else {
-                Button("Удалить все данные Aza") { confirmWipe = true }
+                Button("Удалить модели…") { confirmModels = true }
                     .buttonStyle(AzaCapsuleButtonStyle())
                     .disabled(busy)
             }
+            HStack {
+                Text("Вся история, включая избранное").font(AzaStyle.body)
+                Spacer()
+                Button("Удалить…") { confirmHistory = true }
+                    .buttonStyle(AzaCapsuleButtonStyle())
+            }
+            HStack {
+                Text("Все данные и настройки Aza").font(AzaStyle.body)
+                Spacer()
+                Button("Удалить всё…") { confirmWipe = true }
+                    .buttonStyle(AzaCapsuleButtonStyle(foreground: AzaStyle.danger))
+                    .disabled(busy)
+            }
             if busy {
-                Text("Удаление доступно, когда диктовка не занята")
+                Text("Удаление моделей доступно после завершения диктовки.")
                     .font(AzaStyle.caption)
                     .foregroundStyle(AzaStyle.faint)
             }
-
             HStack {
                 Spacer()
                 Button("Закрыть") { dismiss() }
-                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .buttonStyle(AzaCapsuleButtonStyle())
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(18)
-        .frame(width: 420)
+        .padding(24)
+        .frame(width: 480)
+        .foregroundStyle(AzaStyle.ink)
         .background(AzaStyle.stage)
         .preferredColorScheme(.dark)
         .task { refresh() }
+        .alert("Удалить модели диктовки?", isPresented: $confirmModels) {
+            Button("Отмена", role: .cancel) {}
+            Button("Удалить модели", role: .destructive) {
+                Task {
+                    error = await model.dictation.deleteModels()
+                    refresh()
+                }
+            }
+        } message: {
+            Text("Для следующей диктовки потребуется снова скачать модель.")
+        }
+        .alert("Удалить всю историю буфера?", isPresented: $confirmHistory) {
+            Button("Отмена", role: .cancel) {}
+            Button("Удалить историю", role: .destructive) {
+                error = PrivacyCleanup.deleteClipboardHistory()
+                refresh()
+            }
+        } message: {
+            Text("Будут удалены все записи, включая избранное. Это действие нельзя отменить.")
+        }
+        .alert("Удалить все данные Aza?", isPresented: $confirmWipe) {
+            Button("Отмена", role: .cancel) {}
+            Button("Удалить всё", role: .destructive) {
+                Task { error = await model.dictation.deleteAllData(prayer: model.prayer) }
+            }
+        } message: {
+            Text("История, модели, слова, расписания и настройки будут удалены. Aza закроется. Это действие нельзя отменить.")
+        }
     }
 
     private func refresh() {
@@ -1262,26 +1352,42 @@ private struct AppExclusionsSheet: View {
                 .foregroundStyle(AzaStyle.faint)
                 .fixedSize(horizontal: false, vertical: true)
 
-            ForEach(apps, id: \.self) { bundleID in
-                HStack(spacing: 8) {
-                    Image(nsImage: Self.icon(for: bundleID))
-                        .resizable()
-                        .frame(width: 18, height: 18)
-                    Text(Self.displayName(for: bundleID))
-                        .font(AzaStyle.body)
-                        .foregroundStyle(AzaStyle.ink)
-                        .lineLimit(1)
-                        .help(bundleID)
-                    Spacer(minLength: 8)
-                    Button {
-                        apps.removeAll { $0 == bundleID }
-                        save()
-                    } label: {
-                        Image(systemName: "minus.circle")
-                    }
-                    .buttonStyle(.borderless)
+            if apps.isEmpty {
+                Label("Вы пока не добавили исключения", systemImage: "app.dashed")
+                    .font(AzaStyle.body)
                     .foregroundStyle(AzaStyle.muted)
+                    .padding(.vertical, 16)
+            } else {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(apps, id: \.self) { bundleID in
+                            HStack(spacing: 8) {
+                                Image(nsImage: Self.icon(for: bundleID))
+                                    .resizable()
+                                    .frame(width: 18, height: 18)
+                                Text(Self.displayName(for: bundleID))
+                                    .font(AzaStyle.body)
+                                    .foregroundStyle(AzaStyle.ink)
+                                    .lineLimit(1)
+                                    .help(bundleID)
+                                Spacer(minLength: 8)
+                                Button {
+                                    apps.removeAll { $0 == bundleID }
+                                    save()
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(AzaStyle.muted)
+                                .accessibilityLabel("Убрать исключение: \(Self.displayName(for: bundleID))")
+                            }
+                        }
+
+                    }
+                    .padding(12)
                 }
+                .frame(height: min(CGFloat(apps.count) * 34 + 24, 240))
+                .background(AzaStyle.card, in: RoundedRectangle(cornerRadius: 10))
             }
 
             HStack(spacing: 8) {
@@ -1304,12 +1410,12 @@ private struct AppExclusionsSheet: View {
             HStack {
                 Spacer()
                 Button("Закрыть") { dismiss() }
-                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(18)
-        .frame(width: 420)
+        .padding(24)
+        .frame(width: 480)
         .background(AzaStyle.stage)
         .preferredColorScheme(.dark)
     }
@@ -1379,6 +1485,8 @@ struct HelpDot: View {
                 .foregroundStyle(AzaStyle.faint)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Подробнее")
+        .accessibilityHint(text)
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
             Text(text)
                 .font(AzaStyle.caption)
@@ -1413,6 +1521,9 @@ private struct PrayerNotificationsSheet: View {
                 .font(AzaStyle.sectionTitle)
                 .foregroundStyle(AzaStyle.ink)
 
+            Text("Выберите режим для каждого намаза. Изменения применяются сразу.")
+                .font(AzaStyle.caption)
+                .foregroundStyle(AzaStyle.muted)
             ForEach(PrayerKind.allCases, id: \.self) { kind in
                 HStack(spacing: 8) {
                     Image(systemName: kind.symbol)
@@ -1423,7 +1534,7 @@ private struct PrayerNotificationsSheet: View {
                         .font(AzaStyle.body)
                         .foregroundStyle(AzaStyle.ink)
                     Spacer(minLength: 8)
-                    Picker("", selection: binding(for: kind)) {
+                    Picker("Уведомление: \(kind.title)", selection: binding(for: kind)) {
                         ForEach(PrayerNotifications.Mode.allCases, id: \.self) { mode in
                             Text(mode.title).tag(mode)
                         }
@@ -1440,7 +1551,7 @@ private struct PrayerNotificationsSheet: View {
                         .font(AzaStyle.body)
                         .foregroundStyle(AzaStyle.ink)
                     Spacer(minLength: 8)
-                    Picker("", selection: $reminderMinutes) {
+                    Picker("За сколько минут напоминать", selection: $reminderMinutes) {
                         ForEach([5, 10, 15, 20, 30], id: \.self) { minutes in
                             Text("\(minutes) мин").tag(minutes)
                         }
@@ -1456,14 +1567,15 @@ private struct PrayerNotificationsSheet: View {
             HStack {
                 Spacer()
                 Button("Закрыть") { dismiss() }
-                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.acid, prominent: true))
+                    .buttonStyle(AzaCapsuleButtonStyle(tint: AzaStyle.rise, prominent: true))
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(18)
-        .frame(width: 400)
+        .padding(24)
+        .frame(width: 440)
         .background(AzaStyle.stage)
         .preferredColorScheme(.dark)
+        .tint(AzaStyle.rise)
     }
 
     private func binding(for kind: PrayerKind) -> Binding<PrayerNotifications.Mode> {

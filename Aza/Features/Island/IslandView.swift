@@ -4,21 +4,18 @@ import SwiftUI
 
 struct IslandRootView: View {
     @ObservedObject var store: IslandStore
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// «Выезд» при смене режима: окно анимировать нельзя (ломает доставку
-    /// кликов — см. IslandPanelController.transition), поэтому из-за
-    /// кромки опускается сам контент внутри уже финального кадра.
-    @State private var slideOffset: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .top) {
             AzaStyle.deep
             // Едва заметный свет сверху: плоский чёрный превращается в
             // сцену с глубиной, как у настоящего Dynamic Island.
-            LinearGradient(
-                colors: [Color.white.opacity(0.055), .clear],
-                startPoint: .top, endPoint: .bottom
-            )
+            if store.mode != .idle {
+                LinearGradient(
+                    colors: [Color.white.opacity(0.055), .clear],
+                    startPoint: .top, endPoint: .bottom
+                )
+            }
 
             Group {
                 switch store.mode {
@@ -108,11 +105,10 @@ private struct NotchRow<Left: View, Right: View>: View {
     var notchWidth: CGFloat = AzaStyle.notchWidth
     var height: CGFloat = 38
     var horizontalPadding: CGFloat = 16
+    /// Воздух между текстом и кромкой выреза с каждой стороны.
+    var notchGutter: CGFloat = 14
     @ViewBuilder let left: Left
     @ViewBuilder let right: Right
-
-    /// Воздух между текстом и кромкой выреза с каждой стороны.
-    private let notchGutter: CGFloat = 14
 
     var body: some View {
         HStack(spacing: 0) {
@@ -127,6 +123,9 @@ private struct NotchRow<Left: View, Right: View>: View {
 
 private struct IdleIslandView: View {
     @ObservedObject var store: IslandStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var settled = false
+    @State private var accentPulse = 0
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -135,77 +134,112 @@ private struct IdleIslandView: View {
                 secondsRemaining: next?.date.timeIntervalSince(context.date) ?? .infinity
             )
             let soon = phase != .hidden
-            let today = store.todayPrayers()
-            // Намаз, наступивший в последние две минуты: «Сейчас Фаджр»
-            // вместо обратного отсчёта до следующего.
-            let current = today.last {
-                $0.date <= context.date && context.date.timeIntervalSince($0.date) < 120
-            }
+            let current = PrayerOccurrence.current(in: store.todayPrayers(), at: context.date)
+            let copy = current == nil ? store.recentCopy : nil
+            let accent = current != nil || soon ? AzaStyle.warning
+                : copy != nil ? AzaStyle.rise : AzaStyle.acid
             NotchRow(reservesNotch: store.hasNotch, notchWidth: store.notchWidth,
                      height: store.hasNotch ? store.notchHeight : 40,
-                     horizontalPadding: 16) {
-                HStack(spacing: 8) {
-                    if let copy = store.recentCopy {
-                        badge {
-                            if let icon = copy.sourceAppIcon {
-                                Image(nsImage: icon).resizable().scaledToFit()
-                                    .frame(width: 15, height: 15)
-                            } else {
-                                Image(systemName: copy.islandKind.symbol)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(AzaStyle.acid)
-                            }
+                     horizontalPadding: 12, notchGutter: 8) {
+                HStack(spacing: 6) {
+                    if let copy {
+                        if let icon = copy.sourceAppIcon {
+                            Image(nsImage: icon).resizable().scaledToFit()
+                                .frame(width: 14, height: 14)
+                        } else {
+                            Image(systemName: copy.islandKind.symbol)
+                                .frame(width: 14, height: 14)
+                                .foregroundStyle(AzaStyle.rise)
                         }
-                        titles(caption: "Скопировано",
-                               title: copy.islandKind.title, active: true)
+                        Text("Буфер")
                     } else {
-                        badge {
-                            Image(systemName: (current ?? next)?.kind.symbol
-                                              ?? "clock.badge.questionmark")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(next == nil && current == nil
-                                                 ? AzaStyle.muted : AzaStyle.acid)
-                        }
-                        titles(caption: current != nil ? "Сейчас" : soon ? "Скоро" : "Следующий",
-                               title: (current ?? next)?.kind.title ?? "Нет данных",
-                               active: next != nil || current != nil)
+                        Image(systemName: (current ?? next)?.kind.symbol
+                                          ?? "clock.badge.questionmark")
+                            .frame(width: 14, height: 14)
+                            .foregroundStyle(next == nil && current == nil
+                                             ? AzaStyle.muted : accent)
+                        Text((current ?? next)?.kind.title ?? "Намаз")
                     }
                 }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AzaStyle.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.9)
             } right: {
-                // Во время вспышки «Скопировано» правая сторона пустует:
-                // намаз и копирование — разные события, вместе они шумят.
-                if store.recentCopy == nil, next != nil {
-                    // Последние минуты: счётчик теплеет и мягко пульсирует в
-                    // такт секундам таймлайна.
-                    let pulseDim = soon && Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
-                    // Счётчик — акцентом, абсолютное время — мелким
-                    // приглушённым: разная роль читается разным весом.
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        // Пока слева «Сейчас Фаджр», счётчик уже считает до
-                        // СЛЕДУЮЩЕГО события — без имени он читается как
-                        // время до текущего намаза.
-                        if current != nil, let next {
-                            Text(next.kind.title)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(AzaStyle.muted)
-                        }
-                        Text("через " + countdownText(for: phase, next: next, now: context.date))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
-                            .foregroundStyle(soon ? AzaStyle.warning : AzaStyle.acid)
-                            .opacity(pulseDim ? 0.55 : 1)
-                            .animation(.easeInOut(duration: 1), value: pulseDim)
-                            .contentTransition(.numericText(countsDown: true))
-                        Text(next.map { "в \($0.time)" } ?? "")
-                            .font(.system(size: 9, weight: .semibold))
+                VStack(alignment: .trailing, spacing: 0) {
+                    if let current {
+                        Text("Сейчас")
+                            .foregroundStyle(accent)
+                        Text("в " + current.time)
+                            .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(AzaStyle.faint)
+                    } else if let copy {
+                        Text("Скопировано")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(AzaStyle.rise)
+                        Text(copy.islandKind.title)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(AzaStyle.faint)
+                    } else if let next {
+                        Text(countdownText(for: phase, next: next, now: context.date))
+                            .foregroundStyle(soon ? AzaStyle.warning : AzaStyle.acidSoft)
+                            .animation(reduceMotion ? nil : .easeOut(duration: 0.3),
+                                       value: countdownText(for: phase, next: next, now: context.date))
+                            .contentTransition(.numericText(countsDown: true))
+                        Text("в " + next.time)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(AzaStyle.faint)
+                    } else {
+                        Text("Нет данных")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(AzaStyle.muted)
                     }
-                    .lineLimit(1)
-                    // «Зухр через 7ч 15м в 12:30» шире крыла —
-                    // при нехватке места строка равномерно ужимается.
-                    .minimumScaleFactor(0.7)
+                }
+                .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                current.map { "\($0.kind.title), время намаза, в \($0.time)" }
+                ?? copy.map { "Скопировано: \($0.islandKind.title)" }
+                ?? next.map {
+                    "\($0.kind.title), через \(countdownText(for: phase, next: $0, now: context.date)), в \($0.time)"
+                }
+                ?? "Намаз: нет данных"
+            )
+            .opacity(reduceMotion || settled ? 1 : 0)
+            .offset(y: reduceMotion || settled ? 0 : -5)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.45), value: settled)
+            .background {
+                // Два конечных импульса по событию; секундный таймер их
+                // не перезапускает. Двигается только свет, текст стабилен.
+                if !reduceMotion {
+                    LinearGradient(colors: [accent, .clear, accent.opacity(0.5)],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .keyframeAnimator(initialValue: 0.0, trigger: accentPulse) { glow, value in
+                            glow.opacity(value * (current == nil ? 0.10 : 0.22))
+                        } keyframes: { _ in
+                            CubicKeyframe(1.0, duration: 0.45)
+                            CubicKeyframe(0.15, duration: 0.45)
+                            CubicKeyframe(0.65, duration: 0.4)
+                            CubicKeyframe(0.0, duration: 0.85)
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                 }
             }
-            .animation(.easeInOut(duration: 0.25), value: store.recentCopy?.id)
+            .onChange(of: current?.date, initial: true) { _, date in
+                if date != nil { accentPulse += 1 }
+            }
+            .onChange(of: store.recentCopy?.createdAt) { _, _ in
+                if current == nil { accentPulse += 1 }
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: copy?.id)
+        }
+        .onChange(of: store.isIslandVisible, initial: true) { _, visible in
+            settled = visible
+            if visible { accentPulse += 1 }
         }
         .contentShape(Rectangle())
         // Тап открывает home через CGEventTap в IslandPanelController, а
@@ -213,30 +247,6 @@ private struct IdleIslandView: View {
         // который смена режима (.id(mode)) убивала посреди клика вместе
         // с вью — после этого AppKit переставал доставлять окну клики.
         .accessibilityHint("Открыть Aza")
-    }
-
-    /// Круглая подложка значка слева — общая для намаза и вспышки копирования.
-    private func badge(@ViewBuilder content: () -> some View) -> some View {
-        content()
-            .frame(width: 24, height: 24)
-            .background(AzaStyle.acidSurface, in: Circle())
-    }
-
-    private func titles(caption: String, title: String, active: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(caption)
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle(AzaStyle.muted)
-                .textCase(.uppercase)
-                .tracking(0.5)
-                .lineLimit(1)
-                .fixedSize()
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(active ? AzaStyle.ink : AzaStyle.muted)
-                .lineLimit(1)
-                .fixedSize()
-        }
     }
 
     private func countdownText(
@@ -257,6 +267,7 @@ private struct IdleIslandView: View {
 
 private struct HomeIslandView: View {
     @ObservedObject var store: IslandStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var locator = CityLocator()
     /// Календарь выбранного города: экран показывает ЕГО время (времена
     /// намаза уже так отрисованы), поэтому «завтра», шкала суток и оттенок
@@ -271,8 +282,7 @@ private struct HomeIslandView: View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let next = store.nextPrayerOccurrence(after: context.date)
             let prayers = store.todayPrayers()
-            // Последние минуты — те же фазы, что и в компактном режиме:
-            // счётчик и шкала теплеют, счётчик мягко пульсирует.
+            // Последние минуты — тот же тёплый акцент, что и в компактном режиме.
             let phase = PrayerCountdownPhase.make(
                 secondsRemaining: next?.date.timeIntervalSince(context.date) ?? .infinity
             )
@@ -298,12 +308,11 @@ private struct HomeIslandView: View {
                             .foregroundStyle(next == nil ? AzaStyle.muted : AzaStyle.ink)
                     }
                 } right: {
-                    let pulseDim = soon && Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
                     Text(next?.countdown(from: context.date) ?? "—")
                         .font(.system(size: 13, weight: .medium, design: .rounded).monospacedDigit())
                         .foregroundStyle(soon ? AzaStyle.warning : AzaStyle.acid)
-                        .opacity(pulseDim ? 0.55 : 1)
-                        .animation(.easeInOut(duration: 1), value: pulseDim)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.3),
+                                   value: next?.countdown(from: context.date))
                         .contentTransition(.numericText(countsDown: true))
                 }
 
@@ -465,10 +474,7 @@ private struct HomeIslandView: View {
                             // Город кликабелен: настройки открываются сразу
                             // на разделе «Намаз» с выбором города.
                             Button {
-                                store.dismissIsland()
-                                store.openSetup()
-                                NotificationCenter.default.post(
-                                    name: .azaShowPrayerSettings, object: nil)
+                                store.openSetup(showing: .azaShowPrayerSettings)
                             } label: {
                                 HStack(spacing: 5) {
                                     Text(store.prayer.selectedCity?.name ?? "Город не выбран")
@@ -493,11 +499,6 @@ private struct HomeIslandView: View {
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(AzaStyle.faint)
                                 .padding(.top, 6)
-                        case .denied:
-                            Text("Геолокация запрещена — выберите вручную")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(AzaStyle.warning)
-                                .padding(.top, 6)
                         case let .failed(message):
                             Text(message)
                                 .font(.system(size: 10, weight: .medium))
@@ -513,7 +514,7 @@ private struct HomeIslandView: View {
                         // приходит из другого источника.
                         Text(store.prayerSourceLabel)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(AzaStyle.acid)
+                            .foregroundStyle(AzaStyle.violet)
                             .lineLimit(1)
                             .padding(.horizontal, 9)
                             .padding(.vertical, 4)
@@ -527,15 +528,15 @@ private struct HomeIslandView: View {
                             // остров сам перейдёт в режим диктовки по
                             // состоянию контроллера. Раньше кнопка лишь
                             // переключала вид: волна и REC без записи.
-                            ActionButton("Диктовка", symbol: "mic",
+                            ActionButton("Диктовка", symbol: "mic", tint: AzaStyle.danger,
                                          hovering: store.homeHoverZone == .dictation) {
                                 azaDebugLog("Aza: BUTTON Диктовка fired")
                                 store.dictation.startLatchedFromUI()
                             }
-                            ActionButton("Буфер", symbol: "clipboard",
+                            ActionButton("Буфер", symbol: "clipboard", tint: AzaStyle.rise,
                                          hovering: store.homeHoverZone == .clipboard) {
                                 azaDebugLog("Aza: BUTTON Буфер fired")
-                                store.mode = .clipboard
+                                store.show(.clipboard)
                             }
                             ActionButton("Настройки", symbol: "gearshape",
                                          hovering: store.homeHoverZone == .settings) {
@@ -662,10 +663,10 @@ private struct PrayerTimeCell: View {
                 .font(.system(size: 11.5, weight: .semibold, design: .rounded).monospacedDigit())
         }
         // Прошедшее гаснет и теряет подложку, будущее — мягкие чипы,
-        // следующий — единственное залитое акцентом пятно: строка читается
+        // следующий — светлый текст на тонированной подложке: строка читается
         // как таймлайн «где мы в сутках» без единой рамки. Под курсором
         // чип оживает и в подсказке говорит, сколько до него осталось.
-        .foregroundStyle(isNext ? Color.black
+        .foregroundStyle(isNext ? AzaStyle.acidSoft
                          : isPast ? AzaStyle.muted.opacity(hovering ? 1 : 0.6)
                          : AzaStyle.ink)
         .padding(.vertical, 8)
@@ -676,7 +677,9 @@ private struct PrayerTimeCell: View {
                       : hovering ? AzaStyle.control : AzaStyle.panel)
             if isNext {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(AzaStyle.acid)
+                    .fill(AzaStyle.acidSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(AzaStyle.acid.opacity(0.4)))
                     .matchedGeometryEffect(id: "nextPill", in: pillNS)
             }
         }
@@ -701,21 +704,22 @@ private struct DictationIslandView: View {
     /// Отпустили клавишу — запись кончилась, идёт распознавание: волна и
     /// кнопка стоп в этот момент врут (стоп вообще не работает вне записи).
     private var isTranscribing: Bool { store.dictation.state == .transcribing }
+    private var isPreparing: Bool { store.dictation.state == .preparingRecording }
 
     var body: some View {
         NotchRow(reservesNotch: store.hasNotch, notchWidth: store.notchWidth,
                  height: store.hasNotch ? store.notchHeight : 40,
                  horizontalPadding: 16) {
             HStack(spacing: 14) {
-                if isTranscribing {
+                if isTranscribing || isPreparing {
                     ProgressView()
                         .controlSize(.small)
-                        .tint(AzaStyle.acid)
+                        .tint(AzaStyle.danger)
                     // Запись кончилась раньше, чем поднялась модель:
                     // честно говорим, чего ждём; сообщение уходит само,
                     // когда модель загрузится и начнётся распознавание.
-                    Text(store.dictation.isAwaitingModel
-                         ? "Загружаю модель распознавания…" : "Распознаю…")
+                    Text(isPreparing ? "Готовлю запись…" : (store.dictation.isAwaitingModel
+                         ? "Загружаю модель распознавания…" : "Распознаю…"))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(AzaStyle.ink)
                 } else {
@@ -733,7 +737,7 @@ private struct DictationIslandView: View {
                     Text(store.dictation.activeLanguage.uppercased())
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(AzaStyle.muted)
-                    Text(isTranscribing ? "" : store.dictation.elapsedText)
+                    Text(isTranscribing || isPreparing ? "" : store.dictation.elapsedText)
                         .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
                         .foregroundStyle(AzaStyle.ink)
                         .lineLimit(1)
@@ -743,9 +747,10 @@ private struct DictationIslandView: View {
                 if !isTranscribing, store.dictation.isLatched {
                     Button { store.dictation.stopFromUI() } label: {
                         Image(systemName: "square")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .frame(width: 20, height: 20)
-                            .foregroundStyle(AzaStyle.ink)
+                            .foregroundStyle(AzaStyle.deep)
+                            .background(AzaStyle.danger, in: Circle())
                     }
                     .buttonStyle(.plain)
                 } else {
@@ -808,7 +813,7 @@ private struct ClipboardIslandView: View {
     /// Клавиатура (стрелки, Delete, Esc) работает только пока контейнер
     /// в фокусе — держим его там при открытии и после клика по карточке.
     @FocusState private var listFocused: Bool
-    /// Общее пространство изумрудной таблетки «История/Избранное»: при
+    /// Общее пространство синей таблетки «История/Избранное»: при
     /// переключении она перетекает, как у чипов намаза в большом острове.
     @Namespace private var sectionNS
 
@@ -846,6 +851,13 @@ private struct ClipboardIslandView: View {
                         .textFieldStyle(.plain)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(AzaStyle.ink)
+                        // Из поля: Enter вставляет выделенную карточку,
+                        // Esc — тот же каскад, что у списка (иначе из
+                        // поиска остров было не закрыть с клавиатуры).
+                        .onSubmit { if let id = store.selectedID { store.reuse(id) } }
+                        .onExitCommand {
+                            if !query.isEmpty { query = "" } else { store.show(.idle) }
+                        }
                 }
                 .padding(.horizontal, 16)
                 .frame(width: 250, height: 34)
@@ -867,8 +879,10 @@ private struct ClipboardIslandView: View {
                                     listFocused = true
                                 },
                                 reuse: { store.reuse(entry.id) },
-                                favorite: { store.toggleFavorite(entry.id) },
-                                delete: { store.delete(entry.id) }
+                                // Кнопка-звезда и контекстное меню уводят
+                                // фокус с контейнера — стрелки/Delete глохли.
+                                favorite: { store.toggleFavorite(entry.id); listFocused = true },
+                                delete: { store.delete(entry.id); listFocused = true }
                             )
                             .id(entry.id)
                         }
@@ -878,6 +892,17 @@ private struct ClipboardIslandView: View {
                     .padding(.bottom, 23)
                 }
                 .scrollIndicators(.hidden)
+                .overlay {
+                    // Пустой раздел без подписи читался как «сломалось».
+                    if visibleEntries.isEmpty {
+                        Text(!query.isEmpty ? "Ничего не найдено"
+                             : store.section == .favorites ? "Избранного пока нет"
+                             : store.section == .transcripts ? "Транскриптов пока нет"
+                             : "История пуста")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(AzaStyle.muted)
+                    }
+                }
                 .onChange(of: store.selectedID) { _, id in
                     guard let id else { return }
                     withAnimation(.snappy) { proxy.scrollTo(id, anchor: .center) }
@@ -888,10 +913,12 @@ private struct ClipboardIslandView: View {
         .focusEffectDisabled()
         .focused($listFocused)
         .onAppear {
-            listFocused = true
             // При открытии сразу выделена последняя скопированная запись:
             // Enter вставляет её без лишних движений (список — от новых).
             store.selectedID = visibleEntries.first?.id
+            // Фокус — после того как контроллер сделал панель ключевой и
+            // назначил first responder (в этом же витке цикла, но позже).
+            DispatchQueue.main.async { listFocused = true }
         }
         .onKeyPress { press in
             // ⌘A + Delete — массовое удаление найденного (спец. §8.7).
@@ -931,7 +958,7 @@ private struct ClipboardIslandView: View {
                 if confirmMassDelete { confirmMassDelete = false }
                 else if !selectedIDs.isEmpty { selectedIDs = [] }
                 else if !query.isEmpty { query = "" }
-                else { store.mode = .idle }
+                else { store.show(.idle) }
                 return .handled
             default:
                 return .ignored
@@ -988,7 +1015,7 @@ private struct ClipboardIslandView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Text("Удалено")
-                        Text("Отменить").foregroundStyle(AzaStyle.acid)
+                        Text("Отменить").foregroundStyle(AzaStyle.rise)
                     }
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(AzaStyle.muted)
@@ -1029,11 +1056,9 @@ private struct ClipboardCard: View {
 
     private var accent: Color {
         switch entry.islandKind {
-        case .text: AzaStyle.acid
-        case .link: AzaStyle.rise
+        case .text, .link, .transcript: AzaStyle.rise
         case .image: AzaStyle.ink
         case .files: AzaStyle.muted
-        case .transcript: AzaStyle.acid
         }
     }
 
@@ -1044,6 +1069,7 @@ private struct ClipboardCard: View {
                 Text(entry.islandKind.title).lineLimit(1)
                 Spacer()
                 Text(ElapsedTime.short(since: entry.createdAt))
+                    .foregroundStyle(AzaStyle.muted)
                     .monospacedDigit()
                     .lineLimit(1)
                     .fixedSize()
@@ -1108,13 +1134,13 @@ private struct ClipboardCard: View {
         .overlay {
             if selected {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(AzaStyle.acidSoft, lineWidth: 2)
+                    .stroke(AzaStyle.rise, lineWidth: 2)
             } else {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(AzaStyle.glassEdge)
             }
         }
-        .shadow(color: selected ? AzaStyle.acid.opacity(0.2)
+        .shadow(color: selected ? AzaStyle.rise.opacity(0.2)
                 : hovering ? Color.black.opacity(0.45) : .clear,
                 radius: selected ? 18 : 10, y: 6)
         // Под курсором карточка чуть приподнимается — тот же жест, что у
@@ -1167,9 +1193,9 @@ private struct PhrasesIslandView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "text.bubble.fill")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(AzaStyle.acid)
+                        .foregroundStyle(AzaStyle.violet)
                         .frame(width: 24, height: 24)
-                        .background(AzaStyle.acidSurface, in: Circle())
+                        .background(AzaStyle.violet.opacity(0.12), in: Circle())
                     VStack(alignment: .leading, spacing: 0) {
                         Text("Быстрая вставка")
                             .font(.system(size: 8, weight: .semibold))
@@ -1193,10 +1219,7 @@ private struct PhrasesIslandView: View {
                     .lineLimit(1)
                     .fixedSize()
                     EditPhrasesButton {
-                        store.dismissIsland()
-                        store.openSetup()
-                        NotificationCenter.default.post(
-                            name: .azaShowPhraseSettings, object: nil)
+                        store.openSetup(showing: .azaShowPhraseSettings)
                     }
                 }
             }
@@ -1263,10 +1286,10 @@ private struct PhraseRow: View {
                     Text("\(number)")
                         .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
                         .foregroundStyle(hovering && !isEmpty && !altActive
-                                         ? Color.black : AzaStyle.acid)
+                                         ? Color.black : AzaStyle.violet)
                         .frame(width: 22, height: 22)
                         .background(hovering && !isEmpty && !altActive
-                                    ? AzaStyle.acid : AzaStyle.acidSurface,
+                                    ? AzaStyle.violet : AzaStyle.violet.opacity(0.12),
                                     in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                     Text(isEmpty ? "—" : main)
                         .font(.system(size: 13, weight: .medium))
@@ -1297,11 +1320,11 @@ private struct PhraseRow: View {
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
                     .foregroundStyle(altActive ? Color.black : AzaStyle.muted)
-                    .background(altActive ? AnyShapeStyle(AzaStyle.acid)
+                    .background(altActive ? AnyShapeStyle(AzaStyle.violet)
                                           : AnyShapeStyle(AzaStyle.glass),
                                 in: Capsule())
                     .overlay(Capsule().stroke(altActive
-                             ? AnyShapeStyle(AzaStyle.acidSoft)
+                             ? AnyShapeStyle(AzaStyle.violet)
                              : AnyShapeStyle(AzaStyle.glassEdge)))
                     .contentShape(Capsule())
                 }
@@ -1318,7 +1341,7 @@ private struct PhraseRow: View {
             if hovering, !isEmpty {
                 Image(systemName: "arrow.turn.down.left")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(AzaStyle.acid)
+                    .foregroundStyle(AzaStyle.violet)
             }
         }
         .padding(.horizontal, 12)
@@ -1327,7 +1350,7 @@ private struct PhraseRow: View {
                     in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .stroke(hovering && !isEmpty && !altActive
-                    ? AnyShapeStyle(AzaStyle.acidSoft)
+                    ? AnyShapeStyle(AzaStyle.violet)
                     : AnyShapeStyle(AzaStyle.glassEdge)))
         // Под курсором ряд чуть приподнимается — тот же жест, что у
         // карточек буфера и чипов намаза.
@@ -1371,20 +1394,21 @@ private struct EditPhrasesButton: View {
     }
 }
 
-/// Кнопки действий — один нейтральный стиль на всех: зелёный в этом окне
-/// зарезервирован за намазом, а разноцветные круги (синий, зелёный, серый)
-/// спорили друг с другом. Акцент появляется под курсором.
+/// Цвет действия виден и без наведения: запись — красная, буфер — синий.
 private struct ActionButton: View {
     let title: String
     let symbol: String
+    let tint: Color
     // Hover приходит снаружи (IslandPanelController опрашивает курсор):
     // .onHover в расширенной панели мёртв — mouseMoved до неё не доходит.
     let hovering: Bool
     let action: () -> Void
 
-    init(_ title: String, symbol: String, hovering: Bool, action: @escaping () -> Void) {
+    init(_ title: String, symbol: String, tint: Color = AzaStyle.muted,
+         hovering: Bool, action: @escaping () -> Void) {
         self.title = title
         self.symbol = symbol
+        self.tint = tint
         self.hovering = hovering
         self.action = action
     }
@@ -1395,8 +1419,9 @@ private struct ActionButton: View {
                 Image(systemName: symbol)
                     .font(.system(size: 13, weight: .semibold))
                     .frame(width: 34, height: 34)
-                    .foregroundStyle(hovering ? AzaStyle.acid : AzaStyle.ink)
-                    .background(hovering ? AzaStyle.acidSurface : AzaStyle.control, in: Circle())
+                    .foregroundStyle(tint)
+                    .background(tint.opacity(hovering ? 0.18 : 0.12), in: Circle())
+                    .overlay(Circle().stroke(tint.opacity(hovering ? 0.45 : 0.25)))
                 Text(title)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(hovering ? AzaStyle.ink : AzaStyle.muted)
@@ -1447,7 +1472,7 @@ private struct SectionButton: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(active ? Color.black
+                .foregroundStyle(active ? AzaStyle.rise
                                  : hovering ? AzaStyle.ink : AzaStyle.muted)
                 .frame(width: width, height: 32)
                 .contentShape(Rectangle())
@@ -1455,7 +1480,8 @@ private struct SectionButton: View {
             .buttonStyle(.plain)
             .background {
                 if active {
-                    Capsule().fill(AzaStyle.acid)
+                    Capsule().fill(AzaStyle.rise.opacity(0.18))
+                        .overlay(Capsule().stroke(AzaStyle.rise.opacity(0.45)))
                         .matchedGeometryEffect(id: "sectionPill", in: pillNS)
                 } else {
                     Capsule().fill(hovering ? AzaStyle.control : AzaStyle.panel)
@@ -1466,4 +1492,3 @@ private struct SectionButton: View {
             .animation(.easeOut(duration: AzaMotion.micro), value: hovering)
     }
 }
-

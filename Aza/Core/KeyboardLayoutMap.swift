@@ -72,7 +72,7 @@ enum KeyboardLayoutMap {
                 forName: NSNotification.Name(name as String),
                 object: nil, queue: .main
             ) { _ in
-                MainActor.assumeIsolated { invalidate() }
+                azaAssumeMainUnchecked { invalidate() }
             }
         }
     }

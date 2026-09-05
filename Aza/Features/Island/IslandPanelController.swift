@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Combine
 import SwiftUI
 
@@ -19,13 +20,30 @@ final class IslandPanel: NSPanel {
     var wantsKey = false
     override var canBecomeKey: Bool { wantsKey }
     override var canBecomeMain: Bool { false }
+    /// Контекстное меню карточек (.contextMenu): hosting-вью отдаёт NSMenu
+    /// через menu(for:), но по цепочке ответчиков от вложенного
+    /// HostingScrollView правый клик до показа меню не доходит (проверено
+    /// 04.09: menu(for:) у hit-вью nil, tracking NSMenu не начинается).
+    /// Показываем сами штатным popUpContextMenu.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .rightMouseDown, let host = contentView,
+           let menu = host.menu(for: event) {
+            azaDebugLog("Aza: panel context menu \(menu.items.map(\.title))")
+            NSMenu.popUpContextMenu(menu, with: event, for: host)
+            return
+        }
+        super.sendEvent(event)
+    }
 }
 
 /// Панель неактивирующая, поэтому приложение при клике не активируется и
 /// КАЖДЫЙ клик для macOS — «первый по неактивному приложению»: без этого
 /// override система не доносит mouseDown до вью, и тапы по острову
 /// (открыть большой режим, кнопки внутри) не срабатывают вовсе.
-private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+/// Не дженерик намеренно: generic-наследник NSHostingView роняет
+/// swift-frontend 6.3.3 (SIGSEGV в SILPerformanceInliner на deinit)
+/// при сборке Release. Единственный Content всё равно IslandRootView.
+private final class FirstMouseHostingView: NSHostingView<IslandRootView> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -51,6 +69,10 @@ final class IslandPanelController {
     /// по карточке буфера (вставка) не распознаётся SwiftUI.
     private var lastForwardDown: (time: TimeInterval, at: NSPoint) = (0, .zero)
     private var forwardClickCount = 1
+    /// Сквозной номер синтезированных событий: у реальной мыши он растёт,
+    /// и SwiftUI по нему различает жесты.
+    private var syntheticEventNumber = 1
+    private func nextEventNumber() -> Int { syntheticEventNumber += 1; return syntheticEventNumber }
     /// Логический фокус для клавиатуры: приложение никогда не активируется
     /// (активирующий клик роняет тот же AppKit, что и все события), поэтому
     /// NSApp.isActive/keyWindow — вечно пустые. Фокус ведёт tap: окно
@@ -82,6 +104,14 @@ final class IslandPanelController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isMovable = false
         panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        // Вставка текста вызывает NSApp.hide(). Островом управляет своя
+        // видимость: системное скрытие оставляло его невидимым при
+        // isIslandVisible == true, и следующий режим не показывал окно.
+        panel.canHide = false
+        // Иначе sendEvent(mouseMoved) — пересланный из монитора для
+        // hover карточек — окно роняет, не доходя до tracking-областей.
+        panel.acceptsMouseMovedEvents = true
         let hosting = FirstMouseHostingView(rootView: IslandRootView(store: store))
         // SwiftUI не управляет кадром окна: его подгонка размера дралась
         // с анимацией slideIn и оставляла модельный кадр за кромкой.
@@ -119,6 +149,22 @@ final class IslandPanelController {
                 self.panel.wantsKey = (mode == .clipboard)
                 if mode == .clipboard {
                     self.panel.makeKeyAndOrderFront(nil)
+                    // Без first responder фокус SwiftUI (.focused в
+                    // onAppear) не берётся, и до первого клика по карточке
+                    // стрелки/Enter/Esc молчали — Enter «вставить
+                    // последнее» сразу после хоткея не работал.
+                    self.panel.makeFirstResponder(self.panel.contentView)
+                    // Из окна значка меню-бара панель key не получает: то
+                    // окно ещё key и закрывается позже. Повтор после его
+                    // ухода — иначе Esc/стрелки/Enter в буфере мертвы.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) { [weak self] in
+                        guard let self, self.store.mode == .clipboard,
+                              !SystemScreenCapture.isSelecting,
+                              !self.panel.isKeyWindow else { return }
+                        azaDebugLog("Aza: clipboard panel re-key (delayed)")
+                        self.panel.makeKeyAndOrderFront(nil)
+                        self.panel.makeFirstResponder(self.panel.contentView)
+                    }
                 } else if self.panel.isKeyWindow {
                     self.panel.resignKey()
                 }
@@ -143,6 +189,9 @@ final class IslandPanelController {
                     self.store.revealCompactIsland()
                 }
                 self.store.updateIslandPresence()
+                // На первом запуске Accessibility ещё нет. После выдачи
+                // права пробуем снова; уже установленный tap не дублируем.
+                if self.clickTap == nil, AXIsProcessTrusted() { self.installClickTap() }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -241,6 +290,7 @@ final class IslandPanelController {
         let target = panel.frame
         guard target.size != oldSize else { return }
         let old = panel
+        if old.isKeyWindow { old.resignKey() }
         let fresh = Self.makePanel(frame: target, store: store)
         panel = fresh
         if old.isVisible {
@@ -259,7 +309,7 @@ final class IslandPanelController {
             store.notchWidth = right.minX - left.maxX
             store.notchHeight = screen.safeAreaInsets.top
         }
-        var size = mode.size(hasNotch: hasNotch)
+        var size = mode.size(hasNotch: hasNotch, notchWidth: store.notchWidth)
         // Компактная плашка и диктовка — ровно высота выреза, ни пикселем толще.
         if mode == .idle || mode == .dictation, hasNotch {
             size.height = screen.safeAreaInsets.top
@@ -284,6 +334,29 @@ final class IslandPanelController {
             return event
         }
         installClickTap()
+        installDebugHooks()
+    }
+
+    /// Живые тесты (память aza-island-clicks): настройки открываются без
+    /// клика по острову — `notify aza.debug.openSetup` из scratchpad, —
+    /// чтобы стенд не останавливал диктовку владельца. Только DEBUG.
+    private func installDebugHooks() {
+        #if DEBUG
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("aza.debug.openSetup"), object: nil, queue: .main
+        ) { [weak self] _ in
+            azaDebugLog("Aza: debug openSetup")
+            self?.store.openSetup()
+        }
+        // Диагностика меню (память aza-island-clicks): открылось ли,
+        // дошёл ли клик до петли, выбран ли пункт.
+        for name in [NSMenu.didBeginTrackingNotification, NSMenu.didEndTrackingNotification,
+                     NSMenu.didSendActionNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { n in
+                azaDebugLog("Aza: NSMenu \(n.name.rawValue) \((n.object as? NSMenu)?.items.map(\.title) ?? [])")
+            }
+        }
+        #endif
     }
 
     /// Открытие/закрытие острова кликом ловит CGEventTap, а не
@@ -292,10 +365,12 @@ final class IslandPanelController {
     /// глобальный монитор не видит кликов по собственным окнам, а жест в
     /// неключевой неактивирующей панели хрупок (first mouse).
     private func installClickTap() {
+        guard clickTap == nil, AXIsProcessTrusted() else { return }
         let mask: CGEventMask = (1 << CGEventType.leftMouseDown.rawValue)
             | (1 << CGEventType.leftMouseUp.rawValue)
             | (1 << CGEventType.leftMouseDragged.rawValue)
             | (1 << CGEventType.rightMouseDown.rawValue)
+            | (1 << CGEventType.rightMouseUp.rawValue)
             | (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.keyUp.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
@@ -315,6 +390,16 @@ final class IslandPanelController {
                 guard let info else { return Unmanaged.passUnretained(event) }
                 let controller = Unmanaged<IslandPanelController>
                     .fromOpaque(info).takeUnretainedValue()
+                // Снимок области — системный модальный жест. Пропускаем
+                // down/drag/up, Space, Esc и модификаторы ДО всех наших
+                // меню, хоткеев и попыток вернуть панели key-статус.
+                if azaAssumeMainUnchecked({ SystemScreenCapture.isSelecting }) {
+                    azaAssumeMainUnchecked {
+                        controller.forwardingDrag = false
+                        controller.forwardTarget = nil
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
                 // CG-координаты — от верхнего левого угла главного экрана;
                 // Cocoa — от нижнего левого. Переворот по главному экрану.
                 // Источник tap'a добавлен в main runloop — колбэк на
@@ -325,13 +410,17 @@ final class IslandPanelController {
                 // пересылка в буфер/фразы/настройки.
                 if type == .keyDown || type == .keyUp || type == .scrollWheel
                     || type == .flagsChanged {
+                    // Своя вставка должна дойти до поля, минуя хоткеи и UI Aza.
+                    guard event.getIntegerValueField(.eventSourceUserData) != TextInsertion.syntheticEventMarker
+                    else { return Unmanaged.passUnretained(event) }
                     let handled = azaAssumeMainUnchecked { () -> Bool in
                         if type == .keyDown || type == .keyUp {
                             let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
                             let mods = HotKeyBinding.carbonModifiers(fromCG: event.flags)
                             if HotKeyController.handleTapKey(
                                 keyCode: keyCode, carbonModifiers: mods,
-                                isDown: type == .keyDown
+                                isDown: type == .keyDown,
+                                sourceUserData: event.getIntegerValueField(.eventSourceUserData)
                             ) { return true }
                         }
                         return controller.forwardKeyOrScrollIfNeeded(event, type: type)
@@ -374,7 +463,22 @@ final class IslandPanelController {
 
     private func handle(_ event: NSEvent) {
         guard event.type == .mouseMoved else { return }
-        handleMouseMoved(at: NSEvent.mouseLocation)
+        guard !SystemScreenCapture.isSelecting else { return }
+        let mouse = NSEvent.mouseLocation
+        handleMouseMoved(at: mouse)
+        // Hover карточек/фраз (onHover → NSTrackingArea): AppKit панели
+        // движения не доставляет, как и клики, — шлём mouseMoved сами.
+        // Только буфер/фразы: home подсвечивает зоны опросом.
+        if store.isIslandVisible, store.mode == .clipboard || store.mode == .phrases,
+           isInsideIsland(mouse),
+           let moved = NSEvent.mouseEvent(
+               with: .mouseMoved, location: panel.convertPoint(fromScreen: mouse),
+               modifierFlags: [], timestamp: event.timestamp,
+               windowNumber: panel.windowNumber, context: nil,
+               eventNumber: nextEventNumber(), clickCount: 0, pressure: 0
+           ) {
+            panel.sendEvent(moved)
+        }
     }
 
     /// Возвращает true, если событие нужно ПРОГЛОТИТЬ (не пускать в
@@ -384,6 +488,58 @@ final class IslandPanelController {
     /// события не достаются в принципе.
     private func handleClick(at mouse: NSPoint, type: CGEventType,
                              flags: CGEventFlags = []) -> Bool {
+        // Открытое меню (Picker звука, контекстные): нативно приложению
+        // не приходит НИЧЕГО (как и всем окнам — см. память
+        // aza-island-clicks), поэтому клик по пункту постим в очередь
+        // событий приложения: tracking-петля NSMenu читает именно её
+        // (тот же механизм, что чинил NSSegmentedControl ниже). Окно
+        // меню NSApp не резолвит — событие идёт с windowNumber 0 и
+        // экранными координатами, tracking-петля хит-тестит их сама.
+        // Пересылать в окно ПОД меню нельзя (настройки перекрыты меню),
+        // висящий пересланный жест сбрасываем. Drag не проверяем:
+        // CGWindowList на каждом drag-событии системного потока дорог.
+        if type != .leftMouseDragged, let menu = ownMenuOnScreen() {
+            forwardingDrag = false
+            forwardTarget = nil
+            // rightMouseUp — завершение правого клика, открывшего
+            // контекстное меню: петля ждёт его из очереди.
+            guard type == .leftMouseDown || type == .leftMouseUp
+                || type == .rightMouseUp else { return false }
+            // Окно MenuBarExtra — тот же уровень popUpMenu, но NSApp его
+            // резолвит. Штатно оно закрывается при потере key-статуса,
+            // которого у вечно неактивного приложения нет: клик мимо
+            // закрываем сами повторным action значка (toggle).
+            if let extra = NSApp.window(withWindowNumber: menu.number),
+               !extra.frame.contains(mouse) {
+                if type == .leftMouseDown, let button = statusBarButton() {
+                    azaDebugLog("Aza: menubar extra dismiss")
+                    Task { @MainActor in button.performClick(nil) }
+                }
+                return true
+            }
+            // Событие «без окна» (windowNumber 0, экранные координаты)
+            // петля поглощает, но считает промахом и закрывает меню без
+            // выбора. Нужны номер окна меню и координаты в нём; mouseMoved
+            // перед down ставит подсветку на пункт (нативные движения
+            // курсора до петли не доходят, выбор идёт по подсветке).
+            let local = NSPoint(x: mouse.x - menu.frame.minX, y: mouse.y - menu.frame.minY)
+            azaDebugLog("Aza: menu branch type=\(type.rawValue) win=\(menu.number) local=\(local)")
+            let types: [NSEvent.EventType] = switch type {
+            case .leftMouseDown: [.mouseMoved, .leftMouseDown]
+            case .rightMouseUp: [.rightMouseUp]
+            default: [.leftMouseUp]
+            }
+            for evType in types {
+                guard let event = NSEvent.mouseEvent(
+                    with: evType, location: local, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: menu.number, context: nil,
+                    eventNumber: nextEventNumber(), clickCount: 1, pressure: 1
+                ) else { continue }
+                NSApp.postEvent(event, atStart: false)
+            }
+            return true
+        }
         let inside = isInsideIsland(mouse)
         // Диагностика жалобы «значок в меню-баре некликабелен»: фиксируем
         // каждый клик по полосе меню-бара и решение tap'а по нему.
@@ -409,6 +565,31 @@ final class IslandPanelController {
             }
         }
         if type == .leftMouseDragged { return false }
+        // Значок меню-бара (NSStatusBarButton в NSStatusBarWindow): стоит
+        // внутри кадра компактного острова и из пересылки исключён —
+        // action кнопки жмём напрямую (performClick без tracking-петли),
+        // MenuBarExtra открывает своё окно сам. Асинхронно — из tap'а
+        // реентерабельный показ окна клинит SwiftUI-мост.
+        if type == .leftMouseDown || type == .leftMouseUp,
+           !(inside && store.isIslandVisible),
+           let button = statusBarButton(at: mouse) {
+            if type == .leftMouseDown {
+                azaDebugLog("Aza: menubar icon click")
+                Task { @MainActor in button.performClick(nil) }
+            }
+            return true
+        }
+        // Светофор титулбара: AppKit кликов приложению не доставляет, а
+        // кормить нативную tracking-петлю NSButton без очереди событий
+        // нельзя (повиснет) — действие окна жмём напрямую по хит-тесту.
+        if type == .leftMouseDown, !(inside && store.isIslandVisible),
+           let window = forwardableWindow(at: mouse),
+           window.parent == nil, window.styleMask.contains(.titled),
+           mouse.y >= window.frame.maxY - 30,
+           let action = trafficLightAction(in: window, at: mouse) {
+            action()
+            return true
+        }
         // Окно настроек и его шторки/поповеры: AppKit им клики тоже не
         // доставляет — пересылка, как у панели. Титулбар (верхние 30 пт)
         // верхнеуровневого титулованного окна не трогаем: нативные
@@ -418,6 +599,7 @@ final class IslandPanelController {
            !(window.parent == nil && window.styleMask.contains(.titled)
              && mouse.y >= window.frame.maxY - 30) {
             if store.isIslandVisible { store.dismissIsland() }
+            azaDebugLog("Aza: forward down -> \(window.className) #\(window.windowNumber) parent=\(window.parent?.windowNumber ?? 0) local=\(window.convertPoint(fromScreen: mouse))")
             // Фокус — ДО пересылки: down диспетчеризуется из очереди
             // позже, к этому моменту key-вид и адрес клавиш уже назначены.
             assignFocus(window)
@@ -437,12 +619,31 @@ final class IslandPanelController {
             forwardClick(at: mouse, type: type, flags: flags)
             return true
         }
+        // Контекстное меню карточки: правый клик — в очередь событий
+        // приложения (postEvent), а не sendEvent: contextMenu запускает
+        // tracking-петлю NSMenu, которая читает rightMouseUp из очереди;
+        // sendEvent из Task в этой петле не выполнился бы. Выбор пункта
+        // затем идёт веткой ownMenuOnScreen выше.
+        if inside, store.isIslandVisible,
+           store.mode == .clipboard || store.mode == .phrases,
+           type == .rightMouseDown || type == .rightMouseUp {
+            if let event = NSEvent.mouseEvent(
+                with: type == .rightMouseDown ? .rightMouseDown : .rightMouseUp,
+                location: panel.convertPoint(fromScreen: mouse), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: panel.windowNumber, context: nil,
+                eventNumber: nextEventNumber(), clickCount: 1, pressure: 1
+            ) {
+                NSApp.postEvent(event, atStart: false)
+            }
+            return true
+        }
         if type == .leftMouseUp {
             guard interactive else { return false }
             switch store.mode {
             case .idle:
                 azaDebugLog("Aza: island click -> home")
-                store.mode = .home
+                store.show(.home)
             case .dictation:
                 // Вся плашка записи — одна кнопка «стоп»: целиться в
                 // квадратик на полоске в 32 пт не нужно.
@@ -482,6 +683,11 @@ final class IslandPanelController {
     /// курсор над островом. Событие глотается, чтобы не утекло в фоновое
     /// приложение.
     private func forwardKeyOrScrollIfNeeded(_ cgEvent: CGEvent, type: CGEventType) -> Bool {
+        if HotKeyController.isRecordingShortcut, type != .scrollWheel,
+           KeyCatcher.forward(cgEvent, to: keyForwardTarget()) {
+            // Отпускания модификаторов нужны и уже запущенной hold-диктовке.
+            return type != .flagsChanged
+        }
         if type == .flagsChanged {
             // Модификаторы рекордеру хоткея (fn/⌃/⌥ пишутся на
             // отпускании) — и НИКОГДА не глотаем: ⌘ из ⌘Tab и прочие
@@ -498,15 +704,15 @@ final class IslandPanelController {
             let loc = cgEvent.location
             let point = NSPoint(x: loc.x,
                                 y: (NSScreen.screens.first?.frame.maxY ?? 0) - loc.y)
-            if store.isIslandVisible,
-               store.mode == .clipboard || store.mode == .phrases,
-               isInsideIsland(point) {
-                target = panel
-            } else if let window = forwardableWindow(at: point) {
-                // Скролл настроек/поповера — вью под курсором напрямую:
-                // sendEvent маршрутизирует по locationInWindow, а у события
-                // из CGEvent координаты экранные — hitTest уходил мимо.
-                // Скроллу важны только дельты, не позиция.
+            let islandScroll = store.isIslandVisible
+                && (store.mode == .clipboard || store.mode == .phrases)
+                && isInsideIsland(point)
+            if let window = islandScroll ? panel : forwardableWindow(at: point) {
+                // Скролл острова/настроек/поповера — вью под курсором
+                // напрямую: sendEvent маршрутизирует по locationInWindow, а
+                // у события из CGEvent координаты экранные — hitTest уходил
+                // мимо (у панели у кромки экрана — всегда: карточки буфера
+                // не листались). Скроллу важны только дельты, не позиция.
                 guard let event = NSEvent(cgEvent: cgEvent) else { return false }
                 let local = window.convertPoint(fromScreen: point)
                 let windowNumber = window.windowNumber
@@ -519,15 +725,22 @@ final class IslandPanelController {
             } else {
                 return false
             }
-        } else if store.isIslandVisible, store.mode == .clipboard, panel.isKeyWindow {
+        } else if store.isIslandVisible, store.mode == .clipboard {
             // ⌘-сочетания — хоткеи, не глотаем; исключение — ⌘A
             // (выделить все карточки), она живёт в панели.
             if cgEvent.flags.contains(.maskCommand) {
                 let keycode = cgEvent.getIntegerValueField(.keyboardEventKeycode)
                 guard keycode == 0 else { return false } // kVK_ANSI_A
             }
+            // Открытый буфер — клавиши его, даже если key-статус панели
+            // слетел (после контекстного меню клавиши уходили в чужое
+            // приложение — Delete в поле владельца). Возвращаем статус.
+            if !panel.isKeyWindow {
+                azaDebugLog("Aza: clipboard panel lost key — re-key")
+                panel.makeKeyAndOrderFront(nil)
+            }
             target = panel
-        } else if let focus = keyForwardTarget(), focusIsTopmost(focus) {
+        } else if let focus = keyForwardTarget() {
             // Фокус мог протухнуть: настройки остались открыты, но их
             // накрыло чужое окно — клавиши (и особенно ⌘Q) тогда не
             // наши, пусть идут системе (та же дыра, что у мыши).
@@ -563,6 +776,15 @@ final class IslandPanelController {
             return false
         }
         guard let event = NSEvent(cgEvent: cgEvent) else { return false }
+        // Панель буфера: клавиши — в очередь приложения, как и клики.
+        // Клавиша через sendEvent из Task после кликов через postEvent
+        // ломала SwiftUI-мост: следующие клики доходили до hosting-вью,
+        // но кнопки молчали (04.09). Один путь для всех событий панели.
+        if type != .scrollWheel, target === panel, panel.isKeyWindow,
+           !(panel.firstResponder is NSTextView) {
+            NSApp.postEvent(event, atStart: false)
+            return true
+        }
         let windowNumber = target.windowNumber
         Task { @MainActor [weak target] in
             guard let target, target.windowNumber == windowNumber else { return }
@@ -572,7 +794,11 @@ final class IslandPanelController {
             // becomeKey даёт только ВИД. Input context неактивного
             // приложения без activate() глотает вставку (TSM).
             // Панель буфера живёт старым путём sendEvent — он работает.
-            if type == .scrollWheel || target === panel {
+            if type == .scrollWheel
+                || (target === panel && !(target.firstResponder is NSTextView)) {
+                // Панель без текстового поля — старый путь sendEvent
+                // (onKeyPress буфера работает); поле поиска — как поля
+                // настроек ниже: без activate() TSM глотает ввод.
                 target.sendEvent(event)
             } else if let responder = target.firstResponder, responder !== target {
                 (responder as? NSView)?.inputContext?.activate()
@@ -618,12 +844,23 @@ final class IslandPanelController {
     /// им не нужен. Приоритет: in-process key-окно из связки фокусного →
     /// шторка → верхний child → само фокусное окно.
     private func keyForwardTarget() -> NSWindow? {
-        guard let focus = focusWindow, focus.isVisible else { return nil }
+        guard let focus = focusWindow, focus.isVisible else {
+            focusWindow = nil
+            return nil
+        }
         // Child всегда важнее базового окна: открытый поповер/шторка
         // модальны по смыслу, ввод — им.
         let target = focus.attachedSheet?.isVisible == true
             ? focus.attachedSheet!
             : focus.childWindows?.last(where: { $0.isVisible }) ?? focus
+        // Сначала проверяем, что пользователь всё ещё работает с окном.
+        // becomeKey ДО этой проверки перехватывал фокус даже при отказе
+        // пересылать клавишу, в том числе на пути flagsChanged.
+        guard focusIsTopmost(target) else {
+            if target.isKeyWindow { target.resignKey() }
+            focusWindow = nil
+            return nil
+        }
         if !target.isKeyWindow { target.becomeKey() }
         return target
     }
@@ -633,10 +870,7 @@ final class IslandPanelController {
     /// окна, целиком накрывшего наше.
     private func focusIsTopmost(_ window: NSWindow) -> Bool {
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
-        return isTopmostRegularWindow(window, atCG: CGPoint(
-            x: center.x,
-            y: (NSScreen.screens.first?.frame.maxY ?? 0) - center.y
-        ))
+        return window.receivesMouse(at: center)
     }
 
     /// Назначить окну клавиатурный фокус и key-ВИД. Настоящим key-окном
@@ -646,38 +880,80 @@ final class IslandPanelController {
     /// becomeKey() включает key-вид принудительно; доставку клавиш это не
     /// меняет — их всё равно несёт tap напрямую респондеру.
     private func assignFocus(_ window: NSWindow) {
-        if let old = focusWindow, old !== window, old.isKeyWindow {
+        // Родителя поповера/шторки не «разключаем»: transient-поповер
+        // следит за key-статусом родителя и закрывался от resignKey ДО
+        // доставки клика — строки списка городов были мертвы (04.09).
+        if let old = focusWindow, old !== window, old.isKeyWindow,
+           window.parent !== old {
             old.resignKey()
         }
         focusWindow = window
         if !window.isKeyWindow { window.becomeKey() }
     }
 
-    /// Наше окно под точкой ЗАКРЫТО чужим? Tap видит только окна Aza, и
-    /// без этой проверки клик по браузеру, лежащему ПОВЕРХ забытых
-    /// настроек, крался бы невидимой Aza (дыра в чужом окне). Обход
-    /// CGWindowList front-to-back по обычному слою: первым содержащее
-    /// точку окно должно быть нашим.
-    private func isTopmostRegularWindow(_ window: NSWindow, atCG cgPoint: CGPoint) -> Bool {
+    /// Окно меню нашего приложения на экране (уровень popUpMenu): номер и
+    /// кадр в Cocoa-координатах. NSApp меню-окна не резолвит, поэтому
+    /// спрашиваем WindowServer.
+    private func ownMenuOnScreen() -> (number: Int, frame: NSRect)? {
         guard let list = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
-        else { return true }
+        else { return nil }
         let pid = ProcessInfo.processInfo.processIdentifier
+        let menuLayer = Int(CGWindowLevelForKey(.popUpMenuWindow))
+        // Контекстное меню карточки острова AppKit ставит на уровень
+        // панели + 1 (1001), не popUpMenu.
+        let islandMenuLayer = Int(panel.level.rawValue) + 1
+        let screenMaxY = NSScreen.screens.first?.frame.maxY ?? 0
         for info in list {
-            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
-                  let b = info[kCGWindowBounds as String] as? [String: CGFloat],
-                  CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0,
-                         width: b["Width"] ?? 0, height: b["Height"] ?? 0)
-                    .contains(cgPoint)
+            guard (info[kCGWindowOwnerPID as String] as? Int32) == pid,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == menuLayer || layer == islandMenuLayer,
+                  let number = info[kCGWindowNumber as String] as? Int,
+                  let b = info[kCGWindowBounds as String] as? [String: CGFloat]
             else { continue }
-            guard let owner = info[kCGWindowOwnerPID as String] as? Int32,
-                  owner == pid,
-                  let number = info[kCGWindowNumber as String] as? Int
-            else { return false }
-            return number == window.windowNumber
+            let h = b["Height"] ?? 0
+            return (number, NSRect(x: b["X"] ?? 0, y: screenMaxY - (b["Y"] ?? 0) - h,
+                                   width: b["Width"] ?? 0, height: h))
         }
-        return true
+        return nil
+    }
+
+    /// Кнопка светофора под курсором → её действие. Реакция на down, а
+    /// не на up: жеста «нажал и увёл» у нас всё равно нет, tracking-петля
+    /// кнопки не запускается.
+    /// Кнопка значка меню-бара (под курсором, если точка задана). Окно
+    /// статус-бара есть в NSApp.windows (в CGWindowList его нет — значок
+    /// рисует система), кадр окна = область значка.
+    private func statusBarButton(at point: NSPoint? = nil) -> NSStatusBarButton? {
+        func find(_ view: NSView?) -> NSStatusBarButton? {
+            guard let view else { return nil }
+            if let b = view as? NSStatusBarButton { return b }
+            for sub in view.subviews { if let b = find(sub) { return b } }
+            return nil
+        }
+        return NSApp.windows.lazy
+            .filter { $0.className == "NSStatusBarWindow" && $0.isVisible
+                && (point == nil || $0.frame.contains(point!)) }
+            .compactMap { find($0.contentView) }
+            .first
+    }
+
+    private func trafficLightAction(in window: NSWindow,
+                                    at mouse: NSPoint) -> (() -> Void)? {
+        let buttons: [(NSWindow.ButtonType, () -> Void)] = [
+            (.closeButton, { window.performClose(nil) }),
+            (.miniaturizeButton, { window.performMiniaturize(nil) }),
+            (.zoomButton, { window.performZoom(nil) }),
+        ]
+        for (kind, action) in buttons {
+            guard let button = window.standardWindowButton(kind),
+                  !button.isHidden, button.isEnabled else { continue }
+            let frame = window.convertToScreen(button.convert(button.bounds, to: nil))
+            // +2 пт запаса: кнопки крошечные, промах на пиксель не должен
+            // превращаться в мёртвый клик.
+            if frame.insetBy(dx: -2, dy: -2).contains(mouse) { return action }
+        }
+        return nil
     }
 
     /// ВЕРХНЕЕ окно приложения под точкой, которому можно пересылать
@@ -696,11 +972,7 @@ final class IslandPanelController {
                   w.parent != nil || w.styleMask.contains(.titled)
             else { continue }
             // Чужое окно поверх нашего — событие не наше.
-            let cg = CGPoint(
-                x: point.x,
-                y: (NSScreen.screens.first?.frame.maxY ?? 0) - point.y
-            )
-            guard isTopmostRegularWindow(w, atCG: cg) else { return nil }
+            guard w.receivesMouse(at: point) else { return nil }
             return w
         }
         return nil
@@ -740,39 +1012,23 @@ final class IslandPanelController {
         if flags.contains(.maskControl) { mods.insert(.control) }
         if flags.contains(.maskCommand) { mods.insert(.command) }
         let local = target.convertPoint(fromScreen: mouse)
-        let windowNumber = target.windowNumber
-        let clickCount = forwardClickCount
-        if explicitTarget != nil {
-            // Обычное окно (настройки): AppKit-контролы (Picker(.segmented) →
-            // NSSegmentedControl) на sendEvent(down) уходят в нативную
-            // tracking-петлю и ждут mouseUp из очереди событий, а Task на
-            // main actor в tracking-mode не выполняется (main queue не
-            // дренируется) — главный поток висел навсегда, всё приложение
-            // «тормозило». postEvent кладёт событие в ту самую очередь,
-            // которую читают и главный цикл, и tracking-петля; он не
-            // обрабатывает UI реентерабельно, поэтому из tap-колбэка
-            // (main thread) его звать можно и НУЖНО синхронно.
-            guard let event = NSEvent.mouseEvent(
-                with: evType, location: local, modifierFlags: mods,
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: windowNumber, context: nil,
-                eventNumber: 0, clickCount: clickCount, pressure: 1
-            ) else { return }
-            NSApp.postEvent(event, atStart: false)
-            return
-        }
-        Task { @MainActor [weak target] in
-            // Панель могла пересоздаться между down и up — устаревшее
-            // событие в новое окно не шлём.
-            guard let target, target.windowNumber == windowNumber,
-                  let event = NSEvent.mouseEvent(
-                      with: evType, location: local, modifierFlags: mods,
-                      timestamp: ProcessInfo.processInfo.systemUptime,
-                      windowNumber: windowNumber, context: nil,
-                      eventNumber: 0, clickCount: clickCount, pressure: 1
-                  ) else { return }
-            target.sendEvent(event)
-        }
+        // Любое окно, включая панель: AppKit-контролы (Picker(.segmented) →
+        // NSSegmentedControl, поле поиска буфера → NSTextView) на
+        // sendEvent(down) уходят в нативную tracking-петлю и ждут mouseUp
+        // из очереди событий, а Task на main actor в tracking-mode не
+        // выполняется (main queue не дренируется) — главный поток висел
+        // навсегда (настройки 31.08, поиск буфера 04.09). postEvent кладёт
+        // событие в ту самую очередь, которую читают и главный цикл, и
+        // tracking-петля; он не обрабатывает UI реентерабельно, поэтому из
+        // tap-колбэка (main thread) его звать можно и НУЖНО синхронно.
+        // Устаревшая панель: NSApp сам роняет событие с чужим номером окна.
+        guard let event = NSEvent.mouseEvent(
+            with: evType, location: local, modifierFlags: mods,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: target.windowNumber, context: nil,
+            eventNumber: nextEventNumber(), clickCount: forwardClickCount, pressure: 1
+        ) else { return }
+        NSApp.postEvent(event, atStart: false)
     }
 
     /// Ручной хит-тест кнопок home-острова по координатам курсора.
@@ -812,7 +1068,7 @@ final class IslandPanelController {
             store.dictation.startLatchedFromUI()
         case .clipboard:
             azaDebugLog("Aza: home action Буфер")
-            store.mode = .clipboard
+            store.show(.clipboard)
         case .settings:
             azaDebugLog("Aza: home action Настройки")
             store.dismissIsland()
@@ -822,9 +1078,7 @@ final class IslandPanelController {
             NSApp.terminate(nil)
         case .city:
             azaDebugLog("Aza: home action город")
-            store.dismissIsland()
-            store.openSetup()
-            NotificationCenter.default.post(name: .azaShowPrayerSettings, object: nil)
+            store.openSetup(showing: .azaShowPrayerSettings)
         case .geo:
             azaDebugLog("Aza: home action геопозиция")
             // CityLocator живёт внутри HomeIslandView — команда уходит
@@ -924,4 +1178,3 @@ enum IslandHitTesting {
                       width: right.minX - left.maxX, height: height + 1)
     }
 }
-

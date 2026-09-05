@@ -92,11 +92,13 @@ enum TextInsertion {
             return .cannotComplete
         }
 
-        guard isTextLike(element), postUnicode(text) else { return directResult }
+        guard isTextLike(element),
+              focusSafeForPaste(targetPid: processID(of: element), verifying: element),
+              postUnicode(text) else { return directResult }
         return .success
     }
 
-    /// Replaces the `expected.count` characters before the caret, but only if they
+    /// Replaces the UTF-16 range before the caret, but only if its contents
     /// still equal `expected` — the caret may have moved during the settle delay.
     static func replaceTypedText(
         in element: AXUIElement,
@@ -105,14 +107,13 @@ enum TextInsertion {
     ) -> Bool {
         guard var range = selectedRange(of: element),
               range.length == 0,
-              range.location >= expected.count else {
+              let replacement = replacementRange(before: range.location, expecting: expected) else {
             azaDebugLog("Aza: replace fail stage=range \(selectedRange(of: element).map { "loc=\($0.location) len=\($0.length)" } ?? "nil") need=\(expected.count)")
             return false
         }
 
         let caret = range.location
-        range.location -= expected.count
-        range.length = expected.count
+        range = replacement
 
         // Сверка ДО выделения параметризованным чтением: в Chromium-webview
         // (Claude-чат VS Code) чтение выделенного текста возвращает пустоту,
@@ -173,13 +174,21 @@ enum TextInsertion {
         // Пост-проверка для webview: запись могла «успешно» не примениться.
         if preread != nil,
            let written = string(forRange: CFRange(location: range.location,
-                                                  length: text.count), in: element),
+                                                  length: text.utf16.count), in: element),
            written.lowercased() != text.lowercased() {
             azaDebugLog("Aza: replace fail stage=postverify")
             _ = setSelectedRange(CFRange(location: caret, length: 0), in: element)
             return false
         }
         return true
+    }
+
+    /// AX диапазоны измеряются кодовыми единицами UTF-16, а не Character:
+    /// составная буква и emoji могут занимать несколько позиций.
+    static func replacementRange(before caret: Int, expecting text: String) -> CFRange? {
+        let length = text.utf16.count
+        guard length > 0, caret >= length else { return nil }
+        return CFRange(location: caret - length, length: length)
     }
 
     /// Сверка перед кареткой с допуском на быстрый набор: за задержку
@@ -190,8 +199,8 @@ enum TextInsertion {
     static func typedTail(after expected: String, in element: AXUIElement,
                           maxTail: Int) -> String? {
         guard let range = selectedRange(of: element), range.length == 0 else { return nil }
-        let lookback = min(range.location, expected.count + maxTail)
-        guard lookback >= expected.count,
+        let lookback = min(range.location, expected.utf16.count + maxTail)
+        guard lookback >= expected.utf16.count,
               let window = string(forRange: CFRange(location: range.location - lookback,
                                                     length: lookback), in: element),
               let found = window.range(of: expected,
@@ -257,8 +266,8 @@ enum TextInsertion {
     ) -> Bool {
         guard let caretRange = selectedRange(of: element), caretRange.length == 0 else { return false }
         let caret = caretRange.location
-        let lookback = min(caret, typed.count + delimiter.count + 12)
-        guard lookback > delimiter.count,
+        let lookback = min(caret, typed.utf16.count + delimiter.utf16.count + 12)
+        guard lookback > delimiter.utf16.count,
               let recent = string(forRange: CFRange(location: caret - lookback,
                                                     length: lookback), in: element),
               recent.hasSuffix(delimiter) else { return false }
@@ -268,7 +277,7 @@ enum TextInsertion {
               token.lowercased() != typed.lowercased(),
               abs(token.count - typed.count) <= 3 else { return false }
 
-        let replaceLength = token.count + delimiter.count
+        let replaceLength = token.utf16.count + delimiter.utf16.count
         guard caret >= replaceLength,
               setSelectedRange(CFRange(location: caret - replaceLength,
                                        length: replaceLength), in: element) else { return false }
@@ -331,13 +340,27 @@ enum TextInsertion {
     /// SecureEventInput (guard в postPasteCommand его не поймал бы).
     /// targetPid == nil — цель неизвестна (фронтмостом была сама Aza),
     /// сверяем только secure. Эталон паттерна — диктовка (аудит 30.08).
-    static func focusSafeForPaste(targetPid: pid_t?) -> Bool {
+    static func focusSafeForPaste(targetPid: pid_t?, verifying element: AXUIElement? = nil) -> Bool {
+        guard !IsSecureEventInputEnabled() else { return false }
         let focused = focusedElement()
         if let focused, SecureFieldDetector.isSecure(focused) { return false }
-        guard let targetPid else { return true }
-        let pidNow = focused.flatMap(processID(of:))
+        let pidNow = focused.flatMap { processID(of: $0) }
             ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
-        return pidNow == targetPid
+        if let targetPid, pidNow != targetPid { return false }
+        if let element {
+            guard let focused,
+                  let expectedPid = processID(of: element), pidNow == expectedPid,
+                  windowsMatch(focused, element) else { return false }
+            // AX возвращает разные обёртки для одного поля. Если CFEqual
+            // их не узнаёт, исходный элемент сам должен подтвердить фокус.
+            if !CFEqual(focused, element) {
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(
+                    element, kAXFocusedAttribute as CFString, &value
+                ) == .success, value as? Bool == true else { return false }
+            }
+        }
+        return true
     }
 
     /// Синтетический ⌘V — последний рубеж для приложений, чьё AX-дерево не
@@ -345,15 +368,12 @@ enum TextInsertion {
     /// пробуждения). Текст обязан уже лежать в буфере обмена. Флаги события
     /// выставляются явно: физически зажатые модификаторы (правая ⌥ в
     /// hold-режиме фраз) на посланное событие не переносятся.
-    static func postPasteCommand() -> Bool {
-        // Защищённый ввод включён — фокус в парольном поле (системном или
-        // корректного приложения): слепой ⌘V туда запрещён. AX-слепые
-        // webview этот guard не задевает — они защищённый ввод не включают.
-        // Остаточный риск (кастомное парольное поле БЕЗ SecureEventInput в
-        // AX-слепом приложении) закрывается только полным fail-closed — это
-        // отключило бы webview-фолбэк целиком; решение за владельцем.
-        guard !IsSecureEventInputEnabled() else {
-            azaDebugLog("Aza: paste blocked — secure event input active")
+    static func postPasteCommand(targetPid: pid_t?, verifying element: AXUIElement? = nil) -> Bool {
+        // AX-вызов мог ждать ответа приложения: проверка вызывающего кода
+        // к этому моменту уже устарела. Перепроверяем у самой отправки.
+        guard let targetPid = targetPid ?? NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              focusSafeForPaste(targetPid: targetPid, verifying: element) else {
+            azaDebugLog("Aza: paste blocked — focus moved or secure")
             return false
         }
         guard let source = CGEventSource(stateID: .privateState),
@@ -365,8 +385,8 @@ enum TextInsertion {
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
-        markAndPost(keyDown)
-        markAndPost(keyUp)
+        markAndPost(keyDown, to: targetPid)
+        markAndPost(keyUp, to: targetPid)
         return true
     }
 
@@ -429,7 +449,8 @@ enum TextInsertion {
         if let element {
             // pid строго: нечитаемый pid с любой стороны — отказ, а не
             // совпадение nil == nil.
-            guard let focused = focusedElement(),
+            guard focusSafeForPaste(targetPid: processID(of: element), verifying: element),
+                  let focused = focusedElement(),
                   let focusedPid = processID(of: focused),
                   focusedPid == processID(of: element),
                   windowsMatch(focused, element),
@@ -445,7 +466,7 @@ enum TextInsertion {
             // fakeView-случай, где сверить нечем (осознанный остаток риска).
             let deletable = typed + delimiter + tail
             if !deletable.isEmpty, let range = selectedRange(of: focused) {
-                guard range.length == 0, range.location >= deletable.count else {
+                guard range.length == 0, range.location >= deletable.utf16.count else {
                     azaDebugLog("Aza: retype abort — caret state")
                     return false
                 }
@@ -453,8 +474,8 @@ enum TextInsertion {
                 // и это уже НЕ fakeView (у того и диапазон недоступен) —
                 // отказ, ложное стирание хуже пропущенного исправления.
                 guard let before = string(
-                    forRange: CFRange(location: range.location - deletable.count,
-                                      length: deletable.count), in: focused),
+                    forRange: CFRange(location: range.location - deletable.utf16.count,
+                                      length: deletable.utf16.count), in: focused),
                       before.lowercased() == deletable.lowercased() else {
                     azaDebugLog("Aza: retype abort — text mismatch")
                     return false
@@ -495,8 +516,14 @@ enum TextInsertion {
         return ra?.location == rb?.location && ra?.length == rb?.length
     }
 
-    private static func markAndPost(_ event: CGEvent) {
+    private static func markAndPost(_ event: CGEvent, to targetPid: pid_t? = nil) {
         event.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
-        event.post(tap: .cghidEventTap)
+        if let targetPid {
+            // Напрямую приложению: системная регистрация ⌘V не должна
+            // перехватывать служебную вставку ещё до доставки в поле.
+            event.postToPid(targetPid)
+        } else {
+            event.post(tap: .cghidEventTap)
+        }
     }
 }

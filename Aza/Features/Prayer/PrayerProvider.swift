@@ -161,12 +161,13 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
     /// побеждает тот, чьё покрытие включает нужный день, а если различить
     /// нельзя — отказ. Проверка происхождения одна и та же для обоих:
     /// поставляемый каталог не получает поблажек.
-    static func userProvided() -> ScheduleTablePrayerProvider? {
+    static func userProvided(bundledURLs: [URL]? = nil,
+                             userURLs: [URL]? = nil) -> ScheduleTablePrayerProvider? {
         let directory = ClipboardStore.defaultStorageURL()
             .deletingLastPathComponent()
             .appendingPathComponent("prayer-schedules", isDirectory: true)
-        let bundled = bundledCatalogURLs()
-        let userFiles = ((try? FileManager.default.contentsOfDirectory(
+        let bundled = bundledURLs ?? bundledCatalogURLs()
+        let userFiles = userURLs ?? ((try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
         )) ?? []).sorted { $0.lastPathComponent < $1.lastPathComponent }
         let files = bundled + userFiles
@@ -176,10 +177,8 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
         // конкретно подходит запрошенному дню, решает уже поиск по
         // покрытию.
         // Поставляемые и пользовательские города копятся раздельно:
-        // свой файл перекрывает ТОЛЬКО поставляемый каталог (копия
-        // каталога рядом давала неразличимые дубли), но не другие свои —
-        // годовые файлы одного города различаются покрытием, и какой
-        // подходит запрошенному дню, решает поиск по покрытию.
+        // свой файл имеет приоритет только НА ДАТАХ своего покрытия.
+        // Иначе добавление следующего года удаляло бы таблицу текущего.
         var bundledCities: [CityPrayerSchedule] = []
         var userCities: [CityPrayerSchedule] = []
         var year = 0
@@ -205,8 +204,6 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
                 continue
             }
             if !bundled.contains(file) {
-                let names = Set(catalog.cities.map { PrayerCatalog.normalized($0.name) })
-                bundledCities.removeAll { names.contains(PrayerCatalog.normalized($0.name)) }
                 // Точный дубль (то же имя И то же покрытие — копия файла)
                 // заменяется; другой год того же города остаётся жить.
                 for city in catalog.cities {
@@ -268,7 +265,8 @@ struct ScheduleTablePrayerProvider: PrayerTimesProvider {
               tableCity.timeZone == city.timeZoneID else { return nil }
         let occurrences = catalog.prayers(tableCity, on: date)
         guard occurrences.count == PrayerKind.allCases.count,
-              occurrences.map(\.date) == occurrences.map(\.date).sorted() else { return nil }
+              zip(occurrences, occurrences.dropFirst()).allSatisfy({ $0.date < $1.date })
+        else { return nil }
         // Источник ГОРОДА главнее общей подписи каталога. Каталог бывает
         // сводным (ДУМ РТ + ЦДУМ + РДУМ ЧО в одном файле), и общий ярлык
         // подписал бы времена одного муфтията именем другого — ровно то

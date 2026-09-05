@@ -17,6 +17,7 @@ final class WordMonitor {
     private var eventTap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private var currentWord = ""
+    private var isTechnicalToken = false
     private var lastBundleID: String?
     private let onWordFinished: (_ word: String, _ delimiter: String) -> Void
     /// Активный режим: вернуть исправление — разделитель проглатывается,
@@ -36,8 +37,8 @@ final class WordMonitor {
     func start() {
         guard !isRunning else { return }
         if ChechenAutocorrect.isActiveTapEnabled, startActiveTap() { return }
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            azaAssumeMainUnchecked {
                 self?.handlePassive(event)
             }
         }
@@ -59,7 +60,7 @@ final class WordMonitor {
             CFMachPortInvalidate(eventTap)
             self.eventTap = nil
         }
-        currentWord = ""
+        resetContext()
     }
 
     // MARK: Пассивный режим
@@ -77,6 +78,8 @@ final class WordMonitor {
 
     private func startActiveTap() -> Bool {
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.rightMouseDown.rawValue)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -140,25 +143,36 @@ final class WordMonitor {
     // MARK: Общий накопитель слова
 
     private func accumulate(_ event: NSEvent) -> [(word: String, delimiter: String)] {
+        guard event.type == .keyDown else {
+            resetContext()
+            return []
+        }
         // Политика исключений: менеджеры паролей и пользовательский список
         // не исправляются; остальные приложения — да. Secure-поля
         // отсекаются на уровне элемента в момент замены.
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         guard let bundleID, !ExcludedApps.isCorrectionDenied(bundleID: bundleID) else {
-            currentWord = ""
+            resetContext()
             lastBundleID = bundleID
-            onContextBreak?()
             return []
         }
         // Смена приложения — разрыв слова и контекста фразы: буфер не должен
         // переезжать между окнами.
         if bundleID != lastBundleID {
             lastBundleID = bundleID
-            currentWord = ""
-            onContextBreak?()
+            resetContext()
         }
 
-        // ponytail: ⌘V, text selection and IME are not tracked — known prototype limitation.
+        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+            resetContext()
+            return []
+        }
+        if [kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow,
+            kVK_Home, kVK_End, kVK_PageUp, kVK_PageDown, kVK_ForwardDelete,
+            kVK_Escape].contains(Int(event.keyCode)) {
+            resetContext()
+            return []
+        }
         if event.keyCode == UInt16(kVK_Delete) {
             if !currentWord.isEmpty {
                 currentWord.removeLast()
@@ -166,17 +180,44 @@ final class WordMonitor {
             return []
         }
 
-        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-              let characters = event.characters,
-              !characters.isEmpty else {
-            currentWord = ""
+        guard let characters = event.characters, !characters.isEmpty else {
+            resetContext()
             return []
         }
+        return accumulateCharacters(characters, wordPunctuation: KeyboardLayoutMap.wordPunctuation())
+    }
 
+    private func resetContext() {
+        currentWord = ""
+        isTechnicalToken = false
+        onContextBreak?()
+    }
+
+    /// URL, email и идентификатор защищаем целиком до следующего пробела:
+    /// @ или / не должны завершать слово и запускать его исправление.
+    /// ponytail: quoted email с пробелами требует отдельного учёта кавычек;
+    /// здесь границей токена остаётся whitespace.
+    func accumulateCharacters(_ characters: String,
+                              wordPunctuation: Set<Character>) -> [(word: String, delimiter: String)] {
         var finished: [(word: String, delimiter: String)] = []
-        let wordPunctuation = KeyboardLayoutMap.wordPunctuation()
         for character in characters {
-            if character.isLetter || wordPunctuation.contains(character) {
+            if character.isWhitespace, isTechnicalToken {
+                resetContext()
+                continue
+            }
+            // {, } и ~ в некоторых раскладках дают Х, Ъ и Ё: тогда они
+            // продолжают слово; технический токен всё равно отсеет @.
+            if (!wordPunctuation.contains(character)
+                && "@/\\_:=$#`+-%&*^|~{}".contains(character))
+                || (character.isNumber && character != "1") {
+                currentWord = ""
+                isTechnicalToken = true
+                onContextBreak?()
+            }
+            if isTechnicalToken { continue }
+            // !/? могут продолжить email до будущего @; как точку и
+            // запятую, держим их до пробела и снимаем в движке как суффикс.
+            if character.isLetter || wordPunctuation.contains(character) || "!?".contains(character) {
                 currentWord.append(character)
             } else {
                 // Без единой буквы это не слово, а число или пунктуация:

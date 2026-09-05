@@ -20,16 +20,24 @@ final class CityLocator: NSObject, ObservableObject {
         case idle
         case locating
         case found(cityID: String, distanceKilometers: Int)
-        case denied
         case failed(String)
     }
 
     @Published private(set) var state: State = .idle
 
-    private let manager = CLLocationManager()
+    private let manager: CLLocationManager
+    private let servicesEnabled: () -> Bool
+    private let requestTimeout: TimeInterval
+    private var timeoutTimer: Timer?
     private var continuation: CheckedContinuation<Match?, Never>?
+    private var didRequestLocation = false
 
-    override init() {
+    init(manager: CLLocationManager = CLLocationManager(),
+         servicesEnabled: @escaping () -> Bool = { CLLocationManager.locationServicesEnabled() },
+         requestTimeout: TimeInterval = 60) {
+        self.manager = manager
+        self.servicesEnabled = servicesEnabled
+        self.requestTimeout = requestTimeout
         super.init()
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyKilometer
@@ -40,42 +48,78 @@ final class CityLocator: NSObject, ObservableObject {
     /// иначе первый вызывающий навсегда остался бы без ответа.
     func locate() async -> Match? {
         guard continuation == nil else { return nil }
-        switch manager.authorizationStatus {
-        case .denied, .restricted:
-            state = .denied
+        if let unavailable = Self.unavailableState(manager.authorizationStatus,
+                                                    servicesEnabled: servicesEnabled()) {
+            state = unavailable
             return nil
-        case .notDetermined:
-            state = .locating
-            manager.requestWhenInUseAuthorization()
-            // Продолжим в делегате, когда пользователь ответит.
-            return await withCheckedContinuation { continuation in
-                self.continuation = continuation
+        }
+        state = .locating
+        return await withCheckedContinuation { continuation in
+            // Сначала сохраняем ожидание: ответ разрешения может прийти сразу.
+            self.continuation = continuation
+            let timer = Timer(timeInterval: requestTimeout, repeats: false) { [weak self] _ in
+                azaAssumeMainUnchecked {
+                    guard let self, self.continuation != nil else { return }
+                    self.state = .failed("Не удалось определить город — повторите попытку или выберите его вручную")
+                    self.finish(nil)
+                }
             }
-        default:
-            state = .locating
-            return await withCheckedContinuation { continuation in
-                self.continuation = continuation
-                manager.requestLocation()
+            timeoutTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            if manager.authorizationStatus == .notDetermined {
+                manager.requestWhenInUseAuthorization()
+            } else {
+                requestLocationIfNeeded()
             }
         }
     }
 
+    static func unavailableState(_ authorization: CLAuthorizationStatus,
+                                 servicesEnabled: Bool) -> State? {
+        if !servicesEnabled {
+            return .failed("Службы геолокации выключены на Mac — включите их в Системных настройках → Конфиденциальность и безопасность → Службы геолокации")
+        }
+        switch authorization {
+        case .denied:
+            return .failed("Нет доступа к геопозиции — разрешите его для Aza в Системных настройках → Конфиденциальность и безопасность → Службы геолокации")
+        case .restricted:
+            return .failed("Доступ к геопозиции ограничен системой — выберите город вручную")
+        default:
+            return nil
+        }
+    }
+
     private func finish(_ match: Match?) {
-        continuation?.resume(returning: match)
+        let pending = continuation
         continuation = nil
+        didRequestLocation = false
+        timeoutTimer?.invalidate()
+        timeoutTimer = nil
+        manager.stopUpdatingLocation()
+        pending?.resume(returning: match)
+    }
+
+    private func requestLocationIfNeeded() {
+        guard continuation != nil, !didRequestLocation else { return }
+        didRequestLocation = true
+        manager.requestLocation()
     }
 
     /// Ближайший город из списка профилей.
     private func nearestCity(to location: CLLocation) -> Match? {
         // Города без координат в сравнении не участвуют — расстояние до
         // них неизвестно.
+        guard CLLocationCoordinate2DIsValid(location.coordinate) else { return nil }
         let candidates = PrayerStore.cities.compactMap {
             city -> (PrayerCity, CLLocationDistance)? in
             guard let latitude = city.latitude, let longitude = city.longitude else {
                 return nil
             }
             let target = CLLocation(latitude: latitude, longitude: longitude)
-            return (city, location.distance(from: target))
+            guard CLLocationCoordinate2DIsValid(target.coordinate) else { return nil }
+            let distance = location.distance(from: target)
+            guard distance.isFinite, distance >= 0 else { return nil }
+            return (city, distance)
         }
         guard let best = candidates.min(by: { $0.1 < $1.1 }) else { return nil }
         return Match(city: best.0, distanceKilometers: Int((best.1 / 1000).rounded()))
@@ -84,23 +128,23 @@ final class CityLocator: NSObject, ObservableObject {
 
 extension CityLocator: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        MainActor.assumeIsolated {
-            switch manager.authorizationStatus {
-            case .authorized, .authorizedAlways:
-                guard continuation != nil else { return }
-                manager.requestLocation()
-            case .denied, .restricted:
-                state = .denied
+        azaAssumeMainUnchecked {
+            guard continuation != nil else { return }
+            if let unavailable = Self.unavailableState(manager.authorizationStatus,
+                                                        servicesEnabled: servicesEnabled()) {
+                state = unavailable
                 finish(nil)
-            default:
-                break
+            } else if manager.authorizationStatus != .notDetermined {
+                requestLocationIfNeeded()
             }
         }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager,
                                      didUpdateLocations locations: [CLLocation]) {
-        MainActor.assumeIsolated {
+        azaAssumeMainUnchecked {
+            // Ответ отменённого или истёкшего запроса не меняет город.
+            guard continuation != nil else { return }
             // Устаревшие и невалидные фиксы отбрасываем.
             guard let location = locations.last,
                   location.horizontalAccuracy >= 0,
@@ -118,8 +162,11 @@ extension CityLocator: CLLocationManagerDelegate {
 
     nonisolated func locationManager(_ manager: CLLocationManager,
                                      didFailWithError error: Error) {
-        MainActor.assumeIsolated {
-            state = .failed(error.localizedDescription)
+        azaAssumeMainUnchecked {
+            guard continuation != nil else { return }
+            state = Self.unavailableState(manager.authorizationStatus,
+                                           servicesEnabled: servicesEnabled())
+                ?? .failed(error.localizedDescription)
             finish(nil)
         }
     }

@@ -1,5 +1,21 @@
 import Foundation
 
+/// Поколение отменяется при блокировке и очистке: уже начатый async-прогон
+/// может завершиться после cancel(), но не имеет права публиковать результат.
+struct DictationSession {
+    private(set) var generation = UUID()
+    var isLocked = false
+    var isDeletingModels = false
+
+    var canStart: Bool { !isLocked && !isDeletingModels }
+
+    mutating func invalidate() { generation = UUID() }
+
+    func accepts(_ generation: UUID) -> Bool {
+        canStart && self.generation == generation
+    }
+}
+
 /// Чистая логика фильтров диктовки. Вынесена из DictationController,
 /// чтобы тестироваться без WhisperKit (тест-таргет собирает явный список
 /// файлов и пакет не линкует).
