@@ -254,14 +254,15 @@ final class InputSafetyTests: XCTestCase {
         XCTAssertFalse(window.isKeyWindow, "закрытое окно не должно удерживать ввод")
     }
 
-    func testCompactPanelOpensOnNativeClickWithoutAnEventTap() throws {
+    func testCompactPanelOpensOnNativeClickWithoutAnEventTap() async throws {
         _ = NSApplication.shared
         let panel = IslandPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 32),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
         panel.isCompact = true
         var opened = 0
-        panel.onCompactClick = { opened += 1 }
+        let click = expectation(description: "native compact click")
+        panel.onCompactClick = { opened += 1; click.fulfill() }
         defer { panel.close() }
         func send(_ type: NSEvent.EventType, at point: NSPoint = NSPoint(x: 100, y: 16)) throws {
             let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
@@ -273,11 +274,11 @@ final class InputSafetyTests: XCTestCase {
         try send(.leftMouseDown)
         XCTAssertEqual(opened, 0)
         try send(.leftMouseUp)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        await fulfillment(of: [click], timeout: 2)
         XCTAssertEqual(opened, 1)
         try send(.leftMouseDown)
         try send(.leftMouseUp, at: NSPoint(x: 300, y: 16))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(opened, 1, "отпускание снаружи отменяет клик")
         XCTAssertFalse(panel.isKeyWindow, "компактный клик не забирает клавиатуру")
     }

@@ -7,6 +7,9 @@ import XCTest
 @MainActor
 final class PermissionTests: XCTestCase {
     func testModalWindowReceivesClicksInsteadOfSettingsBehindIt() async throws {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        try XCTSkipIf(session?["CGSSessionScreenIsLocked"] as? Bool == true,
+                      "WindowServer hides application windows behind the locked screen")
         _ = NSApplication.shared
         let frame = NSRect(x: 100, y: 100, width: 200, height: 120)
         let settings = NSWindow(contentRect: frame, styleMask: .borderless,

@@ -7,10 +7,11 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     env:
-      # Default actor isolation requires Swift 6.2 (Xcode 26+).
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      # Match the release toolchain; older runtimes crash in isolated deinit
+      # during XCTest: https://github.com/swiftlang/swift/issues/88036
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
 
@@ -18,6 +19,19 @@ jobs:
         run: |
           cd Tools/BuildChechenLexicon
           swift test
+
+      - name: Enable keyboard layouts used by integration tests
+        run: |
+          swift - <<'SWIFT'
+          import Carbon.HIToolbox
+          import Foundation
+          for id in ["com.apple.keylayout.US", "com.apple.keylayout.Russian"] {
+              let filter = [kTISPropertyInputSourceID as String: id] as CFDictionary
+              let sources = TISCreateInputSourceList(filter, true).takeRetainedValue() as! [TISInputSource]
+              guard let source = sources.first else { fatalError("Missing input source: \(id)") }
+              precondition(TISEnableInputSource(source) == noErr, "Cannot enable \(id)")
+          }
+          SWIFT
 
       # Signing is skipped: the Debug config uses a local development
       # certificate that only exists on the maintainer's machine.
