@@ -335,6 +335,17 @@ enum TextInsertion {
         ) == .success
     }
 
+    /// AX пишет в конкретное обычное поле и не перехватывает клавиатуру.
+    /// Secure Event Input может быть включён для всего приложения, даже
+    /// когда в фокусе не пароль. Синтетический ввод ниже остаётся запрещён.
+    static func insertIntoFocusedField(_ text: String, targetPid: pid_t?,
+                                       verifying element: AXUIElement?) -> Bool {
+        guard let targetPid, targetPid > 0, let element,
+              let current = focusedElement(), isTextLike(current),
+              focusMatches(targetPid: targetPid, verifying: element, focused: current) else { return false }
+        return insert(text, into: current) == .success
+    }
+
     /// Перепроверка перед ОТЛОЖЕННЫМ синтетическим ⌘V: за задержку фокус
     /// мог уехать в другое приложение или в защищённое поле, не поднимающее
     /// SecureEventInput (guard в postPasteCommand его не поймал бы).
@@ -342,7 +353,11 @@ enum TextInsertion {
     /// сверяем только secure. Эталон паттерна — диктовка (аудит 30.08).
     static func focusSafeForPaste(targetPid: pid_t?, verifying element: AXUIElement? = nil) -> Bool {
         guard !IsSecureEventInputEnabled() else { return false }
-        let focused = focusedElement()
+        return focusMatches(targetPid: targetPid, verifying: element, focused: focusedElement())
+    }
+
+    private static func focusMatches(targetPid: pid_t?, verifying element: AXUIElement?,
+                                     focused: AXUIElement?) -> Bool {
         if let focused, SecureFieldDetector.isSecure(focused) { return false }
         let pidNow = focused.flatMap { processID(of: $0) }
             ?? NSWorkspace.shared.frontmostApplication?.processIdentifier

@@ -339,6 +339,20 @@ final class InputSafetyTests: XCTestCase {
             targetPid: -1, verifying: AXUIElementCreateApplication(-1)))
     }
 
+    func testDirectDictationRequiresAKnownOriginalTarget() {
+        let unavailable = AXUIElementCreateApplication(-1)
+        for pid: pid_t? in [nil, 0, -1] {
+            XCTAssertFalse(TextInsertion.insertIntoFocusedField(
+                "Не вставлять", targetPid: pid, verifying: unavailable))
+        }
+        XCTAssertFalse(TextInsertion.insertIntoFocusedField(
+            "Не вставлять", targetPid: ProcessInfo.processInfo.processIdentifier, verifying: nil),
+            "Без исходного поля адресная вставка невозможна")
+        XCTAssertFalse(TextInsertion.insertIntoFocusedField(
+            "Не вставлять", targetPid: ProcessInfo.processInfo.processIdentifier,
+            verifying: unavailable), "Исчезнувшее поле не разрешает вставку в новое")
+    }
+
     func testOutOfRangeStoredKeyCodeDoesNotTrap() throws {
         let data = Data(#"{"keyCode":65536,"modifiers":0}"#.utf8)
         let binding = try JSONDecoder().decode(HotKeyBinding.self, from: data)

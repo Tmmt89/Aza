@@ -1817,10 +1817,10 @@ final class DictationController: ObservableObject {
         // буфер ниже используется лишь как ТРАНСПОРТ для ⌘V-фолбэков и
         // возвращается к прежнему содержимому. Если вставлять некуда —
         // транскрипт остаётся в буфере настоящей копией (guard ниже).
-        // Персист истории — вне ВСЕХ путей вставки, включая отложенный
-        // ⌘V-добив на 180 мс: AES + запись на главном потоке не должны
-        // задержать и его. Планируется здесь (до любых ранних выходов —
-        // §5.6 сохраняется), выполняется через 250 мс; метка времени —
+        // Персист истории — после вставки: AES + запись на главном потоке
+        // не должны задерживать появление текста. Планируется здесь
+        // до любых ранних выходов (§5.6), выполняется через 250 мс;
+        // метка времени —
         // момента диктовки, чтобы копия пользователя в эти 250 мс не
         // оказалась в истории «раньше» транскрипта.
         let store = clipboardStore
@@ -1831,6 +1831,15 @@ final class DictationController: ObservableObject {
                          sourceAppBundleID: Bundle.main.bundleIdentifier,
                          sourceAppName: "Aza (диктовка)",
                          copiedAt: dictatedAt, isTranscript: true)
+        }
+
+        // Сначала адресная вставка в прежнее обычное поле. Проверка
+        // клавиатурного фолбэка не должна запрещать AX из-за Secure Input
+        // всего приложения. При успехе системный буфер вообще не меняем.
+        if TextInsertion.insertIntoFocusedField(text, targetPid: targetPid, verifying: element) {
+            status = "Вставлено (\(language == "ce" ? "OmniASR" : language)): \(text.prefix(60))"
+            applyPendingProfileChange()
+            return
         }
 
         // Исходное поле должно оставаться в фокусе. Когда AX слеп
@@ -1871,9 +1880,8 @@ final class DictationController: ObservableObject {
         pasteboard.setString("", forType:
             NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
         let written = pasteboard.changeCount
-        // Возврат буфера — после последнего фолбэка (⌘V на 180 мс) с
-        // запасом на обработку события целевым приложением. Если за это
-        // время буфер менял кто-то другой — не трогаем: его копия новее.
+        // Возврат буфера — с запасом на обработку ⌘V целевым приложением.
+        // Если буфер менял кто-то другой — не трогаем: его копия новее.
         // ponytail: 600 мс — потолок для медленных Electron; если ⌘V
         // обрабатывается дольше, вставится восстановленное — поднять задержку.
         // Это откат транспортной копии, он нужен и после блокировки:
@@ -1884,37 +1892,10 @@ final class DictationController: ObservableObject {
             if !saved.isEmpty { pasteboard.writeObjects(saved) }
         }
 
-        let inserted: Bool
-        let caretBefore = current.flatMap(TextInsertion.caretPosition(of:))
-        if let current, !SecureFieldDetector.isSecure(current),
-           TextInsertion.isTextLike(current),
-           TextInsertion.insert(text, into: current) == .success {
-            inserted = true
-            // Electron может ответить success, ничего не вставив: каретка
-            // обязана сдвинуться. ⌘V — только при точно неподвижной
-            // каретке (как в ClipboardCommands): двойная вставка хуже.
-            if let caretBefore {
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) { [weak self] in
-                    guard self?.session.accepts(generation) == true,
-                          pasteboard.changeCount == written else { return }
-                    guard TextInsertion.caretPosition(of: current) == caretBefore else { return }
-                    // За 180 мс фокус мог уехать: ⌘V летит в ТЕКУЩЕЕ поле,
-                    // поэтому приложение и secure сверяем заново.
-                    guard TextInsertion.focusSafeForPaste(
-                        targetPid: targetPid, verifying: current) else { return }
-                    _ = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: current)
-                }
-            }
-        } else if let current, SecureFieldDetector.isSecure(current) {
-            // Защищённое поле: не вставляем; транскрипт ждёт во вкладке.
-            inserted = false
-        } else {
-            // AX не видит поле или отверг вставку (Claude-чат VS Code,
-            // Electron) — текст уже в буфере, добиваем синтетическим ⌘V,
-            // как вставка из истории буфера (ClipboardCommands).
-            inserted = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: element ?? current)
-            azaDebugLog("Aza: dictation paste fallback ok=\(inserted ? 1 : 0)")
-        }
+        // AX уже проверен выше. Повторять запись нельзя: это может
+        // продублировать текст в редакторе с асинхронным ответом.
+        let inserted = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: element ?? current)
+        azaDebugLog("Aza: dictation paste fallback ok=\(inserted ? 1 : 0)")
         status = inserted
             ? "Вставлено (\(language == "ce" ? "OmniASR" : language)): \(text.prefix(60))"
             : "Транскрипт во вкладке «Диктовка»: \(text.prefix(60))"
