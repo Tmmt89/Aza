@@ -760,9 +760,9 @@ final class IslandStore: ObservableObject {
 
     /// Клик по карточке: положить в буфер и вставить в поле приложения,
     /// из которого пользователь пришёл.
-    func reuse(_ id: ClipEntry.ID) {
+    func reuse(_ id: ClipEntry.ID, plainText: Bool = false) {
         guard let entry = entries.first(where: { $0.id == id }) else { return }
         dismissIsland()
-        commands.insertIntoActiveApp(entry)
+        commands.insertIntoActiveApp(entry, plainText: plainText)
     }
 }

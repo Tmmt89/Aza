@@ -50,7 +50,7 @@ final class GlobalHotKey: ObservableObject {
 
     private var hotKeyController: HotKeyController?
     private var wordMonitor: WordMonitor?
-    private var shiftMonitor: Any?
+    private var shiftMonitor: ModifierKeyMonitor?
     /// Последнее применённое исправление — для отката двойным правым Shift.
     /// При фразовой замене original/corrected содержат весь охваченный
     /// диапазон, originalWords — слова для занесения в исключения.
@@ -137,8 +137,9 @@ final class GlobalHotKey: ObservableObject {
             startUndoMonitor()
         } else {
             wordMonitor?.stop()
-            if let shiftMonitor { NSEvent.removeMonitor(shiftMonitor) }
+            shiftMonitor?.stop()
             shiftMonitor = nil
+            lastRightShiftPress = .distantPast
             recentWords.removeAll()
         }
     }
@@ -148,28 +149,25 @@ final class GlobalHotKey: ObservableObject {
         wordMonitor?.stop()
         recentWords.removeAll()
         if let shiftMonitor {
-            NSEvent.removeMonitor(shiftMonitor)
+            shiftMonitor.stop()
             self.shiftMonitor = nil
         }
+        lastRightShiftPress = .distantPast
     }
 
     // MARK: Отмена последнего исправления (двойной правый Shift)
 
     private func startUndoMonitor() {
         guard shiftMonitor == nil else { return }
-        shiftMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            azaAssumeMainUnchecked {
-                self?.handleFlagsChanged(event)
-            }
-        }
+        guard let monitor = ModifierKeyMonitor(keyCode: UInt16(kVK_RightShift),
+            onPress: { [weak self] in self?.handleRightShiftPress() }),
+              monitor.register() == nil else { return }
+        shiftMonitor = monitor
     }
 
-    /// flagsChanged приходит и на нажатие, и на отпускание; нажатием считаем
-    /// момент, когда .shift ещё зажат, а код — именно правого Shift (54).
-    private func handleFlagsChanged(_ event: NSEvent) {
-        guard event.keyCode == UInt16(kVK_RightShift),
-              event.modifierFlags.contains(.shift) else { return }
-
+    /// ModifierKeyMonitor вызывает только на физическое нажатие правого
+    /// Shift: удержание левого не превращает отпускание правого в тап.
+    private func handleRightShiftPress() {
         let now = Date()
         guard now.timeIntervalSince(lastRightShiftPress) < 0.7 else {
             lastRightShiftPress = now

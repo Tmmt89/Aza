@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		CF0600000000000000000005 /* IslandPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0600000000000000000006 /* IslandPanel.swift */; };
 		CF0600000000000000000001 /* IslandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0600000000000000000002 /* IslandStore.swift */; };
 		CF0600000000000000000003 /* ClipboardCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0600000000000000000004 /* ClipboardCommands.swift */; };
 		CECE00000000000000000001 /* OmniASR.swift in Sources */ = {isa = PBXBuildFile; fileRef = CECE00000000000000000002 /* OmniASR.swift */; };
@@ -65,6 +66,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		CF0600000000000000000006 /* IslandPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Island/IslandPanel.swift; sourceTree = SOURCE_ROOT; };
 		CF0600000000000000000002 /* IslandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Island/IslandStore.swift; sourceTree = SOURCE_ROOT; };
 		CF0600000000000000000004 /* ClipboardCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Core/ClipboardCommands.swift; sourceTree = SOURCE_ROOT; };
 		CECE00000000000000000002 /* OmniASR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Aza/Features/Dictation/OmniASR.swift; sourceTree = SOURCE_ROOT; };
@@ -184,6 +186,7 @@
 				BBBB00000000000000000107 /* Aza/Core/TextInsertion.swift */,
 				CF0500000000000000000002 /* HotKeyRecorder.swift */,
 				CF0600000000000000000002 /* IslandStore.swift */,
+				CF0600000000000000000006 /* IslandPanel.swift */,
 				CF0600000000000000000004 /* ClipboardCommands.swift */,
 				BBBB00000000000000000144 /* Aza/Features/HotKeys/HotKeyController.swift */,
 				BBBB00000000000000000143 /* Aza/Features/HotKeys/HotKeyBinding.swift */,
@@ -360,6 +363,7 @@
 				BBBB00000000000000000207 /* Aza/Core/TextInsertion.swift in Sources */,
 				CF0500000000000000000001 /* HotKeyRecorder.swift in Sources */,
 				CF0600000000000000000001 /* IslandStore.swift in Sources */,
+				CF0600000000000000000005 /* IslandPanel.swift in Sources */,
 				CF0600000000000000000003 /* ClipboardCommands.swift in Sources */,
 				BBBB00000000000000000244 /* Aza/Features/HotKeys/HotKeyController.swift in Sources */,
 				BBBB00000000000000000243 /* Aza/Features/HotKeys/HotKeyBinding.swift in Sources */,
@@ -514,7 +518,7 @@
 				CODE_SIGN_IDENTITY = "Aza Development";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -528,7 +532,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tmmt.Aza;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -550,7 +554,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -564,7 +568,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tmmt.Aza;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

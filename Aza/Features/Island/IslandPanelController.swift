@@ -13,29 +13,6 @@ import SwiftUI
 ///   ввод у активного приложения;
 /// - активационную политику не трогаем: приложение уже LSUIElement.
 
-@MainActor
-final class IslandPanel: NSPanel {
-    // Ключевой панель становится только по требованию (режим буфера
-    // с поиском): пассивные режимы не должны отбирать фокус.
-    var wantsKey = false
-    override var canBecomeKey: Bool { wantsKey }
-    override var canBecomeMain: Bool { false }
-    /// Контекстное меню карточек (.contextMenu): hosting-вью отдаёт NSMenu
-    /// через menu(for:), но по цепочке ответчиков от вложенного
-    /// HostingScrollView правый клик до показа меню не доходит (проверено
-    /// 04.09: menu(for:) у hit-вью nil, tracking NSMenu не начинается).
-    /// Показываем сами штатным popUpContextMenu.
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .rightMouseDown, let host = contentView,
-           let menu = host.menu(for: event) {
-            azaDebugLog("Aza: panel context menu \(menu.items.map(\.title))")
-            NSMenu.popUpContextMenu(menu, with: event, for: host)
-            return
-        }
-        super.sendEvent(event)
-    }
-}
-
 /// Панель неактивирующая, поэтому приложение при клике не активируется и
 /// КАЖДЫЙ клик для macOS — «первый по неактивному приложению»: без этого
 /// override система не доносит mouseDown до вью, и тапы по острову
@@ -94,6 +71,15 @@ final class IslandPanelController {
             defer: false
         )
         panel.isOpaque = false
+        panel.isCompact = store.mode == .idle
+        panel.onCompactClick = { [weak store] in
+            guard let store, store.mode == .idle, store.isIslandVisible else { return }
+            store.show(.home)
+        }
+        panel.onFavoriteShortcut = { [weak store] in
+            guard let store, store.mode == .clipboard, let id = store.selectedID else { return }
+            store.toggleFavorite(id)
+        }
         panel.backgroundColor = .clear
         panel.hasShadow = false
         // .screenSaver: остров обязан быть выше системных оверлеев полосы
@@ -285,6 +271,7 @@ final class IslandPanelController {
     /// Окно не анимируется — кадр сразу финальный (анимация ломала
     /// доставку кликов), одинаковый размер оставляет старое окно.
     private func transition(to mode: IslandMode) {
+        panel.isCompact = mode == .idle
         let oldSize = panel.frame.size
         resize(for: mode)
         let target = panel.frame
@@ -292,6 +279,7 @@ final class IslandPanelController {
         let old = panel
         if old.isKeyWindow { old.resignKey() }
         let fresh = Self.makePanel(frame: target, store: store)
+        fresh.isCompact = mode == .idle
         panel = fresh
         if old.isVisible {
             fresh.orderFrontRegardless()
@@ -726,11 +714,10 @@ final class IslandPanelController {
                 return false
             }
         } else if store.isIslandVisible, store.mode == .clipboard {
-            // ⌘-сочетания — хоткеи, не глотаем; исключение — ⌘A
-            // (выделить все карточки), она живёт в панели.
+            // Команды списка: ⌘A — выделение, ⌘D — избранное.
             if cgEvent.flags.contains(.maskCommand) {
                 let keycode = cgEvent.getIntegerValueField(.keyboardEventKeycode)
-                guard keycode == 0 else { return false } // kVK_ANSI_A
+                guard keycode == 0 || keycode == 2 else { return false } // A / D
             }
             // Открытый буфер — клавиши его, даже если key-статус панели
             // слетел (после контекстного меню клавиши уходили в чужое
@@ -1115,6 +1102,11 @@ final class IslandPanelController {
 
     private func handleMouseMoved(at mouse: NSPoint) {
         guard let screen = activeScreen else { return }
+        // Видимость в режиме «Всегда» и во время отсчёта не меняется,
+        // поэтому перенести панель должен сам переход на другой экран.
+        if store.mode == .idle, store.isIslandVisible, panel.screen?.frame != screen.frame {
+            resize(for: .idle)
+        }
         let isInActivationArea = IslandHitTesting.hoverRect(on: screen).contains(mouse)
         let isInCompactIsland = store.mode == .idle
             && store.isIslandVisible

@@ -34,9 +34,9 @@ final class ClipboardCommands: ObservableObject {
 
     /// Кладёт запись в системный буфер сообразно её виду.
     @discardableResult
-    func copyToPasteboard(_ entry: ClipEntry) -> Bool {
+    func copyToPasteboard(_ entry: ClipEntry, plainText: Bool = false,
+                         pasteboard: NSPasteboard = .general) -> Bool {
         guard let store, !store.screenLocked else { return false }
-        let pasteboard = NSPasteboard.general
         // clearContents — только после того, как данные добыты: неудача
         // (нечитаемый blob) не должна стирать прежнее содержимое буфера.
         switch entry.resolvedKind {
@@ -57,7 +57,7 @@ final class ClipboardCommands: ObservableObject {
             pasteboard.setData(data, forType: .png)
         case .rtf:
             PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
-            if let rtf = entry.rtfData { pasteboard.setData(rtf, forType: .rtf) }
+            if !plainText, let rtf = entry.rtfData { pasteboard.setData(rtf, forType: .rtf) }
             pasteboard.setString(entry.text, forType: .string)
         case .text, .link:
             PasteboardMonitor.ignoredChangeCount = pasteboard.clearContents()
@@ -72,8 +72,8 @@ final class ClipboardCommands: ObservableObject {
     /// Копирует и пытается вставить в поле приложения, которое было
     /// активным до открытия нашего интерфейса. Не-текстовые виды
     /// остаются в буфере: AX-вставка умеет только текст.
-    func insertIntoActiveApp(_ entry: ClipEntry) {
-        guard copyToPasteboard(entry) else { return }
+    func insertIntoActiveApp(_ entry: ClipEntry, plainText: Bool = false) {
+        guard copyToPasteboard(entry, plainText: plainText) else { return }
         guard entry.resolvedKind != .image, entry.resolvedKind != .files else {
             status = "В буфере — вставьте ⌘V в нужном месте"
             return
@@ -114,6 +114,14 @@ final class ClipboardCommands: ObservableObject {
             }
             guard !SecureFieldDetector.isSecure(element) else {
                 self.status = "Защищённое поле — вставьте ⌘V"
+                return
+            }
+            // AX принимает только строку. Исходное оформление вставляет
+            // сам редактор из RTF; Shift+Enter оставляет в буфере текст.
+            if entry.resolvedKind == .rtf && !plainText {
+                self.status = TextInsertion.postPasteCommand(targetPid: targetPid, verifying: element)
+                    ? "Вставлено в активное приложение"
+                    : "Поле сменилось — текст в буфере (⌘V)"
                 return
             }
             let caretBefore = TextInsertion.caretPosition(of: element)

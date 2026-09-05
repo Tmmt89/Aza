@@ -2,6 +2,35 @@ import XCTest
 
 @MainActor
 final class DictationFilterTests: XCTestCase {
+    func testFillerCleanupPreservesMeasurementsAndPunctuation() {
+        for text in ["Диаметр 10 мм.", "Зазор 2 мм, длина 30 мм.", "Толщина в мм: 0,5."] {
+            XCTAssertEqual(DictationFilters.removingFillerSounds(from: text), text)
+        }
+        XCTAssertEqual(DictationFilters.removingFillerSounds(from: "Эм, диаметр 10 мм."),
+                       "Диаметр 10 мм.")
+    }
+
+    func testWhisperCacheRequiresEveryModelComponentAndNonemptyWeights() throws {
+        let folder = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        XCTAssertFalse(DictationController.isModelCached(in: folder))
+        for component in ["MelSpectrogram", "AudioEncoder", "TextDecoder"] {
+            let model = folder.appendingPathComponent(component + ".mlmodelc")
+            try FileManager.default.createDirectory(at: model.appendingPathComponent("weights"),
+                                                     withIntermediateDirectories: true)
+            for file in ["coremldata.bin", "model.mil", "weights/weight.bin"] {
+                XCTAssertFalse(DictationController.isModelCached(in: folder))
+                try Data([1]).write(to: model.appendingPathComponent(file))
+            }
+        }
+        XCTAssertTrue(DictationController.isModelCached(in: folder))
+        let weights = folder.appendingPathComponent("TextDecoder.mlmodelc/weights/weight.bin")
+        try Data().write(to: weights)
+        XCTAssertFalse(DictationController.isModelCached(in: folder))
+        try FileManager.default.removeItem(at: weights)
+        XCTAssertFalse(DictationController.isModelCached(in: folder))
+    }
+
     func testLockAndDeletionRejectStaleDictationResults() {
         var session = DictationSession()
         let captured = session.generation

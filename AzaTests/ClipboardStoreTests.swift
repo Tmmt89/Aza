@@ -15,6 +15,102 @@ final class ClipboardStoreTests: XCTestCase {
                        byteBudget: byteBudget)
     }
 
+    func testUndoAfterNewCopiesDeduplicatesAndKeepsLimitsAfterReload() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("undo.bin")
+        let store = makeStore(at: url, maxEntries: 2, byteBudget: 10)
+        store.add(text: "aaaaa", sourceAppBundleID: nil, sourceAppName: nil)
+        let deleted = try XCTUnwrap(store.delete(id: store.entries[0].id))
+        store.add(text: "aaaaa", sourceAppBundleID: "new.app", sourceAppName: "New")
+        store.add(text: "bbbbb", sourceAppBundleID: nil, sourceAppName: nil)
+        store.restore(deleted)
+        store.restore(deleted) // Повторная отмена тоже идемпотентна.
+        XCTAssertEqual(store.entries.map(\.text), ["bbbbb", "aaaaa"])
+        XCTAssertEqual(store.entries.last?.sourceAppBundleID, "new.app")
+        XCTAssertEqual(makeStore(at: url, maxEntries: 2, byteBudget: 10).entries, store.entries)
+
+        let removed = try XCTUnwrap(store.delete(id: store.entries.last!.id))
+        store.add(text: "ccccc", sourceAppBundleID: nil, sourceAppName: nil)
+        store.restore(removed)
+        XCTAssertEqual(store.entries.map(\.text), ["ccccc", "bbbbb"], "отмена соблюдает и лимит без дубликата")
+    }
+
+    func testUndoMergesFavoriteImagesAndRemovesOnlyRedundantBlob() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("images.bin")
+        let store = makeStore(at: url)
+        let image = Data([1, 2, 3, 4])
+        store.addImage(png: image, label: "old", thumbnail: nil,
+                       sourceAppBundleID: nil, sourceAppName: nil)
+        let old = try XCTUnwrap(store.entries.first)
+        store.toggleFavorite(id: old.id)
+        let deleted = try XCTUnwrap(store.delete(id: old.id))
+        store.addImage(png: image, label: "new", thumbnail: nil,
+                       sourceAppBundleID: nil, sourceAppName: nil)
+        store.restore(deleted)
+        let restored = try XCTUnwrap(store.entries.first)
+        XCTAssertEqual(store.entries.count, 1)
+        XCTAssertTrue(restored.isFavorite == true)
+        XCTAssertEqual(store.imageData(for: restored), image)
+        XCTAssertNil(store.imageData(for: old))
+        XCTAssertEqual(makeStore(at: url).entries, store.entries)
+    }
+
+    func testRTFCopyPreservesFormattingAndPlainCopyDropsIt() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = makeStore(at: directory.appendingPathComponent("rtf.bin"))
+        let text = NSAttributedString(string: "Формат", attributes: [.foregroundColor: NSColor.red])
+        let rtf = try XCTUnwrap(text.rtf(from: NSRange(location: 0, length: text.length),
+                                       documentAttributes: [:]))
+        store.addRTF(text: text.string, rtf: rtf, sourceAppBundleID: nil, sourceAppName: nil)
+        let entry = try XCTUnwrap(store.entries.first)
+        let commands = ClipboardCommands { store }
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        XCTAssertTrue(commands.copyToPasteboard(entry, pasteboard: pasteboard))
+        let copied = try NSAttributedString(data: XCTUnwrap(pasteboard.data(forType: .rtf)),
+            options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
+        XCTAssertEqual(copied.string, text.string)
+        let color = try XCTUnwrap((copied.attribute(.foregroundColor, at: 0, effectiveRange: nil)
+                                  as? NSColor)?.usingColorSpace(.deviceRGB))
+        XCTAssertEqual(color.redComponent, 1, accuracy: 0.01)
+        XCTAssertEqual(color.greenComponent, 0, accuracy: 0.01)
+        XCTAssertTrue(commands.copyToPasteboard(entry, plainText: true, pasteboard: pasteboard))
+        XCTAssertNil(pasteboard.data(forType: .rtf))
+        XCTAssertEqual(pasteboard.string(forType: .string), text.string)
+    }
+
+    func testClipboardPanelCommandDTogglesFavoriteOncePerPressAndPersistsIt() throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("favorite.bin")
+        let store = makeStore(at: url)
+        store.add(text: "selected", sourceAppBundleID: nil, sourceAppName: nil)
+        let id = try XCTUnwrap(store.entries.first?.id)
+        let panel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                                backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.wantsKey = true
+        panel.onFavoriteShortcut = { store.toggleFavorite(id: id) }
+        defer { panel.close() }
+        func send(_ type: NSEvent.EventType, repeatKey: Bool = false) throws {
+            panel.sendEvent(try XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero,
+                modifierFlags: .command, timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: panel.windowNumber, context: nil, characters: "d",
+                charactersIgnoringModifiers: "d", isARepeat: repeatKey, keyCode: 2)))
+        }
+        try send(.keyDown)
+        try send(.keyDown, repeatKey: true)
+        try send(.keyUp)
+        XCTAssertTrue(makeStore(at: url).entries.first?.isFavorite == true)
+        try send(.keyDown)
+        try send(.keyUp)
+        XCTAssertFalse(makeStore(at: url).entries.first?.isFavorite == true)
+    }
+
     func testPasteboardTypeLabels() {
         XCTAssertEqual(PasteboardCategories.labels(for: [.string]), ["текст"])
         XCTAssertEqual(PasteboardCategories.labels(for: [.rtf, .png, .fileURL]),

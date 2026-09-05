@@ -36,7 +36,7 @@ Aza (от чеченского «голос») — бесплатный open-sou
 
 ## Запуск
 
-Требуется Xcode с macOS SDK.
+Требуется Xcode 26.3 или новее с macOS SDK.
 
 ```bash
 xcodebuild -project Aza.xcodeproj -scheme Aza \

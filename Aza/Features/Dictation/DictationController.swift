@@ -545,9 +545,24 @@ final class DictationController: ObservableObject {
             .appendingPathComponent(profile.variant, isDirectory: true)
     }
 
-    /// Есть ли модель профиля на диске (в кэше WhisperKit).
+    /// Пустая папка или часть скачанных компонентов ещё не модель.
     static func isModelCached(_ profile: Profile) -> Bool {
-        FileManager.default.fileExists(atPath: cachedModelFolder(profile).path)
+        isModelCached(in: cachedModelFolder(profile))
+    }
+
+    static func isModelCached(in folder: URL) -> Bool {
+        // Три обязательных CoreML-компонента текущих профилей WhisperKit.
+        // Не загружаем гигабайты весов ради перерисовки настроек; глубокую
+        // проверку и восстановление повреждённых байтов выполняет prepareModel.
+        let files = ["coremldata.bin", "model.mil", "weights/weight.bin"]
+        return ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { component in
+            files.allSatisfy { file in
+                let url = folder.appendingPathComponent(component + ".mlmodelc/" + file)
+                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                else { return false }
+                return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+            }
+        }
     }
 
     /// Выгружает модель из памяти: после удаления файлов ссылка на них

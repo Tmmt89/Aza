@@ -39,6 +39,16 @@ struct ClipEntry: Codable, Equatable, Identifiable {
     var thumbnailData: Data?
 
     var resolvedKind: Kind { kind ?? .text }
+
+    func hasSameContent(as other: ClipEntry) -> Bool {
+        guard resolvedKind == other.resolvedKind else { return false }
+        switch resolvedKind {
+        case .text, .link: return text == other.text
+        case .files: return filePaths != nil && filePaths == other.filePaths
+        case .rtf: return rtfData != nil && rtfData == other.rtfData
+        case .image: return contentHash != nil && contentHash == other.contentHash
+        }
+    }
 }
 
 /// Хранилище истории буфера: AES-GCM (CryptoKit) на диске, ключ —
@@ -461,10 +471,18 @@ final class ClipboardStore: ObservableObject {
     /// не смещают точку вставки.
     func restore(_ deleted: Deleted) {
         guard !screenLocked else { return }
-        let index = entries.firstIndex { $0.createdAt < deleted.entry.createdAt }
-            ?? entries.count
-        entries.insert(deleted.entry, at: index)
-        save()
+        if let index = entries.firstIndex(where: {
+            $0.id == deleted.entry.id || $0.hasSameContent(as: deleted.entry)
+        }) {
+            // Новое копирование сохраняет время и источник; избранное и
+            // пометка диктовки восстановленной карточки не теряются.
+            if deleted.entry.isFavorite == true { entries[index].isFavorite = true }
+            if deleted.entry.isTranscript == true { entries[index].isTranscript = true }
+            let redundant = entries[index].id == deleted.entry.id ? [] : [deleted.entry]
+            commit(removingBlobsOf: redundant + pruneExpired() + pruneExcess())
+        } else {
+            insertNew(deleted.entry)
+        }
     }
 
     /// Очищает историю, сохраняя избранное (как обещает кнопка в меню).

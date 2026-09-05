@@ -168,6 +168,7 @@ final class InputSafetyTests: XCTestCase {
                 try send(other, ownMask | otherMask)
                 try send(own, otherMask)
                 XCTAssertEqual(releases, 1, "своя клавиша отпущена, другая ещё зажата")
+                XCTAssertEqual(presses, 1, "отпускание правого Shift при зажатом левом не является вторым тапом")
                 try send(other, 0)
                 try send(own, ownMask)
                 try send(other, ownMask | otherMask)
@@ -251,6 +252,34 @@ final class InputSafetyTests: XCTestCase {
         window.orderOut(nil)
         XCTAssertFalse(window.isVisible)
         XCTAssertFalse(window.isKeyWindow, "закрытое окно не должно удерживать ввод")
+    }
+
+    func testCompactPanelOpensOnNativeClickWithoutAnEventTap() throws {
+        _ = NSApplication.shared
+        let panel = IslandPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 32),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.isCompact = true
+        var opened = 0
+        panel.onCompactClick = { opened += 1 }
+        defer { panel.close() }
+        func send(_ type: NSEvent.EventType, at point: NSPoint = NSPoint(x: 100, y: 16)) throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: panel.windowNumber, context: nil, eventNumber: 1,
+                clickCount: 1, pressure: 0))
+            panel.sendEvent(event)
+        }
+        try send(.leftMouseDown)
+        XCTAssertEqual(opened, 0)
+        try send(.leftMouseUp)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        XCTAssertEqual(opened, 1)
+        try send(.leftMouseDown)
+        try send(.leftMouseUp, at: NSPoint(x: 300, y: 16))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        XCTAssertEqual(opened, 1, "отпускание снаружи отменяет клик")
+        XCTAssertFalse(panel.isKeyWindow, "компактный клик не забирает клавиатуру")
     }
 
     func testTechnicalTokensNeverProduceCorrectionCandidates() {

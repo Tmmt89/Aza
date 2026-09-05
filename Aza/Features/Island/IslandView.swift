@@ -247,6 +247,8 @@ private struct IdleIslandView: View {
         // который смена режима (.id(mode)) убивала посреди клика вместе
         // с вью — после этого AppKit переставал доставлять окну клики.
         .accessibilityHint("Открыть Aza")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { store.show(.home) }
     }
 
     private func countdownText(
@@ -949,7 +951,7 @@ private struct ClipboardIslandView: View {
                 return .handled
             case .return:
                 if let id = store.selectedID {
-                    store.reuse(id)
+                    store.reuse(id, plainText: press.modifiers.contains(.shift))
                 }
                 return .handled
             case .escape:
