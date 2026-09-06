@@ -18,6 +18,7 @@ struct OnboardingView: View {
     @State private var phrase = "Спасибо! Посмотрю и вернусь с ответом."
     @State private var alternate = false
     @State private var insertedPhrase = ""
+    @Namespace private var stepNS
 
     private typealias Step = OnboardingProgress.Step
     private let clipboardExample = "Обсудить макет завтра в 10:00"
@@ -26,27 +27,32 @@ struct OnboardingView: View {
         HStack(spacing: 0) {
             navigation
             VStack(alignment: .leading, spacing: 0) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        heading
-                        if progress.step == .welcome {
-                            welcome
-                        } else if progress.step == .finish {
-                            finish
-                        } else {
-                            example
-                            instructions
-                            preparation
+                ZStack(alignment: .topLeading) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 24) {
+                            heading
+                            if progress.step == .welcome {
+                                welcome
+                            } else if progress.step == .finish {
+                                finish
+                            } else {
+                                example
+                                instructions
+                                preparation
+                            }
                         }
+                        .padding(28)
+                        .frame(maxWidth: 680, alignment: .leading)
+                        .frame(maxWidth: .infinity)
                     }
-                    .padding(28)
-                    .frame(maxWidth: 680, alignment: .leading)
-                    .frame(maxWidth: .infinity)
+                    .id(progress.step)
+                    .transition(.opacity)
                 }
-                .id(progress.step)
                 footer
             }
         }
+        // Страница и указатель шага меняются в одной анимации.
+        .animation(reduceMotion ? nil : .smooth(duration: AzaMotion.compact), value: progress.step)
         .background(AzaStyle.stage)
         .foregroundStyle(AzaStyle.ink)
         .onChange(of: progress.step) { _, _ in
@@ -87,11 +93,16 @@ struct OnboardingView: View {
                         .font(.system(size: 12, weight: progress.step == step ? .semibold : .regular))
                         .foregroundStyle(progress.step == step ? AzaStyle.ink : AzaStyle.muted)
                         .padding(.horizontal, 10).frame(height: 38)
-                        .background(progress.step == step ? AzaStyle.control : .clear,
-                                    in: RoundedRectangle(cornerRadius: 8))
+                        .background {
+                            if progress.step == step {
+                                RoundedRectangle(cornerRadius: 8).fill(AzaStyle.control)
+                                    .matchedGeometryEffect(id: "stepBackground", in: stepNS)
+                            }
+                        }
                         .overlay(alignment: .leading) {
                             if progress.step == step {
                                 Capsule().fill(AzaStyle.rise).frame(width: 3, height: 14)
+                                    .matchedGeometryEffect(id: "stepIndicator", in: stepNS)
                             }
                         }
                         .contentShape(Rectangle())

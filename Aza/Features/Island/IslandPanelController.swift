@@ -30,6 +30,7 @@ final class IslandPanelController {
     private let store: IslandStore
     private var modeObservation: AnyCancellable?
     private var visibilityObservation: AnyCancellable?
+    private var presentationObservation: AnyCancellable?
     private var presenceTimer: Timer?
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
@@ -63,7 +64,7 @@ final class IslandPanelController {
     /// invalidateShadow её не обновляют. Панель, показанную 534×32, клики
     /// ниже этой полосы не находят никогда, поэтому расширенные режимы
     /// живут в СВЕЖЕМ окне, созданном сразу финальным кадром.
-    private static func makePanel(frame: NSRect, store: IslandStore) -> IslandPanel {
+    private static func makePanel(frame: NSRect, store: IslandStore, mode: IslandMode) -> IslandPanel {
         let panel = IslandPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -71,7 +72,10 @@ final class IslandPanelController {
             defer: false
         )
         panel.isOpaque = false
-        panel.isCompact = store.mode == .idle
+        panel.isCompact = mode == .idle
+        panel.usesNotchReveal = mode == .idle || mode == .dictation
+        panel.wantsKey = mode == .clipboard
+        panel.isBottomClipboard = mode == .clipboard && ClipboardPresentation.load() == .bottom
         panel.onCompactClick = { [weak store] in
             guard let store, store.mode == .idle, store.isIslandVisible else { return }
             store.show(.home)
@@ -98,7 +102,9 @@ final class IslandPanelController {
         // Иначе sendEvent(mouseMoved) — пересланный из монитора для
         // hover карточек — окно роняет, не доходя до tracking-областей.
         panel.acceptsMouseMovedEvents = true
-        let hosting = FirstMouseHostingView(rootView: IslandRootView(store: store))
+        let hosting = FirstMouseHostingView(rootView: IslandRootView(
+            store: store, mode: mode, bottomClipboard: panel.isBottomClipboard,
+            reveal: panel.reveal))
         // SwiftUI не управляет кадром окна: его подгонка размера дралась
         // с анимацией slideIn и оставляла модельный кадр за кромкой.
         hosting.sizingOptions = []
@@ -110,7 +116,7 @@ final class IslandPanelController {
         self.store = store
         panel = Self.makePanel(
             frame: NSRect(origin: .zero, size: store.mode.size(hasNotch: false)),
-            store: store
+            store: store, mode: store.mode
         )
 
         modeObservation = store.$mode
@@ -146,7 +152,8 @@ final class IslandPanelController {
                     DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) { [weak self] in
                         guard let self, self.store.mode == .clipboard,
                               !SystemScreenCapture.isSelecting,
-                              !self.panel.isKeyWindow else { return }
+                              !self.panel.isKeyWindow,
+                              self.store.clipboardPreviewID == nil else { return }
                         azaDebugLog("Aza: clipboard panel re-key (delayed)")
                         self.panel.makeKeyAndOrderFront(nil)
                         self.panel.makeFirstResponder(self.panel.contentView)
@@ -161,6 +168,20 @@ final class IslandPanelController {
             .removeDuplicates()
             .sink { [weak self] visible in
                 self?.setVisible(visible, animated: true)
+            }
+
+        presentationObservation = NotificationCenter.default
+            .publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .map { _ in ClipboardPresentation.load() }
+            .prepend(ClipboardPresentation.load())
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self, self.store.mode == .clipboard else { return }
+                self.transition(to: .clipboard)
+                self.panel.makeKeyAndOrderFront(nil)
+                self.panel.makeFirstResponder(self.panel.contentView)
             }
 
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
@@ -227,6 +248,16 @@ final class IslandPanelController {
     }
 
     private func setVisible(_ visible: Bool, animated: Bool) {
+        if panel.usesNotchReveal {
+            if visible {
+                guard !panel.isVisible || panel.ignoresMouseEvents else { return }
+                if !panel.isVisible { resize(for: store.mode) }
+                panel.revealAtNotch(animated: animated)
+            } else if panel.isVisible {
+                panel.dismissAtNotch(animated: animated)
+            }
+            return
+        }
         if visible {
             // Прерванный уход разрешится сам: его completion видит, что
             // остров снова нужен, пропускает orderOut и возвращает кадр.
@@ -234,15 +265,21 @@ final class IslandPanelController {
             // Финальная геометрия считается ДО анимации: остров выезжает
             // из-за кромки экрана на своё место, а не из старого кадра.
             resize(for: store.mode)
-            // Диктовка раскрывает маску внутри финального кадра. Движение
-            // окна одновременно с ней давало второй, несогласованный вход.
-            guard animated, store.mode != .dictation else {
+            if panel.isBottomClipboard {
+                panel.revealFromBottom(animated: animated)
+                return
+            }
+            guard animated else {
                 panel.orderFrontRegardless()
                 return
             }
             panel.slideIn()
         } else {
             guard panel.isVisible else { return }
+            if panel.isBottomClipboard {
+                panel.dismissToBottom(animated: animated)
+                return
+            }
             guard animated else {
                 panel.orderOut(nil)
                 return
@@ -273,43 +310,76 @@ final class IslandPanelController {
     /// Окно не анимируется — кадр сразу финальный (анимация ломала
     /// доставку кликов), одинаковый размер оставляет старое окно.
     private func transition(to mode: IslandMode) {
-        panel.isCompact = mode == .idle
-        let oldSize = panel.frame.size
-        resize(for: mode)
-        let target = panel.frame
-        guard target.size != oldSize else { return }
+        guard let target = frame(for: mode) else { return }
+        let bottom = mode == .clipboard && ClipboardPresentation.load() == .bottom
+        guard target.size != panel.frame.size || bottom != panel.isBottomClipboard else {
+            panel.setFrame(target, display: true)
+            return
+        }
         let old = panel
         if old.isKeyWindow { old.resignKey() }
-        let fresh = Self.makePanel(frame: target, store: store)
-        fresh.isCompact = mode == .idle
+        let fresh = Self.makePanel(frame: target, store: store, mode: mode)
         panel = fresh
-        if old.isVisible {
-            fresh.orderFrontRegardless()
+        if mode == .idle, old.usesNotchReveal, !old.isCompact, old.isVisible {
+            // Сначала диктовка полностью уходит в вырез, затем появляется
+            // намаз — встречные маски не перекрывают обратное сжатие.
+            old.dismissAtNotch { [weak self, weak fresh] in
+                // Даже без анимации ждём didSet режима и его видимости:
+                // $mode публикуется в willSet, когда store.mode ещё старый.
+                DispatchQueue.main.async {
+                    guard let self, let fresh, self.panel === fresh else { return }
+                    self.setVisible(self.store.isIslandVisible, animated: true)
+                }
+            }
+            return
         }
-        old.orderOut(nil)
+        if bottom {
+            fresh.revealFromBottom()
+        } else if old.isVisible || mode != .idle {
+            // Новый активный режим показываем и во время паузы между панелями.
+            if fresh.usesNotchReveal {
+                fresh.revealAtNotch()
+            } else {
+                fresh.orderFrontRegardless()
+            }
+        }
+        if old.isBottomClipboard, old.isVisible {
+            old.dismissToBottom()
+        } else if old.usesNotchReveal, old.isVisible {
+            old.dismissAtNotch()
+        } else {
+            old.orderOut(nil)
+        }
     }
 
-    /// Кадр всегда ставится мгновенно: единственная анимация панели —
-    /// спуск из-за кромки и уход за неё (slideIn/slideOut).
+    /// Кадр ставится сразу: компактные панели анимируют только маску.
     private func resize(for mode: IslandMode) {
-        guard let screen = activeScreen else { return }
+        guard let target = frame(for: mode) else { return }
+        panel.setFrame(target, display: true)
+    }
+
+    private func frame(for mode: IslandMode) -> NSRect? {
+        guard let screen = activeScreen else { return nil }
         let hasNotch = screen.auxiliaryTopLeftArea != nil && screen.auxiliaryTopRightArea != nil
         store.hasNotch = hasNotch
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
             store.notchWidth = right.minX - left.maxX
             store.notchHeight = screen.safeAreaInsets.top
         }
+        if mode == .clipboard, ClipboardPresentation.load() == .bottom {
+            return ClipboardPresentation.bottomFrame(on: screen.frame)
+        }
         var size = mode.size(hasNotch: hasNotch, notchWidth: store.notchWidth)
         // Компактная плашка и диктовка — ровно высота выреза, ни пикселем толще.
         if mode == .idle || mode == .dictation, hasNotch {
             size.height = screen.safeAreaInsets.top
         }
-        panel.setFrame(NSRect(
+        return NSRect(
             x: screen.frame.midX - size.width / 2,
             y: screen.frame.maxY - size.height,
             width: size.width,
             height: size.height
-        ), display: true)
+        )
     }
 
     private func installEventMonitors() {
@@ -319,7 +389,8 @@ final class IslandPanelController {
         globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] event in
             Task { @MainActor in self?.handle(event) }
         }
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [events, .keyDown, .keyUp]) { [weak self] event in
+            if azaAssumeMainUnchecked({ self?.handlePreviewKey(event) == true }) { return nil }
             Task { @MainActor in self?.handle(event) }
             return event
         }
@@ -527,7 +598,10 @@ final class IslandPanelController {
             }
             return true
         }
-        let inside = isInsideIsland(mouse)
+        // Нижняя часть поповера может перекрывать шапку буфера: в этой
+        // области событие принадлежит поповеру, а не лежащей под ним панели.
+        let childUnderPointer = forwardableWindow(at: mouse).map(isClipboardChild) ?? false
+        let inside = !childUnderPointer && isInsideIsland(mouse)
         // Диагностика жалобы «значок в меню-баре некликабелен»: фиксируем
         // каждый клик по полосе меню-бара и решение tap'а по нему.
         if type == .leftMouseDown,
@@ -585,7 +659,7 @@ final class IslandPanelController {
            let window = forwardableWindow(at: mouse),
            !(window.parent == nil && window.styleMask.contains(.titled)
              && mouse.y >= window.frame.maxY - 30) {
-            if store.isIslandVisible { store.dismissIsland() }
+            if store.isIslandVisible, !isClipboardChild(window) { store.dismissIsland() }
             azaDebugLog("Aza: forward down -> \(window.className) #\(window.windowNumber) parent=\(window.parent?.windowNumber ?? 0) local=\(window.convertPoint(fromScreen: mouse))")
             // Фокус — ДО пересылки: down диспетчеризуется из очереди
             // позже, к этому моменту key-вид и адрес клавиш уже назначены.
@@ -670,6 +744,8 @@ final class IslandPanelController {
     /// курсор над островом. Событие глотается, чтобы не утекло в фоновое
     /// приложение.
     private func forwardKeyOrScrollIfNeeded(_ cgEvent: CGEvent, type: CGEventType) -> Bool {
+        if type == .keyDown || type == .keyUp,
+           let event = NSEvent(cgEvent: cgEvent), handlePreviewKey(event) { return true }
         if HotKeyController.isRecordingShortcut, type != .scrollWheel,
            KeyCatcher.forward(cgEvent, to: keyForwardTarget()) {
             // Отпускания модификаторов нужны и уже запущенной hold-диктовке.
@@ -691,10 +767,12 @@ final class IslandPanelController {
             let loc = cgEvent.location
             let point = NSPoint(x: loc.x,
                                 y: (NSScreen.screens.first?.frame.maxY ?? 0) - loc.y)
+            let windowUnderPointer = forwardableWindow(at: point)
             let islandScroll = store.isIslandVisible
                 && (store.mode == .clipboard || store.mode == .phrases)
                 && isInsideIsland(point)
-            if let window = islandScroll ? panel : forwardableWindow(at: point) {
+                && !(windowUnderPointer.map(isClipboardChild) ?? false)
+            if let window = islandScroll ? panel : windowUnderPointer {
                 // Скролл острова/настроек/поповера — вью под курсором
                 // напрямую: sendEvent маршрутизирует по locationInWindow, а
                 // у события из CGEvent координаты экранные — hitTest уходил
@@ -713,19 +791,22 @@ final class IslandPanelController {
                 return false
             }
         } else if store.isIslandVisible, store.mode == .clipboard {
+            let preview = panel.childWindows?.last { $0.isVisible }
             // Команды списка: ⌘A — выделение, ⌘D — избранное.
             if cgEvent.flags.contains(.maskCommand) {
                 let keycode = cgEvent.getIntegerValueField(.keyboardEventKeycode)
-                guard keycode == 0 || keycode == 2 else { return false } // A / D
+                guard keycode == 0 || (preview == nil ? keycode == 2 : keycode == 8)
+                else { return false } // A / D; A / C в предпросмотре
             }
             // Открытый буфер — клавиши его, даже если key-статус панели
             // слетел (после контекстного меню клавиши уходили в чужое
             // приложение — Delete в поле владельца). Возвращаем статус.
-            if !panel.isKeyWindow {
+            let clipboardTarget = preview ?? panel
+            if !clipboardTarget.isKeyWindow {
                 azaDebugLog("Aza: clipboard panel lost key — re-key")
-                panel.makeKeyAndOrderFront(nil)
+                clipboardTarget.makeKeyAndOrderFront(nil)
             }
-            target = panel
+            target = clipboardTarget
         } else if let focus = keyForwardTarget() {
             // Фокус мог протухнуть: настройки остались открыты, но их
             // накрыло чужое окно — клавиши (и особенно ⌘Q) тогда не
@@ -851,6 +932,32 @@ final class IslandPanelController {
         return target
     }
 
+    private func isClipboardChild(_ window: NSWindow) -> Bool {
+        var parent = window.parent
+        while let current = parent {
+            if current === panel { return true }
+            parent = current.parent
+        }
+        return false
+    }
+
+    private func handlePreviewKey(_ event: NSEvent) -> Bool {
+        guard store.mode == .clipboard, store.clipboardPreviewID != nil,
+              IslandPanel.isClipboardPreviewCloseKey(event) else { return false }
+        if event.type == .keyDown, !event.isARepeat {
+            // Из tap — после завершения доставки, как и прочие действия окон.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.store.clipboardPreviewID = nil
+                if self.store.mode == .clipboard {
+                    self.panel.makeKeyAndOrderFront(nil)
+                    self.panel.makeFirstResponder(self.panel.contentView)
+                }
+            }
+        }
+        return true
+    }
+
     /// Окно клавиатурного фокуса всё ещё верхнее (по центру своего
     /// кадра)? Частичное перекрытие терпим — важно не красть ввод у
     /// окна, целиком накрывшего наше.
@@ -891,6 +998,10 @@ final class IslandPanelController {
         let islandMenuLayer = Int(panel.level.rawValue) + 1
         let screenMaxY = NSScreen.screens.first?.frame.maxY ?? 0
         for info in list {
+            if let number = info[kCGWindowNumber as String] as? Int,
+               let window = NSApp.window(withWindowNumber: number), isClipboardChild(window) {
+                continue
+            }
             guard (info[kCGWindowOwnerPID as String] as? Int32) == pid,
                   let layer = info[kCGWindowLayer as String] as? Int,
                   layer == menuLayer || layer == islandMenuLayer,

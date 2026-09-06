@@ -32,6 +32,7 @@ struct SetupView: View {
     @AppStorage(ChechenAutocorrect.latinizationStorageKey) private var latinization = false
     @AppStorage(PasteboardMonitor.storageKey) private var clipboardHistoryEnabled = true
     @AppStorage(ClipboardStore.retentionKey) private var retentionDays = 30
+    @AppStorage(ClipboardPresentation.storageKey) private var clipboardPresentation = ClipboardPresentation.island
     @AppStorage(IslandStore.copyFlashKey) private var copyFlash = true
     @AppStorage(IslandStore.copySoundKey) private var copySound = ""
     @AppStorage(IslandStore.compactModeKey) private var islandMode = "auto"
@@ -862,6 +863,17 @@ struct SetupView: View {
 
     private var clipboardCard: some View {
         Group {
+            card("Вид буфера") {
+                settingRow("Расположение", detail: "Остров у выреза или широкая стеклянная панель внизу экрана.") {
+                    Picker("Расположение буфера", selection: $clipboardPresentation) {
+                        Text("Сверху · остров").tag(ClipboardPresentation.island)
+                        Text("Снизу · панель").tag(ClipboardPresentation.bottom)
+                    }
+                    .labelsHidden()
+                    .frame(width: 174)
+                }
+                hint("Меняет только буфер обмена. Диктовка, намаз и быстрые фразы остаются сверху.")
+            }
             card("История") {
                 settingToggle("Сохранять историю буфера", isOn: $clipboardHistoryEnabled,
                               help: "Запоминает скопированное на этом Mac. При выключении новые записи не добавляются.")

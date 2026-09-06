@@ -4,19 +4,43 @@ import SwiftUI
 
 struct IslandRootView: View {
     @ObservedObject var store: IslandStore
+    // Режим закреплён за окном: уходящая панель не превращается в остров
+    // посреди анимации, когда хранилище уже переключилось на новый режим.
+    let mode: IslandMode
+    let bottomClipboard: Bool
+    @ObservedObject var reveal: IslandReveal
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var dictationRevealed = false
 
-    private var revealsDictation: Bool {
-        store.mode == .dictation && !reduceMotion
+    private var isRevealed: Bool {
+        (mode != .dictation && mode != .idle) || reduceMotion || reveal.isRevealed
     }
 
     var body: some View {
+        Group {
+            if bottomClipboard {
+                GeometryReader { geometry in
+                    ClipboardIslandView(store: store, bottom: true,
+                                        cardHeight: max(142, geometry.size.height - 84))
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .background(ClipboardGlassBackground())
+                        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(.white.opacity(0.45)))
+                }
+                .preferredColorScheme(.light)
+            } else {
+                topIsland
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(bottomClipboard ? "Буфер обмена Aza" : "Aza")
+    }
+
+    private var topIsland: some View {
         ZStack(alignment: .top) {
             AzaStyle.deep
             // Едва заметный свет сверху: плоский чёрный превращается в
             // сцену с глубиной, как у настоящего Dynamic Island.
-            if store.mode != .idle {
+            if mode != .idle {
                 LinearGradient(
                     colors: [Color.white.opacity(0.055), .clear],
                     startPoint: .top, endPoint: .bottom
@@ -24,7 +48,7 @@ struct IslandRootView: View {
             }
 
             Group {
-                switch store.mode {
+                switch mode {
                 case .idle:
                     IdleIslandView(store: store)
                 case .home:
@@ -37,35 +61,51 @@ struct IslandRootView: View {
                     PhrasesIslandView(store: store)
                 }
             }
-            .id(store.mode)
-            .padding(.horizontal, store.mode.shoulder)
-            .opacity(revealsDictation && !dictationRevealed ? 0 : 1)
-            .offset(y: revealsDictation && !dictationRevealed ? -3 : 0)
-            .animation(revealsDictation ? .easeOut(duration: AzaMotion.compact).delay(0.08) : nil,
-                       value: dictationRevealed)
+            .id(mode)
+            .padding(.horizontal, mode.shoulder)
+            .opacity(isRevealed ? 1 : 0)
+            .offset(y: isRevealed ? 0 : -3)
+            .animation(reduceMotion ? nil : .easeOut(duration: isRevealed ? AzaMotion.compact : 0.12)
+                .delay(isRevealed ? 0.08 : 0), value: isRevealed)
         }
         .preferredColorScheme(.dark)
         .mask {
             GeometryReader { geometry in
-                IslandSilhouette(shoulder: store.mode.shoulder,
-                                 bottomRadius: store.mode.bottomRadius)
-                    .frame(width: revealsDictation && !dictationRevealed
+                IslandSilhouette(shoulder: mode.shoulder,
+                                 bottomRadius: mode.bottomRadius)
+                    .frame(width: !isRevealed
                            ? min(geometry.size.width, store.hasNotch ? store.notchWidth : 64)
                            : geometry.size.width)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .animation(revealsDictation ? .smooth(duration: 0.42) : nil,
-                               value: dictationRevealed)
             }
         }
         .shadow(
-            color: .black.opacity(store.mode.shadow.opacity),
-            radius: store.mode.shadow.radius,
-            y: store.mode.shadow.y
+            color: .black.opacity(mode.shadow.opacity),
+            radius: mode.shadow.radius,
+            y: mode.shadow.y
         )
-        // Раскрывается маска, а не окно: кадр и область кликов стабильны.
-        .task(id: store.mode) { dictationRevealed = store.mode == .dictation }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Aza")
+        // Без физического выреза центральная часть тоже плавно исчезает.
+        .opacity(store.hasNotch || isRevealed ? 1 : 0)
+        .accessibilityHidden(!isRevealed)
+    }
+}
+
+private struct ClipboardGlassBackground: NSViewRepresentable {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.appearance = NSAppearance(named: .aqua)
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 22
+        view.layer?.masksToBounds = true
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = reduceTransparency ? .windowBackground : .popover
     }
 }
 
@@ -141,7 +181,6 @@ private struct NotchRow<Left: View, Right: View>: View {
 private struct IdleIslandView: View {
     @ObservedObject var store: IslandStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var settled = false
     @State private var accentPulse = 0
 
     var body: some View {
@@ -225,9 +264,6 @@ private struct IdleIslandView: View {
                 }
                 ?? "Намаз: нет данных"
             )
-            .opacity(reduceMotion || settled ? 1 : 0)
-            .offset(y: reduceMotion || settled ? 0 : -5)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.45), value: settled)
             .background {
                 // Два конечных импульса по событию; секундный таймер их
                 // не перезапускает. Двигается только свет, текст стабилен.
@@ -255,7 +291,6 @@ private struct IdleIslandView: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: copy?.id)
         }
         .onChange(of: store.isIslandVisible, initial: true) { _, visible in
-            settled = visible
             if visible { accentPulse += 1 }
         }
         .contentShape(Rectangle())
@@ -830,6 +865,9 @@ private struct WaveformView: View {
 
 private struct ClipboardIslandView: View {
     @ObservedObject var store: IslandStore
+    var bottom = false
+    var cardHeight: CGFloat = 142
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Множественное выделение для ⌘A: локальное состояние вида.
     @State private var selectedIDs: Set<ClipEntry.ID> = []
     @State private var confirmMassDelete = false
@@ -837,6 +875,7 @@ private struct ClipboardIslandView: View {
     /// Клавиатура (стрелки, Delete, Esc) работает только пока контейнер
     /// в фокусе — держим его там при открытии и после клика по карточке.
     @FocusState private var listFocused: Bool
+    @FocusState private var searchFocused: Bool
     /// Общее пространство синей таблетки «История/Избранное»: при
     /// переключении она перетекает, как у чипов намаза в большом острове.
     @Namespace private var sectionNS
@@ -845,48 +884,80 @@ private struct ClipboardIslandView: View {
         store.visibleEntries(matching: query)
     }
 
+    private var animatesChanges: Bool {
+        !reduceMotion && store.startup.store?.screenLocked != true
+    }
+
+    private var sectionButtons: some View {
+        HStack(spacing: 6) {
+            SectionButton("История", width: 86, active: store.section == .history,
+                          pillNS: sectionNS) {
+                store.section = .history
+            }
+            SectionButton("Избранное", width: 98, active: store.section == .favorites,
+                          pillNS: sectionNS) {
+                store.section = .favorites
+            }
+            SectionButton("Диктовка", width: 92, active: store.section == .transcripts,
+                          pillNS: sectionNS) {
+                store.section = .transcripts
+            }
+        }
+        // Таблетка перетекает между разделами, а не перескакивает.
+        .animation(reduceMotion ? nil : .easeOut(duration: AzaMotion.compact),
+                   value: store.section)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(bottom ? Color.secondary : AzaStyle.muted)
+                .frame(width: 18, height: 18)
+            TextField("Поиск…", text: $query)
+                .focused($searchFocused)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(bottom ? Color.primary : AzaStyle.ink)
+                // Из поля: Enter вставляет выделенную карточку,
+                // Esc — тот же каскад, что у списка (иначе из
+                // поиска остров было не закрыть с клавиатуры).
+                .onSubmit { if let id = store.selectedID { store.reuse(id) } }
+                .onExitCommand {
+                    if !query.isEmpty { query = "" } else { store.show(.idle) }
+                }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 34)
+        .background(bottom ? AnyShapeStyle(.white.opacity(0.45)) : AnyShapeStyle(AzaStyle.glass),
+                    in: Capsule())
+        .overlay(Capsule().stroke(bottom ? AnyShapeStyle(.black.opacity(0.08))
+                                 : AnyShapeStyle(AzaStyle.glassEdge)))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            NotchRow(reservesNotch: store.hasNotch, notchWidth: store.notchWidth, height: 60, horizontalPadding: 28) {
-                HStack(spacing: 6) {
-                    SectionButton("История", width: 86, active: store.section == .history,
-                                  pillNS: sectionNS) {
-                        store.section = .history
+            if bottom {
+                GeometryReader { geometry in
+                    ZStack {
+                        sectionButtons
+                        searchField
+                            // Центр разделов не зависит от ширины поиска.
+                            // На узком экране оставляем между ними 16 пт.
+                            .frame(width: min(250, max(120, geometry.size.width / 2 - 216)))
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.trailing, 56)
                     }
-                    SectionButton("Избранное", width: 98, active: store.section == .favorites,
-                                  pillNS: sectionNS) {
-                        store.section = .favorites
-                    }
-                    SectionButton("Диктовка", width: 92, active: store.section == .transcripts,
-                                  pillNS: sectionNS) {
-                        store.section = .transcripts
-                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                // Таблетка перетекает между разделами, а не перескакивает.
-                .animation(.easeOut(duration: AzaMotion.compact),
-                           value: store.section)
-            } right: {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(AzaStyle.muted)
-                        .frame(width: 18, height: 18)
-                    TextField("Поиск…", text: $query)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AzaStyle.ink)
-                        // Из поля: Enter вставляет выделенную карточку,
-                        // Esc — тот же каскад, что у списка (иначе из
-                        // поиска остров было не закрыть с клавиатуры).
-                        .onSubmit { if let id = store.selectedID { store.reuse(id) } }
-                        .onExitCommand {
-                            if !query.isEmpty { query = "" } else { store.show(.idle) }
-                        }
+                .frame(height: 56)
+            } else {
+                NotchRow(reservesNotch: store.hasNotch, notchWidth: store.notchWidth,
+                         height: 60, horizontalPadding: 28) {
+                    sectionButtons
+                } right: {
+                    searchField.frame(width: 250)
                 }
-                .padding(.horizontal, 16)
-                .frame(width: 250, height: 34)
-                .background(AzaStyle.glass, in: Capsule())
-                .overlay(Capsule().stroke(AzaStyle.glassEdge))
             }
 
             ScrollViewReader { proxy in
@@ -896,6 +967,8 @@ private struct ClipboardIslandView: View {
                             ClipboardCard(
                                 entry: entry,
                                 selected: store.selectedID == entry.id,
+                                bottom: bottom,
+                                height: cardHeight,
                                 select: {
                                     selectedIDs = []
                                     confirmMassDelete = false
@@ -908,12 +981,27 @@ private struct ClipboardIslandView: View {
                                 favorite: { store.toggleFavorite(entry.id); listFocused = true },
                                 delete: { store.delete(entry.id); listFocused = true }
                             )
+                            .popover(isPresented: Binding(
+                                get: { store.clipboardPreviewID == entry.id },
+                                set: { if !$0, store.clipboardPreviewID == entry.id {
+                                    store.clipboardPreviewID = nil
+                                } }
+                            ), arrowEdge: bottom ? .top : .bottom) {
+                                ClipboardPreviewView(entry: entry,
+                                    imageData: { store.startup.store?.imageData(for: entry) },
+                                    close: { store.clipboardPreviewID = nil })
+                            }
                             .id(entry.id)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
                         }
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.top, 3)
-                    .padding(.bottom, 23)
+                    // Реальные удаления и отмена плавно сдвигают соседей.
+                    // Поиск не запускает перестроение при каждом символе.
+                    .animation(animatesChanges ? .smooth(duration: AzaMotion.compact) : nil,
+                               value: store.entries.map(\.id))
+                    .padding(.horizontal, bottom ? 20 : 28)
+                    .padding(.top, bottom ? 4 : 3)
+                    .padding(.bottom, bottom ? 24 : 23)
                 }
                 .scrollIndicators(.hidden)
                 .overlay {
@@ -924,13 +1012,29 @@ private struct ClipboardIslandView: View {
                              : store.section == .transcripts ? "Транскриптов пока нет"
                              : "История пуста")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(AzaStyle.muted)
+                            .foregroundStyle(bottom ? Color.secondary : AzaStyle.muted)
                     }
                 }
                 .onChange(of: store.selectedID) { _, id in
                     guard let id else { return }
-                    withAnimation(.snappy) { proxy.scrollTo(id, anchor: .center) }
+                    withAnimation(animatesChanges ? .smooth(duration: AzaMotion.compact) : nil) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
                 }
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if bottom {
+                Button { store.dismissIsland() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(.white.opacity(0.35), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Закрыть буфер обмена")
+                .padding(14)
             }
         }
         .focusable()
@@ -945,6 +1049,7 @@ private struct ClipboardIslandView: View {
             DispatchQueue.main.async { listFocused = true }
         }
         .onKeyPress { press in
+            guard !searchFocused else { return .ignored }
             // ⌘A + Delete — массовое удаление найденного (спец. §8.7).
             // Выделение живёт в этом виде: хранилищу знать о нём незачем.
             if NSApplication.shared.currentEvent?.keyCode == UInt16(kVK_ANSI_A),
@@ -961,6 +1066,11 @@ private struct ClipboardIslandView: View {
                 return .handled
             }
             switch press.key {
+            case .space:
+                guard press.modifiers.intersection([.command, .control, .option, .shift]).isEmpty
+                else { return .ignored }
+                store.clipboardPreviewID = store.selectedID
+                return .handled
             case .leftArrow:
                 selectedIDs = []
                 confirmMassDelete = false
@@ -998,6 +1108,10 @@ private struct ClipboardIslandView: View {
         .onChange(of: store.selectedID) { _, _ in
             selectedIDs = []
             confirmMassDelete = false
+            store.clipboardPreviewID = nil
+        }
+        .onChange(of: store.clipboardPreviewID) { _, id in
+            if id == nil { listFocused = true }
         }
         .onChange(of: visibleEntries.map(\.id)) { old, ids in
             selectedIDs = []
@@ -1033,24 +1147,30 @@ private struct ClipboardIslandView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            if !store.commands.pendingUndo.isEmpty {
-                Button {
-                    store.undoDelete()
-                } label: {
-                    HStack(spacing: 8) {
-                        Text("Удалено")
-                        Text("Отменить").foregroundStyle(AzaStyle.rise)
+            ZStack {
+                if !store.commands.pendingUndo.isEmpty {
+                    Button {
+                        store.undoDelete()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("Удалено")
+                            Text("Отменить").foregroundStyle(AzaStyle.rise)
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(AzaStyle.muted)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(AzaStyle.glass, in: Capsule())
+                        .overlay(Capsule().stroke(AzaStyle.glassEdge))
                     }
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(AzaStyle.muted)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(AzaStyle.glass, in: Capsule())
-                    .overlay(Capsule().stroke(AzaStyle.glassEdge))
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .offset(y: 8)))
                 }
-                .buttonStyle(.plain)
-                .padding(.bottom, 10)
             }
+            .animation(animatesChanges ? .easeOut(duration: store.commands.pendingUndo.isEmpty
+                ? AzaMotion.micro : AzaMotion.compact) : nil,
+                       value: store.commands.pendingUndo.isEmpty)
         }
     }
 
@@ -1071,15 +1191,27 @@ private struct ClipboardIslandView: View {
 private struct ClipboardCard: View {
     let entry: ClipEntry
     let selected: Bool
+    var bottom = false
+    var height: CGFloat = 142
     let select: () -> Void
     let reuse: () -> Void
     let favorite: () -> Void
     let delete: () -> Void
 
     @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let selectionColor = Color(red: 0, green: 0.4, blue: 1)
 
     private var accent: Color {
-        switch entry.islandKind {
+        if bottom {
+            return switch entry.islandKind {
+            case .text, .link: Color(red: 0.12, green: 0.30, blue: 0.56)
+            case .transcript: .purple
+            case .image: .indigo
+            case .files: .teal
+            }
+        }
+        return switch entry.islandKind {
         case .text, .link, .transcript: AzaStyle.rise
         case .image: AzaStyle.ink
         case .files: AzaStyle.muted
@@ -1093,15 +1225,16 @@ private struct ClipboardCard: View {
                 Text(entry.islandKind.title).lineLimit(1)
                 Spacer()
                 Text(ElapsedTime.short(since: entry.createdAt))
-                    .foregroundStyle(AzaStyle.muted)
+                    .foregroundStyle(bottom ? .white.opacity(0.8) : AzaStyle.muted)
                     .monospacedDigit()
                     .lineLimit(1)
                     .fixedSize()
             }
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(accent)
+            .foregroundStyle(bottom ? .white : accent)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+            .background(bottom ? accent : .clear)
 
             if let image = entry.thumbnailImage {
                 // Как в Paste: превью занимает всю карточку под шапкой от
@@ -1133,44 +1266,47 @@ private struct ClipboardCard: View {
                             Text(entry.text).lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .foregroundStyle(AzaStyle.ink)
+                        .foregroundStyle(bottom ? Color.primary : AzaStyle.ink)
                     } else {
                         // Длинный текст должен читаться в превью: мелкий
                         // кегль и столько строк, сколько влезает в карточку.
                         Text(entry.text)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(AzaStyle.ink)
-                            .lineLimit(6)
+                            .font(.system(size: bottom ? 13 : 11, weight: .medium))
+                            .foregroundStyle(bottom ? Color.primary : AzaStyle.ink)
+                            .lineLimit(bottom ? nil : 6)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                     footer(onImage: false)
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 2)
+                .padding(.top, bottom ? 12 : 2)
                 .padding(.bottom, 12)
             }
         }
-        .frame(width: 206, height: 142)
+        .frame(width: bottom ? max(206, height) : 206, height: height)
         // Стекло, как у карточки управления в большом острове: градиент
         // поверхности и кромка, освещённая сверху, вместо плоской рамки.
-        .background(AzaStyle.glass)
+        .background(bottom ? AnyShapeStyle(.white) : AnyShapeStyle(AzaStyle.glass))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             if selected {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(AzaStyle.rise, lineWidth: 2)
+                    .strokeBorder(selectionColor, lineWidth: 4)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .inset(by: 4)
+                    .strokeBorder(.white, lineWidth: 1)
             } else {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(AzaStyle.glassEdge)
             }
         }
-        .shadow(color: selected ? AzaStyle.rise.opacity(0.2)
+        .shadow(color: selected ? selectionColor.opacity(0.3)
                 : hovering ? Color.black.opacity(0.45) : .clear,
                 radius: selected ? 18 : 10, y: 6)
         // Под курсором карточка чуть приподнимается — тот же жест, что у
         // чипов намаза.
-        .scaleEffect(hovering && !selected ? 1.02 : 1)
-        .animation(.easeOut(duration: AzaMotion.micro), value: hovering)
+        .scaleEffect(hovering && !selected && !reduceMotion ? 1.02 : 1)
+        .animation(reduceMotion ? nil : .easeOut(duration: AzaMotion.micro), value: hovering)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onTapGesture(count: 2, perform: reuse)
         .simultaneousGesture(TapGesture().onEnded(select))
@@ -1199,7 +1335,7 @@ private struct ClipboardCard: View {
             }
         }
         .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(onImage ? .white : AzaStyle.muted)
+        .foregroundStyle(onImage ? .white : bottom ? Color.secondary : AzaStyle.muted)
     }
 }
 
@@ -1480,6 +1616,8 @@ private struct SectionButton: View {
     let action: () -> Void
 
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
+    private var light: Bool { colorScheme == .light }
 
     init(_ title: String, width: CGFloat, active: Bool, pillNS: Namespace.ID,
          action: @escaping () -> Void) {
@@ -1496,8 +1634,8 @@ private struct SectionButton: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(active ? AzaStyle.rise
-                                 : hovering ? AzaStyle.ink : AzaStyle.muted)
+                .foregroundStyle(active ? (light ? .blue : AzaStyle.rise)
+                                 : light ? Color.primary : hovering ? AzaStyle.ink : AzaStyle.muted)
                 .frame(width: width, height: 32)
                 .contentShape(Rectangle())
         }
@@ -1508,8 +1646,10 @@ private struct SectionButton: View {
                         .overlay(Capsule().stroke(AzaStyle.rise.opacity(0.45)))
                         .matchedGeometryEffect(id: "sectionPill", in: pillNS)
                 } else {
-                    Capsule().fill(hovering ? AzaStyle.control : AzaStyle.panel)
-                    Capsule().stroke(AzaStyle.glassEdge)
+                    Capsule().fill(light ? .white.opacity(hovering ? 0.5 : 0.2)
+                                   : hovering ? AzaStyle.control : AzaStyle.panel)
+                    Capsule().stroke(light ? AnyShapeStyle(.black.opacity(0.08))
+                                     : AnyShapeStyle(AzaStyle.glassEdge))
                 }
             }
             .onHover { hovering = $0 }

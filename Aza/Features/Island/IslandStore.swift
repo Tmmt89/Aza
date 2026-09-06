@@ -4,6 +4,22 @@ import Carbon.HIToolbox
 import Combine
 import SwiftUI
 
+enum ClipboardPresentation: String, CaseIterable {
+    case island, bottom
+
+    static let storageKey = "Clipboard.Presentation"
+
+    static func load(from defaults: UserDefaults = .standard) -> Self {
+        Self(rawValue: defaults.string(forKey: storageKey) ?? "") ?? .island
+    }
+
+    static func bottomFrame(on screen: NSRect) -> NSRect {
+        let height = min(max(240, screen.height * 0.30), screen.height - 16)
+        return NSRect(x: screen.minX + 8, y: screen.minY + 8,
+                      width: screen.width - 16, height: height)
+    }
+}
+
 enum IslandMode: String, CaseIterable {
     case idle
     case home
@@ -159,6 +175,7 @@ final class IslandStore: ObservableObject {
     @Published private(set) var mode: IslandMode = .idle {
         didSet {
             guard oldValue != mode else { return }
+            clipboardPreviewID = nil
             compactVisibleUntil = mode == .idle
                 ? ContinuousClock.now.advanced(by: .seconds(3)) : ContinuousClock.now
             updateIslandPresence()
@@ -185,6 +202,7 @@ final class IslandStore: ObservableObject {
     @Published var notchWidth: CGFloat = AzaStyle.notchWidth
     @Published var notchHeight: CGFloat = 32
     @Published var selectedID: ClipEntry.ID?
+    @Published var clipboardPreviewID: ClipEntry.ID?
     /// Разделы буфера: транскрипты диктовок живут отдельно и не забивают
     /// историю; избранное — сквозное (и обычные записи, и транскрипты).
     enum ClipSection { case history, favorites, transcripts }
@@ -681,6 +699,7 @@ final class IslandStore: ObservableObject {
         let seenBefore = hasObservedHistory
         hasObservedHistory = true
         guard let top, startup.store?.screenLocked != true else {
+            clipboardPreviewID = nil
             recentCopyTask?.cancel()
             recentCopyTask = nil
             recentCopy = nil
