@@ -1,8 +1,75 @@
 import AppKit
+import CryptoKit
 import XCTest
 
 @MainActor
 final class ClipboardPresentationTests: XCTestCase {
+    func testRangeAndCommandSelectionSurviveUpdatesAndDeleteAsAGroup() async throws {
+        let directory = try TestFiles.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clipboard = ClipboardStore(preparedKey: (SymmetricKey(size: .bits256), true),
+            storageURL: directory.appendingPathComponent("selection.bin"), retentionDays: 0)
+        for index in 0..<6 {
+            clipboard.add(text: "Tile \(index)", sourceAppBundleID: nil, sourceAppName: nil)
+        }
+        let startup = ClipboardStartup()
+        startup.store = clipboard
+        let prayer = PrayerStore(notifications: NotificationsStub())
+        let store = IslandStore(startup: startup,
+            dictation: DictationController(clipboardStore: { nil }, microphoneAuthorization: { .denied }),
+            prayer: prayer, registerShortcuts: false)
+        let visible = store.visibleEntries(matching: "")
+        let ids = visible.map(\.id)
+
+        store.select(ids[1], in: visible)
+        store.select(ids[4], modifiers: .shift, in: visible)
+        XCTAssertEqual(store.selectedIDs, Set(ids[1...4]))
+        store.select(ids[2], modifiers: .shift, in: visible)
+        XCTAssertEqual(store.selectedIDs, Set(ids[1...2]), "Shift keeps the original anchor")
+        store.select(ids[0], modifiers: .shift, in: visible)
+        XCTAssertEqual(store.selectedIDs, Set(ids[0...1]), "Ranges also extend backwards")
+        store.select(ids[4], modifiers: .command, in: visible)
+        XCTAssertEqual(store.selectedIDs, Set([ids[0], ids[1], ids[4]]))
+        store.select(ids[0], modifiers: .command, in: visible)
+        XCTAssertEqual(store.selectedIDs, Set([ids[1], ids[4]]))
+        store.select(ids[3], modifiers: [.shift, .command], in: visible)
+        XCTAssertEqual(store.selectedIDs, Set(ids[1...4]), "Command-Shift adds a range")
+
+        store.select(ids[5], in: visible)
+        XCTAssertEqual(store.selectedIDs, [ids[5]], "A plain click replaces the group")
+        store.select(ids[5], modifiers: .command, in: visible)
+        XCTAssertTrue(store.selectedIDs.isEmpty)
+        XCTAssertNil(store.selectedID, "The final Command-click must allow an empty selection")
+        store.select(ids[3], modifiers: .shift, in: visible)
+        store.moveSelection(by: -1, in: visible, extending: true)
+        XCTAssertEqual(store.selectedIDs, Set(ids[2...3]))
+        store.moveSelection(by: 1, in: visible)
+        XCTAssertEqual(store.selectedIDs, [ids[3]])
+        store.selectAll(in: visible)
+        XCTAssertEqual(store.selectedIDs, Set(ids))
+
+        let filtered = [visible[0], visible[2], visible[4]]
+        store.reconcileSelection(from: ids, in: filtered)
+        XCTAssertEqual(store.selectedIDs, Set(filtered.map(\.id)))
+        store.select(ids[2], in: filtered)
+        store.select(ids[4], modifiers: .shift, in: filtered)
+        XCTAssertEqual(store.selectedIDs, Set([ids[2], ids[4]]), "Hidden rows are not selected")
+
+        store.select(ids[1], in: visible)
+        store.select(ids[3], modifiers: .command, in: visible)
+        store.commands.deleteAll(visible.filter { store.selectedIDs.contains($0.id) })
+        store.reconcileSelection(from: ids, in: store.visibleEntries(matching: ""))
+        XCTAssertEqual(Set(clipboard.entries.map(\.id)), Set(ids).subtracting([ids[1], ids[3]]))
+        XCTAssertEqual(store.commands.pendingUndo.count, 2)
+        XCTAssertEqual(store.selectedIDs.count, 1, "Deletion leaves a surviving neighbour selected")
+        store.undoDelete()
+        XCTAssertEqual(Set(clipboard.entries.map(\.id)), Set(ids))
+        store.reconcileSelection(from: ids, in: [])
+        XCTAssertTrue(store.selectedIDs.isEmpty)
+        XCTAssertNil(store.selectedID)
+        await prayer.shutdownForCleanup()
+    }
+
     func testPreviewClosesWithClipboardAndDoesNotCaptureSystemShortcuts() async throws {
         let prayer = PrayerStore(notifications: NotificationsStub())
         let dictation = DictationController(clipboardStore: { nil }, microphoneAuthorization: { .denied })

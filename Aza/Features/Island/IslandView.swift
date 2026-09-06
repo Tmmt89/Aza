@@ -868,8 +868,6 @@ private struct ClipboardIslandView: View {
     var bottom = false
     var cardHeight: CGFloat = 142
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Множественное выделение для ⌘A: локальное состояние вида.
-    @State private var selectedIDs: Set<ClipEntry.ID> = []
     @State private var confirmMassDelete = false
     @State private var query = ""
     /// Клавиатура (стрелки, Delete, Esc) работает только пока контейнер
@@ -966,20 +964,25 @@ private struct ClipboardIslandView: View {
                         ForEach(visibleEntries) { entry in
                             ClipboardCard(
                                 entry: entry,
-                                selected: store.selectedID == entry.id,
+                                selected: store.selectedIDs.contains(entry.id),
                                 bottom: bottom,
                                 height: cardHeight,
-                                select: {
-                                    selectedIDs = []
+                                select: { modifiers in
                                     confirmMassDelete = false
-                                    store.selectedID = entry.id
+                                    store.select(entry.id, modifiers: modifiers, in: visibleEntries)
                                     listFocused = true
                                 },
                                 reuse: { store.reuse(entry.id) },
                                 // Кнопка-звезда и контекстное меню уводят
                                 // фокус с контейнера — стрелки/Delete глохли.
                                 favorite: { store.toggleFavorite(entry.id); listFocused = true },
-                                delete: { store.delete(entry.id); listFocused = true }
+                                delete: {
+                                    if !store.selectedIDs.contains(entry.id) {
+                                        store.select(entry.id, in: visibleEntries)
+                                    }
+                                    deleteSelection()
+                                    listFocused = true
+                                }
                             )
                             .popover(isPresented: Binding(
                                 get: { store.clipboardPreviewID == entry.id },
@@ -1018,7 +1021,8 @@ private struct ClipboardIslandView: View {
                 .onChange(of: store.selectedID) { _, id in
                     guard let id else { return }
                     withAnimation(animatesChanges ? .smooth(duration: AzaMotion.compact) : nil) {
-                        proxy.scrollTo(id, anchor: .center)
+                        // Видимая плитка остаётся на месте при ⌘/Shift-клике.
+                        proxy.scrollTo(id)
                     }
                 }
             }
@@ -1043,7 +1047,7 @@ private struct ClipboardIslandView: View {
         .onAppear {
             // При открытии сразу выделена последняя скопированная запись:
             // Enter вставляет её без лишних движений (список — от новых).
-            store.selectedID = visibleEntries.first?.id
+            store.select(visibleEntries.first?.id, in: visibleEntries)
             // Фокус — после того как контроллер сделал панель ключевой и
             // назначил first responder (в этом же витке цикла, но позже).
             DispatchQueue.main.async { listFocused = true }
@@ -1051,10 +1055,9 @@ private struct ClipboardIslandView: View {
         .onKeyPress { press in
             guard !searchFocused else { return .ignored }
             // ⌘A + Delete — массовое удаление найденного (спец. §8.7).
-            // Выделение живёт в этом виде: хранилищу знать о нём незачем.
             if NSApplication.shared.currentEvent?.keyCode == UInt16(kVK_ANSI_A),
                press.modifiers.contains(.command) {
-                selectedIDs = Set(visibleEntries.map(\.id))
+                store.selectAll(in: visibleEntries)
                 confirmMassDelete = false
                 return .handled
             }
@@ -1072,14 +1075,14 @@ private struct ClipboardIslandView: View {
                 store.clipboardPreviewID = store.selectedID
                 return .handled
             case .leftArrow:
-                selectedIDs = []
                 confirmMassDelete = false
-                store.moveSelection(by: -1, in: visibleEntries)
+                store.moveSelection(by: -1, in: visibleEntries,
+                                    extending: press.modifiers.contains(.shift))
                 return .handled
             case .rightArrow:
-                selectedIDs = []
                 confirmMassDelete = false
-                store.moveSelection(by: 1, in: visibleEntries)
+                store.moveSelection(by: 1, in: visibleEntries,
+                                    extending: press.modifiers.contains(.shift))
                 return .handled
             case .return:
                 if let id = store.selectedID {
@@ -1090,7 +1093,7 @@ private struct ClipboardIslandView: View {
                 // Escape снимает сначала подтверждение, потом выделение,
                 // потом поиск и лишь затем закрывает остров.
                 if confirmMassDelete { confirmMassDelete = false }
-                else if !selectedIDs.isEmpty { selectedIDs = [] }
+                else if store.selectedIDs.count > 1 { store.select(store.selectedID, in: visibleEntries) }
                 else if !query.isEmpty { query = "" }
                 else { store.show(.idle) }
                 return .handled
@@ -1102,48 +1105,41 @@ private struct ClipboardIslandView: View {
         // командой deleteBackward по цепочке ответчиков.
         .onDeleteCommand { deleteSelection() }
         .onChange(of: query) { _, _ in
-            selectedIDs = []
+            store.select(visibleEntries.first?.id, in: visibleEntries)
+            confirmMassDelete = false
+        }
+        .onChange(of: store.section) { _, _ in
+            store.select(visibleEntries.first?.id, in: visibleEntries)
             confirmMassDelete = false
         }
         .onChange(of: store.selectedID) { _, _ in
-            selectedIDs = []
             confirmMassDelete = false
             store.clipboardPreviewID = nil
         }
         .onChange(of: store.clipboardPreviewID) { _, id in
             if id == nil { listFocused = true }
         }
-        .onChange(of: visibleEntries.map(\.id)) { old, ids in
-            selectedIDs = []
+        .onChange(of: visibleEntries.map(\.id)) { old, _ in
             confirmMassDelete = false
-            // Выделение не пропадает: удалённую запись сменяет соседняя
-            // (то же место в списке), а на пустом выделении берётся свежая.
-            if let selectedID = store.selectedID {
-                if !ids.contains(selectedID) {
-                    let index = old.firstIndex(of: selectedID) ?? 0
-                    store.selectedID = ids.indices.contains(index) ? ids[index] : ids.last
-                }
-            } else {
-                store.selectedID = ids.first
-            }
+            store.reconcileSelection(from: old, in: visibleEntries)
         }
-        .overlay(alignment: .top) {
+        .overlay(alignment: bottom ? .bottom : .top) {
             // Массовое выделение и подтверждение видны пользователю:
             // молчаливое ожидание второго Delete было бы ловушкой.
-            if !selectedIDs.isEmpty {
+            if store.selectedIDs.count > 1 {
                 let deletable = visibleEntries
-                    .filter { selectedIDs.contains($0.id) && !$0.favorite }
+                    .filter { store.selectedIDs.contains($0.id) && !$0.favorite }
                     .count
                 Text(confirmMassDelete
                      ? "Удалить \(deletable)? Нажмите Delete ещё раз, Esc — отмена"
-                     : "Выбрано: \(selectedIDs.count) · Delete — удалить, Esc — снять")
+                     : "Выбрано: \(store.selectedIDs.count) · Delete — удалить, Esc — снять")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(confirmMassDelete ? AzaStyle.danger : AzaStyle.muted)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 5)
                     .background(AzaStyle.deep, in: Capsule())
                     .overlay(Capsule().stroke(AzaStyle.glassEdge))
-                    .padding(.top, 6)
+                    .padding(bottom ? .bottom : .top, bottom ? 1 : 6)
             }
         }
         .overlay(alignment: .bottom) {
@@ -1164,7 +1160,7 @@ private struct ClipboardIslandView: View {
                         .overlay(Capsule().stroke(AzaStyle.glassEdge))
                     }
                     .buttonStyle(.plain)
-                    .padding(.bottom, 10)
+                    .padding(.bottom, bottom && store.selectedIDs.count > 1 ? 32 : 10)
                     .transition(.opacity.combined(with: .offset(y: 8)))
                 }
             }
@@ -1175,12 +1171,11 @@ private struct ClipboardIslandView: View {
     }
 
     private func deleteSelection() {
-        if selectedIDs.isEmpty {
+        if store.selectedIDs.count <= 1 {
             if let id = store.selectedID { store.delete(id) }
         } else if confirmMassDelete {
             // Массовое удаление требует подтверждения (§8.7).
-            store.commands.deleteAll(visibleEntries.filter { selectedIDs.contains($0.id) })
-            selectedIDs = []
+            store.commands.deleteAll(visibleEntries.filter { store.selectedIDs.contains($0.id) })
             confirmMassDelete = false
         } else {
             confirmMassDelete = true
@@ -1193,7 +1188,7 @@ private struct ClipboardCard: View {
     let selected: Bool
     var bottom = false
     var height: CGFloat = 142
-    let select: () -> Void
+    let select: (NSEvent.ModifierFlags) -> Void
     let reuse: () -> Void
     let favorite: () -> Void
     let delete: () -> Void
@@ -1201,6 +1196,10 @@ private struct ClipboardCard: View {
     @State private var hovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let selectionColor = Color(red: 0, green: 0.4, blue: 1)
+
+    private var clickModifiers: NSEvent.ModifierFlags {
+        NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
+    }
 
     private var accent: Color {
         if bottom {
@@ -1308,8 +1307,10 @@ private struct ClipboardCard: View {
         .scaleEffect(hovering && !selected && !reduceMotion ? 1.02 : 1)
         .animation(reduceMotion ? nil : .easeOut(duration: AzaMotion.micro), value: hovering)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .onTapGesture(count: 2, perform: reuse)
-        .simultaneousGesture(TapGesture().onEnded(select))
+        .onTapGesture(count: 2) {
+            if clickModifiers.intersection([.shift, .command]).isEmpty { reuse() }
+        }
+        .simultaneousGesture(TapGesture().onEnded { select(clickModifiers) })
         .onHover { hovering = $0 }
         .contextMenu {
             Button(entry.favorite ? "Убрать из избранного" : "В избранное", action: favorite)
@@ -1634,7 +1635,7 @@ private struct SectionButton: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(active ? (light ? .blue : AzaStyle.rise)
+                .foregroundStyle(active ? Color.black
                                  : light ? Color.primary : hovering ? AzaStyle.ink : AzaStyle.muted)
                 .frame(width: width, height: 32)
                 .contentShape(Rectangle())
@@ -1642,8 +1643,7 @@ private struct SectionButton: View {
             .buttonStyle(.plain)
             .background {
                 if active {
-                    Capsule().fill(AzaStyle.rise.opacity(0.18))
-                        .overlay(Capsule().stroke(AzaStyle.rise.opacity(0.45)))
+                    Capsule().fill(AzaStyle.rise)
                         .matchedGeometryEffect(id: "sectionPill", in: pillNS)
                 } else {
                     Capsule().fill(light ? .white.opacity(hovering ? 0.5 : 0.2)

@@ -201,7 +201,9 @@ final class IslandStore: ObservableObject {
     /// плашку толще самого выреза.
     @Published var notchWidth: CGFloat = AzaStyle.notchWidth
     @Published var notchHeight: CGFloat = 32
-    @Published var selectedID: ClipEntry.ID?
+    @Published private(set) var selectedID: ClipEntry.ID?
+    @Published private(set) var selectedIDs: Set<ClipEntry.ID> = []
+    private var selectionAnchorID: ClipEntry.ID?
     @Published var clipboardPreviewID: ClipEntry.ID?
     /// Разделы буфера: транскрипты диктовок живут отдельно и не забивают
     /// историю; избранное — сквозное (и обычные записи, и транскрипты).
@@ -757,11 +759,65 @@ final class IslandStore: ObservableObject {
         }
     }
 
-    func moveSelection(by offset: Int, in visible: [ClipEntry]) {
+    /// Одна модель выбора для мыши, клавиатуры, рамок и удаления.
+    func select(_ id: ClipEntry.ID?, modifiers: NSEvent.ModifierFlags = [],
+                in visible: [ClipEntry]) {
+        clipboardPreviewID = nil
+        let ids = visible.map(\.id)
+        guard let id, let index = ids.firstIndex(of: id) else {
+            selectedID = nil
+            selectedIDs = []
+            selectionAnchorID = nil
+            return
+        }
+        if modifiers.contains(.shift),
+           let anchor = selectionAnchorID ?? selectedID,
+           let start = ids.firstIndex(of: anchor) {
+            let range = Set(ids[min(start, index)...max(start, index)])
+            selectedIDs = modifiers.contains(.command) ? selectedIDs.union(range) : range
+            selectionAnchorID = anchor
+            selectedID = id
+        } else if modifiers.contains(.command) {
+            if !selectedIDs.insert(id).inserted { selectedIDs.remove(id) }
+            selectedID = selectedIDs.contains(id) ? id : ids.first { selectedIDs.contains($0) }
+            selectionAnchorID = selectedID
+        } else {
+            selectedIDs = [id]
+            selectedID = id
+            selectionAnchorID = id
+        }
+    }
+
+    func selectAll(in visible: [ClipEntry]) {
+        selectedIDs = Set(visible.map(\.id))
+        if selectedID.map({ !selectedIDs.contains($0) }) ?? true {
+            selectedID = visible.first?.id
+        }
+        selectionAnchorID = selectedID
+        clipboardPreviewID = nil
+    }
+
+    func reconcileSelection(from old: [ClipEntry.ID], in visible: [ClipEntry]) {
+        let ids = visible.map(\.id)
+        selectedIDs.formIntersection(ids)
+        if selectedIDs.isEmpty {
+            let index = selectedID.flatMap { old.firstIndex(of: $0) } ?? 0
+            select(ids.indices.contains(index) ? ids[index] : ids.last, in: visible)
+        } else {
+            if selectedID.map({ !selectedIDs.contains($0) }) ?? true {
+                selectedID = ids.first { selectedIDs.contains($0) }
+            }
+            if selectionAnchorID.map({ !ids.contains($0) }) ?? true {
+                selectionAnchorID = selectedID
+            }
+        }
+    }
+
+    func moveSelection(by offset: Int, in visible: [ClipEntry], extending: Bool = false) {
         guard !visible.isEmpty else { return }
-        let current = visible.firstIndex { $0.id == selectedID } ?? 0
-        let next = min(max(current + offset, 0), visible.count - 1)
-        selectedID = visible[next].id
+        let current = visible.firstIndex { $0.id == selectedID }
+        let next = current.map { min(max($0 + offset, 0), visible.count - 1) } ?? 0
+        select(visible[next].id, modifiers: extending ? .shift : [], in: visible)
     }
 
     func toggleFavorite(_ id: ClipEntry.ID) {
